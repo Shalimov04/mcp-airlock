@@ -41,6 +41,22 @@ MCP SDK. Весь прокси — одно Starlette-приложение и н
 
 ## Запуск
 
+Выпущенная версия, без клонирования:
+
+```
+uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
+```
+
+То же самое контейнером. Образ слушает `0.0.0.0:9000`, работает не от root и пишет
+`audit.jsonl` в `/data`:
+
+```
+docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
+  ghcr.io/shalimov04/mcp-airlock:0.1 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
+```
+
+Из чекаута:
+
 ```
 uv sync
 uv run pytest
@@ -59,6 +75,9 @@ uv run python demo.py
 ![демо: запрещённый тул, принудительный dry run, одноразовое подтверждение, помеченная инъекция](docs/demo.gif)
 
 Перезаписать гиф: `uv run --with pillow python docs/make_demo_gif.py`.
+
+В `docs/clients.md` показано, как направить Claude Code и Cursor через прокси и что видит
+агент, когда вызов отклонён или ждёт подтверждения.
 
 С настоящим сервером:
 
@@ -255,6 +274,9 @@ src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция
 src/mcp_airlock/audit_cli.py   airlock-audit
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
 tests/fake_upstream.py         фейковый сервер для тестов и демо
+docs/clients.md                подключение Claude Code и Cursor (по-английски)
+Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock
+server.json                    манифест для MCP Registry
 docs/make_demo_gif.py          записывает docs/demo.gif
 examples/policies/             политики для GitHub, Grafana, Kubernetes
 ```

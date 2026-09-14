@@ -43,6 +43,22 @@ that produced it in `_meta`.
 
 ## Running it
 
+The released version, no clone needed:
+
+```
+uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
+```
+
+The same as a container. The image listens on `0.0.0.0:9000`, runs as a non-root user and
+writes `audit.jsonl` into `/data`:
+
+```
+docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
+  ghcr.io/shalimov04/mcp-airlock:0.1 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
+```
+
+From a checkout:
+
 ```
 uv sync
 uv run pytest
@@ -61,6 +77,9 @@ works exactly once, and a poisoned read result comes back flagged:
 ![demo: refused tool, forced dry run, one-shot confirmation, injection flagged](docs/demo.gif)
 
 `docs/make_demo_gif.py` re-records it (`uv run --with pillow python docs/make_demo_gif.py`).
+
+`docs/clients.md` shows how to point Claude Code and Cursor at the proxy and what the agent
+sees when a call is refused or held for confirmation.
 
 Against a real server:
 
@@ -253,6 +272,9 @@ src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction
 src/mcp_airlock/audit_cli.py   airlock-audit
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
 tests/fake_upstream.py         the fake server the tests and demo run against
+docs/clients.md                connecting Claude Code and Cursor
+Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image
+server.json                    MCP Registry manifest
 docs/make_demo_gif.py          records docs/demo.gif
 examples/policies/             GitHub, Grafana, Kubernetes policies
 ```
@@ -260,3 +282,5 @@ examples/policies/             GitHub, Grafana, Kubernetes policies
 Tests: `uv run pytest`. Set `AIRLOCK_TEST_PG_DSN` to a Postgres DSN to also run the
 store and audit tests against a real database, for example with
 `docker run -d -e POSTGRES_PASSWORD=airlock -e POSTGRES_USER=airlock -p 5432:5432 postgres:16-alpine`.
+
+<!-- mcp-name: io.github.Shalimov04/mcp-airlock -->

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Shalimov04/mcp-airlock",
+  "title": "mcp-airlock",
+  "description": "Governance proxy for MCP servers: allowlist, forced dry run, human confirmation, blast radius, audit",
+  "repository": {
+    "url": "https://github.com/Shalimov04/mcp-airlock",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "mcp-airlock",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:9000/mcp",
+        "headers": [
+          {
+            "name": "Authorization",
+            "description": "Bearer JWT identifying the caller; the proxy refuses calls without a principal",
+            "isRequired": true,
+            "isSecret": true
+          }
+        ]
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--policy",
+          "description": "Policy YAML: which tools are allowed and at which tier per environment",
+          "format": "filepath",
+          "isRequired": true,
+          "valueHint": "policy.yaml"
+        },
+        {
+          "type": "named",
+          "name": "--upstream",
+          "description": "The MCP server being proxied",
+          "isRequired": true,
+          "valueHint": "http://127.0.0.1:8080/mcp"
+        },
+        {
+          "type": "named",
+          "name": "--env",
+          "description": "Environment name, selects the tier column in the policy",
+          "default": "prod"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "AIRLOCK_JWT_SECRET",
+          "description": "HS256 secret for verifying bearer tokens (or set AIRLOCK_JWKS_URL for OIDC)",
+          "isSecret": true
+        },
+        {
+          "name": "AIRLOCK_SECRET",
+          "description": "Key for signing confirmation tokens; set it when running more than one replica",
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
