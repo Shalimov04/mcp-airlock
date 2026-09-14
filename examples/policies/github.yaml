@@ -1,0 +1,122 @@
+# mcp-airlock policy for github/github-mcp-server
+# Repo:        https://github.com/github/github-mcp-server
+# Tool list:   README.md "Tools" section + pkg/github/*.go at commit 7d13a7a, checked 2026-09-14.
+#              The catalog was consolidated upstream: create_issue/update_issue/get_issue are now
+#              issue_write / issue_read, get_pull_request* is pull_request_read, review tools are
+#              pull_request_review_write. Names below are the current ones.
+# Environments: GitHub has no "staging"; treat a sandbox org as `dev` and the real org as `prod`.
+#
+# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 → denied,
+# L2 → the human is prompted WITHOUT a dry-run preview, L3 → executed as sent. Verify against the
+# live catalog with `airlock-policy diff <file> --upstream <url>`.
+#
+# Omitted on purpose (not allowlisted → denied): delete_repository, create_repository, fork_repository,
+# create_repository_ruleset, projects_write, custom_properties_write, gist/notification/copilot tools.
+# Add them here if an agent really needs them; put anything irreversible at L2.
+version: 1
+environment: prod
+output:
+  max_chars: 16000
+  chars_per_token: 4
+blast_radius:
+  max_per_call: 50
+  max_per_principal: 500
+  window_s: 3600
+tools:
+  # ---- reads: L0 everywhere ---------------------------------------------------------------------
+  get_me:                      {tiers: {dev: L0, prod: L0}}
+  get_file_contents:           {tiers: {dev: L0, prod: L0}}
+  get_repository_tree:         {tiers: {dev: L0, prod: L0}}
+  list_branches:               {tiers: {dev: L0, prod: L0}}
+  list_commits:                {tiers: {dev: L0, prod: L0}}
+  get_commit:                  {tiers: {dev: L0, prod: L0}}
+  list_tags:                   {tiers: {dev: L0, prod: L0}}
+  get_tag:                     {tiers: {dev: L0, prod: L0}}
+  list_releases:               {tiers: {dev: L0, prod: L0}}
+  get_latest_release:          {tiers: {dev: L0, prod: L0}}
+  get_release_by_tag:          {tiers: {dev: L0, prod: L0}}
+  search_code:                 {tiers: {dev: L0, prod: L0}, output: {max_chars: 8000}}
+  search_repositories:         {tiers: {dev: L0, prod: L0}}
+  search_commits:              {tiers: {dev: L0, prod: L0}}
+  list_issues:                 {tiers: {dev: L0, prod: L0}}
+  issue_read:                  {tiers: {dev: L0, prod: L0}}
+  search_issues:               {tiers: {dev: L0, prod: L0}}
+  list_issue_types:            {tiers: {dev: L0, prod: L0}}
+  list_issue_fields:           {tiers: {dev: L0, prod: L0}}
+  get_label:                   {tiers: {dev: L0, prod: L0}}
+  list_label:                  {tiers: {dev: L0, prod: L0}}
+  list_pull_requests:          {tiers: {dev: L0, prod: L0}}
+  pull_request_read:           {tiers: {dev: L0, prod: L0}}
+  search_pull_requests:        {tiers: {dev: L0, prod: L0}}
+  list_discussions:            {tiers: {dev: L0, prod: L0}}
+  get_discussion:              {tiers: {dev: L0, prod: L0}}
+  get_discussion_comments:     {tiers: {dev: L0, prod: L0}}
+  list_discussion_categories:  {tiers: {dev: L0, prod: L0}}
+  actions_list:                {tiers: {dev: L0, prod: L0}}
+  actions_get:                 {tiers: {dev: L0, prod: L0}}
+  get_job_logs:                {tiers: {dev: L0, prod: L0}, output: {max_chars: 8000}}
+  list_code_scanning_alerts:   {tiers: {dev: L0, prod: L0}}
+  get_code_scanning_alert:     {tiers: {dev: L0, prod: L0}}
+  list_dependabot_alerts:      {tiers: {dev: L0, prod: L0}}
+  list_secret_scanning_alerts: {tiers: {dev: L0, prod: L0}}
+
+  # ---- comments / issues / PR metadata: L3 in dev, L2 in prod ----------------------------------
+  add_issue_comment:
+    description: comment on (or react to) an issue or PR; visible to everyone, deletable by hand
+    tiers: {dev: L3, prod: L2}
+  issue_write:
+    description: create or update an issue (method=create|update); reversible via the UI
+    tiers: {dev: L3, prod: L2}
+  sub_issue_write:
+    description: add/remove/reprioritize sub-issues on a parent issue
+    tiers: {dev: L3, prod: L2}
+  label_write:
+    description: create/update/delete labels in a repo
+    tiers: {dev: L3, prod: L2}
+  discussion_comment_write:
+    description: create/update/delete a discussion comment
+    tiers: {dev: L3, prod: L2}
+  create_pull_request:
+    description: open a pull request from an existing branch (no code changes by itself)
+    tiers: {dev: L3, prod: L2}
+  update_pull_request:
+    description: edit PR title/body/base/draft/reviewers or close it
+    tiers: {dev: L3, prod: L2}
+  update_pull_request_branch:
+    description: merge the base branch into the PR head (creates a commit on the PR branch)
+    tiers: {dev: L3, prod: L2}
+  pull_request_review_write:
+    description: create/submit/delete a PR review (approve or request changes)
+    tiers: {dev: L3, prod: L2}
+  add_comment_to_pending_review:
+    description: add a line comment to a pending review
+    tiers: {dev: L3, prod: L2}
+  add_reply_to_pull_request_comment:
+    description: reply to an existing PR review comment
+    tiers: {dev: L3, prod: L2}
+  create_branch:
+    description: create a branch from another ref (cheap, deletable)
+    tiers: {dev: L3, prod: L2}
+
+  # ---- file writes, merges, deletions, workflow triggers: L2 everywhere -------------------------
+  create_or_update_file:
+    description: commit one file to a branch (overwrites the previous content)
+    tiers: {dev: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 30, window_s: 3600}
+  push_files:
+    description: commit several files to a branch in one push (overwrites previous content)
+    tiers: {dev: L2, prod: L2}
+    count_arg: files
+    blast_radius: {max_per_call: 10, max_per_principal: 50, window_s: 3600}
+  delete_file:
+    description: delete a file from a branch (recoverable only from git history)
+    tiers: {dev: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}
+  merge_pull_request:
+    description: merge a pull request into its base branch (irreversible without a revert commit)
+    tiers: {dev: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+  actions_run_trigger:
+    description: run/rerun/cancel a workflow run or delete its logs (method=run_workflow|rerun_workflow_run|rerun_failed_jobs|cancel_workflow_run|delete_workflow_run_logs)
+    tiers: {dev: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}

@@ -1,0 +1,115 @@
+# mcp-airlock policy for grafana/mcp-grafana
+# Repo:        https://github.com/grafana/mcp-grafana
+# Tool list:   README.md tools table + tools/*.go (mcpgrafana.MustTool registrations) at commit
+#              f09ba50, checked 2026-09-14. The alert-rule tools were consolidated upstream:
+#              list_alert_rules / get_alert_rule_by_uid are now one tool, alerting_manage_rules,
+#              with an `operation` argument (list|get|versions|create|update|delete).
+#
+# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 → denied,
+# L2 → the human is prompted WITHOUT a dry-run preview, L3 → executed as sent. Verify against the
+# live catalog with `airlock-policy diff <file> --upstream <url>`.
+#
+# airlock tiers by tool name, not by `operation`. Tools that mix reads and writes in one name
+# (alerting_manage_rules, alerting_manage_silences) are tiered for their most dangerous operation.
+# Run mcp-grafana with --disable-write to get their read-only variants (list/get only), then move
+# them to L0 here.
+#
+# Omitted on purpose: grafana_api_request (arbitrary HTTP against Grafana), create/update_datasource,
+# install_plugin, create_folder, create/delete_snapshot, ask_assistant, agento11y_* (CRUD on eval
+# rules/experiments; tier them if you use Agent Observability).
+version: 1
+environment: prod
+output:
+  max_chars: 16000
+  chars_per_token: 4
+blast_radius:
+  max_per_call: 50
+  max_per_principal: 500
+  window_s: 3600
+tools:
+  # ---- reads: L0 everywhere ---------------------------------------------------------------------
+  user_info:                        {tiers: {dev: L0, staging: L0, prod: L0}}
+  search_dashboards:                {tiers: {dev: L0, staging: L0, prod: L0}}
+  search_folders:                   {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_dashboard_by_uid:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_dashboard_summary:            {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_dashboard_panel_queries:      {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_dashboard_property:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_datasources:                 {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_datasource:                   {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_query_examples:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  generate_deeplink:                {tiers: {dev: L0, staging: L0, prod: L0}}
+  # metric / log / panel queries: smaller cap, raw series and log lines flood the context
+  query_prometheus:                 {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  query_prometheus_histogram:       {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  list_prometheus_metric_metadata:  {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  list_prometheus_metric_names:     {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  list_prometheus_label_names:      {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_prometheus_label_values:     {tiers: {dev: L0, staging: L0, prod: L0}}
+  query_loki_logs:                  {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  query_loki_stats:                 {tiers: {dev: L0, staging: L0, prod: L0}}
+  query_loki_patterns:              {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  list_loki_label_names:            {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_loki_label_values:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  run_panel_query:                  {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  query_sql:                        {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  list_sql_databases:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_sql_tables:                  {tiers: {dev: L0, staging: L0, prod: L0}}
+  describe_sql_table:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  # alerting / incidents / oncall / annotations reads
+  alerting_manage_routing:          {tiers: {dev: L0, staging: L0, prod: L0}}   # operation enum is get_* only
+  get_annotations:                  {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_annotation_tags:              {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_incidents:                   {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_incident:                     {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_incident_custom_fields:      {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_oncall_schedules:            {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_oncall_shift:                 {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_current_oncall_users:         {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_oncall_teams:                {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_oncall_users:                {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_alert_groups:                {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_alert_group:                  {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_sift_investigations:         {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_sift_investigation:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  get_sift_analysis:                {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- annotations / incidents / alert groups: L3 in dev, L2 in staging and prod ---------------
+  create_annotation:
+    description: add an annotation to a dashboard or globally (deletable)
+    tiers: {dev: L3, staging: L2, prod: L2}
+  update_annotation:
+    description: partially update an existing annotation
+    tiers: {dev: L3, staging: L2, prod: L2}
+  create_incident:
+    description: open an incident in Grafana Incident (pages people, creates a channel)
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 3, window_s: 3600}
+  add_activity_to_incident:
+    description: post a timeline note to an existing incident
+    tiers: {dev: L3, staging: L2, prod: L2}
+  update_incident:
+    description: change incident status/severity/title/custom fields
+    tiers: {dev: L3, staging: L2, prod: L2}
+  update_alert_group:
+    description: acknowledge/unacknowledge/resolve/unresolve an OnCall alert group (silences paging)
+    tiers: {dev: L3, staging: L2, prod: L2}
+
+  # ---- dashboards, alert rules, silences, deletions: L2 (L3 only in dev where noted) ------------
+  update_dashboard:
+    description: create or overwrite a dashboard, or apply JSONPath patch operations to one
+    tiers: {dev: L2, staging: L2, prod: L2}
+    count_arg: operations                  # patch ops per call; a full-JSON replace counts as 1
+    blast_radius: {max_per_call: 20, max_per_principal: 100, window_s: 3600}
+  alerting_manage_rules:
+    description: alert rules CRUD in one tool (operation=list|get|versions|create|update|delete); tiered for delete
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}
+  alerting_manage_silences:
+    description: silences CRUD in one tool (operation=list|get|create|update|delete); a silence mutes paging
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}
+  delete_annotation:
+    description: delete an annotation by id (irreversible)
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}

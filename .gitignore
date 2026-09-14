@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+audit.jsonl
+spans.jsonl
+!examples/*.jsonl
+.pytest_cache/

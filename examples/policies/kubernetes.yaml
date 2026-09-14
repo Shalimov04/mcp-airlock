@@ -1,0 +1,80 @@
+# mcp-airlock policy for containers/kubernetes-mcp-server (the Go server also shipped as
+# @kubernetes-mcp-server / used by Podman Desktop and OpenShift Lightspeed)
+# Repo:        https://github.com/containers/kubernetes-mcp-server
+# Tool list:   README.md + pkg/toolsets/{core,config,helm}/*.go at commit 77371bb, checked 2026-09-14.
+#              Only the default toolsets (config, core) plus helm are covered. kcp, kiali, kubevirt,
+#              netobserv and tekton tools are not allowlisted; add them when you enable those toolsets.
+#
+# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 → denied,
+# L2 → the human is prompted WITHOUT a dry-run preview, L3 → executed as sent. Verify against the
+# live catalog with `airlock-policy diff <file> --upstream <url>`.
+#
+# Belt and braces: in prod also start the server with --disable-destructive (or --read-only), so a
+# policy mistake here cannot turn into a delete.
+#
+# Not allowlisted, on purpose:
+#   pods_exec   — arbitrary command inside a container; no preview is possible and the upstream
+#                 itself marks it destructive. Grant it in a separate, tightly scoped policy if needed.
+#   port-forward — this server has no port-forward tool (checked 77371bb); nothing to tier.
+#   resources_scale and resources_create_or_update are the only scale/patch primitives here:
+#   there is no separate patch tool, create_or_update is server-side apply.
+version: 1
+environment: prod
+output:
+  max_chars: 16000
+  chars_per_token: 4
+blast_radius:
+  max_per_call: 50
+  max_per_principal: 500
+  window_s: 3600
+tools:
+  # ---- get / list / describe / logs: L0 everywhere ---------------------------------------------
+  configuration_contexts_list: {tiers: {dev: L0, staging: L0, prod: L0}}
+  configuration_view:          {tiers: {dev: L0, staging: L0, prod: L0}}
+  targets_list:                {tiers: {dev: L0, staging: L0, prod: L0}}
+  namespaces_list:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  projects_list:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  events_list:                 {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  pods_list:                   {tiers: {dev: L0, staging: L0, prod: L0}}
+  pods_list_in_namespace:      {tiers: {dev: L0, staging: L0, prod: L0}}
+  pods_get:                    {tiers: {dev: L0, staging: L0, prod: L0}}
+  pods_log:                    {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  pods_top:                    {tiers: {dev: L0, staging: L0, prod: L0}}
+  nodes_top:                   {tiers: {dev: L0, staging: L0, prod: L0}}
+  nodes_log:                   {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  nodes_stats_summary:         {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  resources_list:              {tiers: {dev: L0, staging: L0, prod: L0}}
+  resources_get:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  helm_list:                   {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- scale / apply: L3 dev, L1 staging (dry-run only → denied, see caveat), L2 prod ----------
+  resources_scale:
+    description: set replicas on a Deployment/StatefulSet/ReplicaSet (reversible; without `scale` it only reads, but airlock cannot tell)
+    tiers: {dev: L3, staging: L1, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}
+  resources_create_or_update:
+    description: server-side apply of one or more manifests (create or patch any kind, incl. RBAC and CRDs)
+    tiers: {dev: L3, staging: L1, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 20, window_s: 3600}
+  pods_run:
+    description: run a container image as a new pod (creates a workload)
+    tiers: {dev: L3, staging: L1, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+  helm_install:
+    description: install a Helm chart as a new release (may create cluster-wide objects)
+    tiers: {dev: L3, staging: L1, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+
+  # ---- delete: L2 everywhere, one object per call ------------------------------------------------
+  pods_delete:
+    description: delete a pod (the controller usually recreates it; standalone pods are gone)
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+  resources_delete:
+    description: delete any resource by kind/name (irreversible; PVCs, namespaces, CRDs included)
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 3, window_s: 3600}
+  helm_uninstall:
+    description: uninstall a Helm release and everything it owns (irreversible)
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 2, window_s: 3600}

@@ -1,0 +1,29 @@
+# mcp-airlock policy. Default-deny: a tool not listed here is refused.
+# Tier is assigned per (tool, environment): L0 read | L1 suggest (dry-run only) | L2 confirm (MRTR) | L3 auto.
+version: 1
+environment: prod            # overridden by --env / AIRLOCK_ENV
+output:
+  max_chars: 16000           # applies to the serialized tool result; est_tokens = chars / chars_per_token
+  chars_per_token: 4
+blast_radius:
+  max_per_call: 50           # objects per call (len(count_arg) or 1)
+  max_per_principal: 500     # objects per principal per window (non-dry-run calls only)
+  window_s: 3600
+tools:
+  list_services:
+    tiers: {dev: L0, staging: L0, prod: L0}
+  get_service:
+    tiers: {dev: L0, staging: L0, prod: L0}
+    output: {max_chars: 5000}
+  set_replicas:
+    description: scale services up/down (reversible)
+    tiers: {dev: L3, staging: L1, prod: L2}
+    count_arg: names
+    blast_radius: {max_per_call: 3, max_per_principal: 5, window_s: 3600}
+  delete_service:
+    description: permanently delete a service (irreversible)
+    tiers: {dev: L2, prod: L2}          # no staging entry → denied in staging
+    blast_radius: {max_per_call: 1, max_per_principal: 2, window_s: 86400}
+  restart_service:
+    description: restart a service (the tool has no dry_run argument → airlock refuses L1/L2 for it)
+    tiers: {dev: L3, prod: L2}

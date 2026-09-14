@@ -1,0 +1,432 @@
+{
+    "name": "server/discover",
+    "context": {
+        "trace_id": "0x6b89ee1a33c6dcb49bbb2e50a858cbac",
+        "span_id": "0x34185d530e2882ec",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.308924Z",
+    "end_time": "2026-09-14T07:17:28.314809Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "server/discover",
+        "rpc.method": "server/discover",
+        "enduser.id": "alice"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "tools/list",
+    "context": {
+        "trace_id": "0x85ab4d77ffbd09e3f8f64c38e4280bca",
+        "span_id": "0xa11b8937f4d8036f",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.315647Z",
+    "end_time": "2026-09-14T07:17:28.316871Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "tools/list",
+        "rpc.method": "tools/list",
+        "enduser.id": "alice"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool get_service",
+    "context": {
+        "trace_id": "0x50b7f9b15ee9379f2f4d0623d4a08d7c",
+        "span_id": "0x2bcc69e13ac348ed",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.317690Z",
+    "end_time": "2026-09-14T07:17:28.321526Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "get_service",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "allow",
+        "airlock.rule_id": "tier.L0.read",
+        "airlock.tier": "L0"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool list_services",
+    "context": {
+        "trace_id": "0x9a3d38f2c413714882db6fabad0704aa",
+        "span_id": "0xb0e537ffe805b989",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.322786Z",
+    "end_time": "2026-09-14T07:17:28.322879Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "list_services",
+        "gen_ai.tool.call.id": "1",
+        "airlock.verdict": "deny"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool rm_rf",
+    "context": {
+        "trace_id": "0x261185b248799009f120231d13073fb3",
+        "span_id": "0x30469cd1dbafb505",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.323711Z",
+    "end_time": "2026-09-14T07:17:28.323783Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "rm_rf",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "deny",
+        "airlock.rule_id": "allowlist.deny",
+        "airlock.tier": ""
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool get_service",
+    "context": {
+        "trace_id": "0x4b0a7ed9b7960606186eb6d9594b6523",
+        "span_id": "0xaba31f398ee597fc",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.324618Z",
+    "end_time": "2026-09-14T07:17:28.326725Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "get_service",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "allow",
+        "airlock.rule_id": "tier.L0.read",
+        "airlock.tier": "L0",
+        "airlock.suspicious": 6
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool delete_service",
+    "context": {
+        "trace_id": "0x043b661a8549d54213a55cb0df0884c2",
+        "span_id": "0x9dd5ef035d50cba6",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.327893Z",
+    "end_time": "2026-09-14T07:17:28.331357Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "delete_service",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "confirm",
+        "airlock.rule_id": "tier.L2.confirm",
+        "airlock.tier": "L2"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool delete_service",
+    "context": {
+        "trace_id": "0xe6092201d47bfdbd5d64dc7b665caf1f",
+        "span_id": "0xb69d9fe097fb3c3f",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.332418Z",
+    "end_time": "2026-09-14T07:17:28.335619Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "delete_service",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "allow",
+        "airlock.rule_id": "tier.L2.confirmed",
+        "airlock.tier": "L2"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool delete_service",
+    "context": {
+        "trace_id": "0x7515079f335745284a23acff60751a47",
+        "span_id": "0x37957319f548aa55",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.336513Z",
+    "end_time": "2026-09-14T07:17:28.337733Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "delete_service",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "allow",
+        "airlock.rule_id": "tier.L2.confirmed",
+        "airlock.tier": "L2"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool set_replicas",
+    "context": {
+        "trace_id": "0xa9a7dcbdd1a479c75b176ebf5089917f",
+        "span_id": "0x8e5bc799443eb81a",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.338790Z",
+    "end_time": "2026-09-14T07:17:28.340404Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "set_replicas",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "deny",
+        "airlock.rule_id": "blast_radius.per_call",
+        "airlock.tier": "L2"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool get_service",
+    "context": {
+        "trace_id": "0xce6d31ab1b56c792ef263f6f8cd51e73",
+        "span_id": "0x78687d5b47a26e65",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.341463Z",
+    "end_time": "2026-09-14T07:17:28.344565Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "get_service",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "allow",
+        "airlock.rule_id": "tier.L0.read",
+        "airlock.tier": "L0"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}
+{
+    "name": "execute_tool restart_service",
+    "context": {
+        "trace_id": "0x555230ff5c7c4139d16350b6bbf3b345",
+        "span_id": "0x22ad9339e6dea4f2",
+        "trace_state": "[]"
+    },
+    "kind": "SpanKind.SERVER",
+    "parent_id": null,
+    "start_time": "2026-09-14T07:17:28.345452Z",
+    "end_time": "2026-09-14T07:17:28.346624Z",
+    "status": {
+        "status_code": "UNSET"
+    },
+    "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "rpc.method": "tools/call",
+        "gen_ai.tool.name": "restart_service",
+        "gen_ai.tool.call.id": "1",
+        "enduser.id": "alice",
+        "airlock.verdict": "confirm",
+        "airlock.rule_id": "tier.L2.confirm",
+        "airlock.tier": "L2"
+    },
+    "events": [],
+    "links": [],
+    "resource": {
+        "attributes": {
+            "telemetry.sdk.language": "python",
+            "telemetry.sdk.name": "opentelemetry",
+            "telemetry.sdk.version": "1.44.0",
+            "service.instance.id": "d7252c36-0bc9-49da-b02d-da484d01ad77",
+            "service.name": "mcp-airlock"
+        },
+        "schema_url": ""
+    }
+}

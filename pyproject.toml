@@ -1,0 +1,35 @@
+[project]
+name = "mcp-airlock"
+version = "0.1.0"
+description = "Stateless governance proxy for MCP (2026-07-28): policy, dry-run, human confirmation, audit, tracing"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.1",
+    "mcp>=2.2.0",
+    "opentelemetry-api>=1.44.0",
+    "opentelemetry-sdk>=1.44.0",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.13.5",
+    "pyjwt>=2.10",
+    "pyyaml>=6.0.3",
+    "starlette>=1.6.0",
+    "uvicorn>=0.52.4",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
+
+[project.scripts]
+mcp-airlock = "mcp_airlock.__main__:main"
+airlock-audit = "mcp_airlock.audit_cli:main"
+airlock-policy = "mcp_airlock.policy_cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
