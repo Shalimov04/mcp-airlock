@@ -52,6 +52,14 @@ uv run python demo.py
 повтор, blast radius, обрезка вывода, разметка инъекции) и оставляет журнал аудита и
 спаны в `examples/`.
 
+Коротко и на том же фейковом upstream. Агент пытается удалить сервис в проде, вместо
+этого получает dry run и запрос подтверждения, подтверждение срабатывает ровно один раз,
+а отравленный результат чтения возвращается с пометкой:
+
+![демо: запрещённый тул, принудительный dry run, одноразовое подтверждение, помеченная инъекция](docs/demo.gif)
+
+Перезаписать гиф: `uv run --with pillow python docs/make_demo_gif.py`.
+
 С настоящим сервером:
 
 ```
@@ -247,6 +255,7 @@ src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция
 src/mcp_airlock/audit_cli.py   airlock-audit
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
 tests/fake_upstream.py         фейковый сервер для тестов и демо
+docs/make_demo_gif.py          записывает docs/demo.gif
 examples/policies/             политики для GitHub, Grafana, Kubernetes
 ```
 

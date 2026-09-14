@@ -54,6 +54,14 @@ walks through the interesting cases (refused tool, forced dry run, confirmation,
 blast radius, output cap, injection marking) and leaves the audit log and spans in
 `examples/`.
 
+The short version, recorded against that same fake upstream. An agent tries to delete
+a production service, gets a dry run and a confirmation prompt instead, the confirmation
+works exactly once, and a poisoned read result comes back flagged:
+
+![demo: refused tool, forced dry run, one-shot confirmation, injection flagged](docs/demo.gif)
+
+`docs/make_demo_gif.py` re-records it (`uv run --with pillow python docs/make_demo_gif.py`).
+
 Against a real server:
 
 ```
@@ -245,6 +253,7 @@ src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction
 src/mcp_airlock/audit_cli.py   airlock-audit
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
 tests/fake_upstream.py         the fake server the tests and demo run against
+docs/make_demo_gif.py          records docs/demo.gif
 examples/policies/             GitHub, Grafana, Kubernetes policies
 ```
 
