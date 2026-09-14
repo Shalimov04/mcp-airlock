@@ -5,17 +5,17 @@
 #              Only the default toolsets (config, core) plus helm are covered. kcp, kiali, kubevirt,
 #              netobserv and tekton tools are not allowlisted; add them when you enable those toolsets.
 #
-# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 → denied,
-# L2 → the human is prompted WITHOUT a dry-run preview, L3 → executed as sent. Verify against the
+# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 is denied,
+# L2 prompts the human WITHOUT a dry-run preview, L3 executes as sent. Verify against the
 # live catalog with `airlock-policy diff <file> --upstream <url>`.
 #
 # Belt and braces: in prod also start the server with --disable-destructive (or --read-only), so a
 # policy mistake here cannot turn into a delete.
 #
 # Not allowlisted, on purpose:
-#   pods_exec   — arbitrary command inside a container; no preview is possible and the upstream
+#   pods_exec: arbitrary command inside a container; no preview is possible and the upstream
 #                 itself marks it destructive. Grant it in a separate, tightly scoped policy if needed.
-#   port-forward — this server has no port-forward tool (checked 77371bb); nothing to tier.
+#   port-forward: this server has no port-forward tool (checked 77371bb); nothing to tier.
 #   resources_scale and resources_create_or_update are the only scale/patch primitives here:
 #   there is no separate patch tool, create_or_update is server-side apply.
 version: 1
@@ -47,7 +47,7 @@ tools:
   resources_get:               {tiers: {dev: L0, staging: L0, prod: L0}}
   helm_list:                   {tiers: {dev: L0, staging: L0, prod: L0}}
 
-  # ---- scale / apply: L3 dev, L1 staging (dry-run only → denied, see caveat), L2 prod ----------
+  # ---- scale / apply: L3 dev, L1 staging (dry-run only, so denied, see caveat), L2 prod ----------
   resources_scale:
     description: set replicas on a Deployment/StatefulSet/ReplicaSet (reversible; without `scale` it only reads, but airlock cannot tell)
     tiers: {dev: L3, staging: L1, prod: L2}

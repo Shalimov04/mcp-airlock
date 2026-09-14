@@ -22,10 +22,10 @@ tools:
     blast_radius: {max_per_call: 3, max_per_principal: 5, window_s: 3600}
   delete_service:
     description: permanently delete a service (irreversible)
-    tiers: {dev: L2, prod: L2}          # no staging entry → denied in staging
+    tiers: {dev: L2, prod: L2}          # no staging entry, so denied in staging
     blast_radius: {max_per_call: 1, max_per_principal: 2, window_s: 86400}
   restart_service:
-    description: restart a service (the tool has no dry_run argument → airlock refuses L1/L2 for it)
+    description: restart a service (the tool has no dry_run argument, so airlock refuses L1/L2 for it)
     tiers: {dev: L3, prod: L2}
   rotate_key:
     description: rotate a credential (its dry_run argument is header-mirrored)

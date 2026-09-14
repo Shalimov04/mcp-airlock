@@ -6,11 +6,11 @@
 #              pull_request_review_write. Names below are the current ones.
 # Environments: GitHub has no "staging"; treat a sandbox org as `dev` and the real org as `prod`.
 #
-# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 → denied,
-# L2 → the human is prompted WITHOUT a dry-run preview, L3 → executed as sent. Verify against the
+# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 is denied,
+# L2 prompts the human WITHOUT a dry-run preview, L3 executes as sent. Verify against the
 # live catalog with `airlock-policy diff <file> --upstream <url>`.
 #
-# Omitted on purpose (not allowlisted → denied): delete_repository, create_repository, fork_repository,
+# Omitted on purpose (not allowlisted, so denied): delete_repository, create_repository, fork_repository,
 # create_repository_ruleset, projects_write, custom_properties_write, gist/notification/copilot tools.
 # Add them here if an agent really needs them; put anything irreversible at L2.
 version: 1

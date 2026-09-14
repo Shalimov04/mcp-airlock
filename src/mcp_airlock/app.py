@@ -98,7 +98,7 @@ class Airlock:
         self.webhook, self.telegram_chat = webhook, telegram_chat
         self.notify_http = notify_http or self.http
         self.public_url = (public_url or "").rstrip("/")
-        self._catalog: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}  # (version, sub, groups) → (expires_at, tools)
+        self._catalog: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}  # (version, sub, groups) to (expires_at, tools)
         self.app = Starlette(routes=[
             Route("/mcp", self.handle, methods=["POST"]),
             Route("/approve/{token}", self.approve_page, methods=["GET"]),
@@ -143,7 +143,7 @@ class Airlock:
 
     async def verify_confirmation(self, params: dict[str, Any], principal: str, tool: str, args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Returns (mode, claims): mode is 'none' (no airlock token), 'accepted', 'pending' (token but no answer yet),
-        or 'deny:<rule>'. Never consumes the key on accept — `_call` does that right before forwarding."""
+        or 'deny:<rule>'. Never consumes the key on accept; `_call` does that right before forwarding."""
         state = params.get("requestState")
         if not isinstance(state, str) or not state.startswith(TOKEN_PREFIX):
             return "none", None  # plain call, or an upstream-owned requestState (forwarded untouched)
@@ -215,7 +215,7 @@ class Airlock:
                 return _rpc_error(rid, INTERNAL_ERROR, "airlock: internal error")
 
     async def _passthrough(self, body, headers, who: Principal, method, base) -> Response:
-        self.audit.write(phase="intent", verdict="allow", rule_id="passthrough", **base)  # raises → fail closed
+        self.audit.write(phase="intent", verdict="allow", rule_id="passthrough", **base)  # a raise here fails closed
         t0 = time.perf_counter()
         status, reply = await self.forward(body, headers, who)
         if method == "tools/list" and isinstance(reply.get("result"), dict):
@@ -296,7 +296,7 @@ class Airlock:
                 log.exception("post-processing failed; returning the upstream result as-is")
                 detail["postprocess_error"] = repr(e)
             if d.verdict == "confirm" and status == 200 and not result.get("isError"):
-                reply["result"] = self._input_required(who.sub, tool, args, result)  # preview failed → no gate, just the error
+                reply["result"] = self._input_required(who.sub, tool, args, result)  # preview failed: no gate, just the error
                 await self._notify(reply["result"], who.sub)
         self._outcome(verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
                       upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
@@ -321,7 +321,7 @@ class Airlock:
 
     # ---------- upstream catalog ----------
     async def _catalog_tools(self, headers: dict[str, str], who: Principal) -> dict[str, dict[str, Any]]:
-        """Upstream tools by name. Cached for `ttlMs` when the upstream sets one (0 → refetched every time),
+        """Upstream tools by name. Cached for `ttlMs` when the upstream sets one (0 means refetched every time),
         per caller because an upstream may filter its catalog by principal. Raises CatalogUnavailable on any failure."""
         ckey = (headers.get("mcp-protocol-version", ""), who.sub, who.groups)
         cached = self._catalog.get(ckey)
@@ -451,7 +451,7 @@ class Airlock:
                               for b in (raw if isinstance(raw, list) else [])]
             text = " ".join(b["text"] for b in preview_blocks if isinstance(b, dict) and isinstance(b.get("text"), str))[:2000]
             preview_line = f"Dry-run preview: {text or '(empty)'}"
-        message = (f"[{env}] {tool} — {rule.description or 'write operation'} (tier L2).\n"
+        message = (f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
                    f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
                    f"Confirm to execute for real. Idempotency key: {key}")
         meta = {**((preview or {}).get("_meta") or {}), META + "idempotency_key": key, META + "verdict": "confirm",

@@ -47,7 +47,7 @@ async def test_read_tool_passthrough_and_identity_propagation(client, upstream):
     res = await call(client, "get_service", {"name": "api"})
     assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L0.read"
     seen = upstream.CALLS[-1]["meta"]
-    assert seen[META + "principal"] == "alice"  # principal from header → _meta, never from arguments
+    assert seen[META + "principal"] == "alice"  # principal goes header to _meta, never from arguments
     assert seen["traceparent"].startswith("00-")
 
 

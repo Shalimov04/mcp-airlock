@@ -29,7 +29,7 @@ class MemoryStore:
         self._approved = {k: e for k, e in self._approved.items() if e >= now}
 
     async def consume_once(self, key: str, exp_ts: float) -> bool:
-        self._purge_keys()  # no await between check and set → atomic under asyncio
+        self._purge_keys()  # no await between check and set, so atomic under asyncio
         if key in self._consumed:
             return False
         self._consumed[key] = exp_ts

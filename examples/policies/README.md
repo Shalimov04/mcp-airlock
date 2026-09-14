@@ -17,7 +17,7 @@ uv run mcp-airlock --policy examples/policies/kubernetes.yaml --env prod \
     --upstream http://127.0.0.1:8080/mcp --audit audit.jsonl
 ```
 
-Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 → denied, L2 → the human is
-prompted WITHOUT a dry-run preview, L3 → executed as sent. Verify against the live catalog with
+Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 is denied, L2 prompts the human
+WITHOUT a dry-run preview, L3 executes as sent. Verify against the live catalog with
 `airlock-policy diff <file> --upstream <url>`. `tests/test_example_policies.py` only checks that the files parse and
 follow the tiering rules above; it cannot check the upstream still exposes these names.

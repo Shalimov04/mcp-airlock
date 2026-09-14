@@ -5,8 +5,8 @@
 #              list_alert_rules / get_alert_rule_by_uid are now one tool, alerting_manage_rules,
 #              with an `operation` argument (list|get|versions|create|update|delete).
 #
-# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 → denied,
-# L2 → the human is prompted WITHOUT a dry-run preview, L3 → executed as sent. Verify against the
+# Most of these write tools have no dry_run argument. Through mcp-airlock that means: L1 is denied,
+# L2 prompts the human WITHOUT a dry-run preview, L3 executes as sent. Verify against the
 # live catalog with `airlock-policy diff <file> --upstream <url>`.
 #
 # airlock tiers by tool name, not by `operation`. Tools that mix reads and writes in one name

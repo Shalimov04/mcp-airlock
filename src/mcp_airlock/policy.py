@@ -1,5 +1,5 @@
 """Flat-YAML policy: default-deny allowlist, per-(tool, environment) risk tier,
-output cap, blast radius. No DSL — if you need conditions, write a second YAML."""
+output cap, blast radius. No DSL; if you need conditions, write a second YAML."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from .store import USAGE_RETENTION_S, MemoryStore
 
 Tier = Literal["L0", "L1", "L2", "L3"]
-# L0 read      → pass through
-# L1 suggest   → write tool, always forced dry_run=true (never executes)
-# L2 confirm   → dry_run=true until a human confirms via MRTR, then executes once
-# L3 auto      → executes without confirmation
+# L0 read:     pass through
+# L1 suggest:  write tool, always forced dry_run=true (never executes)
+# L2 confirm:  dry_run=true until a human confirms via MRTR, then executes once
+# L3 auto:     executes without confirmation
 
 
 class OutputCap(BaseModel):
@@ -92,7 +92,7 @@ class Decision:
     dry_run: bool | None = None  # effective value forwarded upstream; None = argument untouched
     objects: int = 1
     message: str = ""
-    preview: bool = True  # False: L2 tool without dry_run → prompt the human without a dry-run preview
+    preview: bool = True  # False: L2 tool without dry_run, prompt the human without a dry-run preview
 
 
 class Engine:
@@ -141,7 +141,7 @@ class Engine:
             # real execution that happens to carry a stray argument (and must be charged to the window).
             d = Decision("allow", "tier.L3.auto", tier, True if requested_dry and dry_run_supported else None, n)
 
-        # Window check for anything that will (allow, real) or is about to (confirm → prompt the human) execute,
+        # Window check for anything that will (allow, real) or is about to (confirm: prompt the human) execute,
         # so nobody is asked to confirm an action the limit will refuse. Recording happens in `record`.
         if self._counts(d):
             used = await self.store.usage_sum(principal, tool, time.time() - blast.window_s)

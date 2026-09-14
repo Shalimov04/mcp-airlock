@@ -131,8 +131,8 @@ async def test_group_from_jwt_changes_tier(upstream, audit_path, tmp_path):
 
 # 3. catalog cache honouring ttlMs ---------------------------------------------------------------------------------
 async def test_schema_lookup_cached_only_when_ttl_positive(upstream, audit_path):
-    al = make_airlock(upstream, audit_path, env="staging")  # set_replicas is L1 → forced dry-run → schema check
-    sent = spy(al, ttl_ms=None)  # fake says ttlMs 0 → never cache
+    al = make_airlock(upstream, audit_path, env="staging")  # set_replicas is L1: forced dry-run, so the schema check runs
+    sent = spy(al, ttl_ms=None)  # fake says ttlMs 0, never cache
     async with proxy_client(al) as c:
         for _ in range(3):
             await call(c, "set_replicas", {"names": ["api"], "replicas": 1})

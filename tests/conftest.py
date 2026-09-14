@@ -24,7 +24,7 @@ ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotoc
 @pytest.fixture
 async def upstream():
     fake_upstream.CALLS.clear()
-    app = fake_upstream.make_app()  # session manager runs once per instance → fresh app per test
+    app = fake_upstream.make_app()  # the session manager runs once per instance, so build a fresh app per test
     started, stop = asyncio.Event(), asyncio.Event()
 
     async def run():  # enter and exit the lifespan in ONE task (pytest-asyncio tears down in another)

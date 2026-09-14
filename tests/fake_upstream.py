@@ -54,7 +54,7 @@ def delete_service(name: str, ctx: Context, dry_run: bool = False) -> str:
 
 @srv.tool()
 def restart_service(name: str, ctx: Context) -> str:
-    """Restart a service (write) — deliberately has NO dry_run argument."""
+    """Restart a service (write). Has no dry_run argument on purpose."""
     _rec("restart_service", {"name": name}, ctx)
     return f"restarted {name}"
 
@@ -69,7 +69,7 @@ def rotate_key(name: str, ctx: Context,
 
 @srv.tool()
 def rm_rf(path: str, ctx: Context) -> str:
-    """Not in the allowlist — must never be reachable through the proxy."""
+    """Not in the allowlist. Must never be reachable through the proxy."""
     _rec("rm_rf", {"path": path}, ctx)
     return f"removed {path}"
 

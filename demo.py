@@ -70,20 +70,20 @@ def main() -> None:
         res = show("tools/list (rm_rf hidden by allowlist)", rpc("tools/list"))
         print("  tools", [t["name"] for t in res["tools"]])
         show("read tool, L0", rpc("tools/call", {"name": "get_service", "arguments": {"name": "api"}}))
-        show("no principal → 401", rpc("tools/call", {"name": "list_services", "arguments": {}}, principal=None))
-        show("not allowlisted → denied", rpc("tools/call", {"name": "rm_rf", "arguments": {"path": "/"}}))
+        show("no principal: 401", rpc("tools/call", {"name": "list_services", "arguments": {}}, principal=None))
+        show("not allowlisted: denied", rpc("tools/call", {"name": "rm_rf", "arguments": {"path": "/"}}))
         show("injection payload comes back from a read tool", rpc("tools/call", {"name": "get_service", "arguments": {"name": "evil"}}))
-        res = show("L2 write with dry_run=false → forced dry-run + input_required",
+        res = show("L2 write with dry_run=false: forced dry-run plus input_required",
                    rpc("tools/call", {"name": "delete_service", "arguments": {"name": "prod-db", "dry_run": False}}))
         token = res["requestState"]
         print("  prompt:", res["inputRequests"]["airlock-confirm"]["params"]["message"].replace("\n", "\n          "))
         confirm = {"requestState": token, "inputResponses": {"airlock-confirm": {"action": "accept", "content": {"confirm": True}}}}
-        show("human confirms → executed once", rpc("tools/call", {"name": "delete_service", "arguments": {"name": "prod-db"}, **confirm}))
-        show("replay same confirmation → denied", rpc("tools/call", {"name": "delete_service", "arguments": {"name": "prod-db"}, **confirm}))
+        show("human confirms: executed once", rpc("tools/call", {"name": "delete_service", "arguments": {"name": "prod-db"}, **confirm}))
+        show("replay same confirmation: denied", rpc("tools/call", {"name": "delete_service", "arguments": {"name": "prod-db"}, **confirm}))
         show("blast radius: 4 objects > max_per_call=3",
              rpc("tools/call", {"name": "set_replicas", "arguments": {"names": ["a", "b", "c", "d"], "replicas": 0}}))
-        show("output cap: 100k chars → 5000", rpc("tools/call", {"name": "get_service", "arguments": {"name": "big"}}))
-        show("L2 tool without dry_run → prompt without preview, nothing forwarded",
+        show("output cap: 100k chars trimmed to 5000", rpc("tools/call", {"name": "get_service", "arguments": {"name": "big"}}))
+        show("L2 tool without dry_run: prompt without preview, nothing forwarded",
              rpc("tools/call", {"name": "restart_service", "arguments": {"name": "api"}}))
         os.environ.pop("ALL_PROXY", None); os.environ.pop("HTTPS_PROXY", None); os.environ.pop("HTTP_PROXY", None)
         diff_against_live_upstream()
