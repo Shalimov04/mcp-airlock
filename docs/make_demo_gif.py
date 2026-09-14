@@ -83,11 +83,11 @@ def record() -> list[tuple[str, list[tuple[str, str]]]]:
             (text_of(res), DIM)]))
 
         st, res = call("get_service", {"name": "evil"})
-        sus = {(f["rule"], f.get("excerpt", "")) for f in meta(res, "suspicious") or []}  # text and structuredContent both hit
+        sus = [(f["rule"], f["excerpt"]) for f in meta(res, "suspicious") or []]
         scenes.append(('tools/call get_service {"name": "evil"}', [
             (f"HTTP {st}  allowed (L0 read), result marked suspicious", YELLOW),
             (text_of(res), DIM),
-            *[(f"_meta suspicious: {rule:<16} {excerpt}", RED) for rule, excerpt in sorted(sus)]]))
+            *[(f"_meta suspicious: {rule:<16} {excerpt}", RED) for rule, excerpt in sus]]))
     finally:
         px.terminate(); up.terminate(); px.wait(); up.wait()
     return scenes

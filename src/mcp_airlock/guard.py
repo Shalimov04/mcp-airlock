@@ -41,17 +41,19 @@ def _hits(text: str, tools: tuple[str, ...]) -> Iterable[tuple[str, str]]:
 
 def scan(result: dict[str, Any], tool_names: Iterable[str] = ()) -> list[dict[str, Any]]:
     """Findings [{"rule", "block", "excerpt"}] over text blocks in result["content"] (block = index) and
-    result["structuredContent"] serialized (block = -1). [] when clean. Deduped by (rule, block), capped at 20."""
+    result["structuredContent"] serialized (block = -1). [] when clean. Deduped by (rule, excerpt): the same phrase in a
+    text block and in structuredContent is one finding, attributed to the first block. Capped at 20."""
     tools = tuple(sorted(set(tool_names)))
     content = result.get("content")
     blocks = [(i, b["text"]) for i, b in enumerate(content if isinstance(content, list) else [])
               if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]  # tolerate junk upstreams
     if "structuredContent" in result:
         blocks.append((-1, json.dumps(result["structuredContent"], ensure_ascii=False, default=str)))
-    found: dict[tuple[str, int], dict[str, Any]] = {}
+    found: dict[tuple[str, str], dict[str, Any]] = {}
     for i, text in blocks:
         for rule, excerpt in _hits(text, tools):
-            found.setdefault((rule, i), {"rule": rule, "block": i, "excerpt": " ".join(excerpt.split())[:120]})
+            excerpt = " ".join(excerpt.split())[:120]
+            found.setdefault((rule, excerpt), {"rule": rule, "block": i, "excerpt": excerpt})
             if len(found) >= MAX_FINDINGS:
                 return list(found.values())
     return list(found.values())
