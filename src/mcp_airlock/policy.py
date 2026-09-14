@@ -23,7 +23,7 @@ Tier = Literal["L0", "L1", "L2", "L3"]
 class OutputCap(BaseModel):
     model_config = ConfigDict(extra="forbid")
     max_chars: int = 16_000
-    chars_per_token: float = 4.0  # crude estimate; good enough for a cap
+    chars_per_token: float = Field(4.0, gt=0)  # crude estimate; good enough for a cap
 
 
 class BlastRadius(BaseModel):
@@ -137,7 +137,9 @@ class Engine:
                 d = Decision("confirm", "tier.L2.confirm", tier, True if dry_run_supported else None, n,
                              "L2: human confirmation required", preview=dry_run_supported)
         else:
-            d = Decision("allow", "tier.L3.auto", tier, args.get("dry_run") if "dry_run" in args else None, n)
+            # A client-supplied dry_run only counts as a dry run when the tool really has one; otherwise it is a
+            # real execution that happens to carry a stray argument (and must be charged to the window).
+            d = Decision("allow", "tier.L3.auto", tier, True if requested_dry and dry_run_supported else None, n)
 
         # Window check for anything that will (allow, real) or is about to (confirm → prompt the human) execute,
         # so nobody is asked to confirm an action the limit will refuse. Recording happens in `record`.

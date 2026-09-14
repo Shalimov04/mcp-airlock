@@ -122,7 +122,7 @@ the person approving the call gets to read, so write it for them.
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`, `tier.L2.dry_run`,
 `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
-`principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
+`catalog.unavailable`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
 `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `internal.error`.
 
 ## Confirmations in detail
@@ -131,16 +131,19 @@ The confirmation token (`requestState`) is an HMAC-signed blob carrying the prin
 tool, a hash of the arguments, the environment, the upstream URL, a random idempotency key
 and an expiry (10 minutes). Nothing is stored when it is issued. When it comes back the
 proxy checks the signature, checks that all of those still match the call in front of it,
-re-runs the policy, charges the blast-radius counter, and only then burns the key. Burning
-is an atomic insert in the store, so two replicas cannot both execute the same
-confirmation. A decline burns the key too.
+re-runs the policy, burns the key, then charges the blast-radius counter. Burning is an
+atomic insert in the store, so two replicas cannot both execute the same confirmation. A
+decline burns the key too.
 
 Before the prompt is issued the proxy asks the upstream for `tools/list` and looks at the
 tool's schema. If the tool declares `dry_run`, the dry run is forwarded and its output is
 included in the prompt. If it doesn't (most servers today), nothing is forwarded and the
 person is asked to confirm without a preview. `L1` on such a tool is refused, since there
-is no safe way to run it. The `tools/list` answer is cached for as long as the upstream's
-`ttlMs` says, per principal; with `ttlMs: 0` it is fetched on every gated call.
+is no safe way to run it. If the upstream cannot be asked at all, the call is refused with
+`catalog.unavailable` rather than guessed at. The `tools/list` answer is cached for as long as
+the upstream's `ttlMs` says, per principal; with `ttlMs: 0` it is fetched on every gated call.
+If the tool mirrors `dry_run` into an `Mcp-Param-*` header, the proxy rewrites that header
+along with the body.
 
 If an approval webhook is configured, the same prompt goes to Slack or Telegram with a
 link. The link carries a second token signed with a different key, so the agent, which
@@ -152,7 +155,8 @@ with `requestState` and no `inputResponses`: it gets `input_required` back with
 
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
-`X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval.
+`X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as
+unverified unless it came from a bearer token the proxy could check.
 
 ## Audit
 
@@ -164,8 +168,9 @@ Two JSON lines per call, with a shared `call_id`:
 ```
 
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
-with `[REDACTED]`, and so are values that look like bearer tokens, `sk-` keys, GitHub or AWS
-keys and JWTs. The same redaction applies to the text shown to approvers. `detail` holds
+with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
+`sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
+approvers, including the dry-run preview. `detail` holds
 the output-cap numbers and the injection rules that fired, when any did.
 
 To read the log:
@@ -204,11 +209,12 @@ operation, which is fine at governance rates and easy to change if it isn't.
 
 Forced dry run only helps if the tool actually honours `dry_run`. The proxy checks that the
 argument is declared, it cannot check that the implementation respects it. Test that
-yourself before putting a tool at `L1` or `L2`.
+yourself before putting a tool at `L1` or `L2`. A client-sent `dry_run: true` on an `L3` tool
+that does not declare the argument is treated as a real execution.
 
-`Mcp-Param-*` headers are forwarded as they came. If a tool mirrors `dry_run` into such a
-header, the proxy's rewrite of the body makes the two disagree and the upstream rejects the
-call. That is the safe direction, but it means you cannot header-mirror `dry_run`.
+Upstreams that themselves answer with `input_required` (a tool that asks its own questions
+through the 2026-07-28 elicitation channel) do not work behind an `L2` gate: the proxy's own
+prompt and the upstream's get tangled. Put such tools at `L0` or `L3`, or don't proxy them.
 
 Blast radius counts what it can see: the length of the argument you named, or one. A tool
 whose fan-out is not visible in its arguments cannot be measured here.

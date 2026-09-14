@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from mcp_airlock.app import CONFIRM_KEY, META
+from mcp_airlock.app import CONFIRM_KEY, META, PRINCIPAL_REQUIRED
 
 from .conftest import audit_rows, call, make_airlock, rpc
 
@@ -38,7 +38,7 @@ async def test_discover_and_list_passthrough(client, upstream):
     r = await rpc(client, "tools/list")
     res = r.json()["result"]
     names = {t["name"] for t in res["tools"]}
-    assert names == {"list_services", "get_service", "set_replicas", "delete_service", "restart_service"}  # rm_rf hidden
+    assert names == {"list_services", "get_service", "set_replicas", "delete_service", "restart_service", "rotate_key"}  # rm_rf hidden
     assert res["_meta"][META + "hidden_tools"] == 1
     assert res["ttlMs"] == 0 and res["cacheScope"] == "private"  # passed through as-is, never cached
 
@@ -174,7 +174,7 @@ async def test_output_cap(client, upstream, audit_path):
 # 7. principal ----------------------------------------------------------------------------------------------------
 async def test_missing_principal_refused_but_audited(client, upstream, audit_path):
     r = await rpc(client, "tools/call", {"name": "list_services", "arguments": {}}, principal=None)
-    assert r.status_code == 401 and r.json()["error"]["code"] == -32001
+    assert r.status_code == 401 and r.json()["error"]["code"] == PRINCIPAL_REQUIRED
     r = await rpc(client, "tools/call", {"name": "list_services", "arguments": {"principal": "alice"}}, principal=None)
     assert r.status_code == 401  # never from the body
     assert upstream.CALLS == []

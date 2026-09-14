@@ -43,7 +43,9 @@ def scan(result: dict[str, Any], tool_names: Iterable[str] = ()) -> list[dict[st
     """Findings [{"rule", "block", "excerpt"}] over text blocks in result["content"] (block = index) and
     result["structuredContent"] serialized (block = -1). [] when clean. Deduped by (rule, block), capped at 20."""
     tools = tuple(sorted(set(tool_names)))
-    blocks = [(i, b.get("text") or "") for i, b in enumerate(result.get("content") or []) if b.get("type") == "text"]
+    content = result.get("content")
+    blocks = [(i, b["text"]) for i, b in enumerate(content if isinstance(content, list) else [])
+              if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]  # tolerate junk upstreams
     if "structuredContent" in result:
         blocks.append((-1, json.dumps(result["structuredContent"], ensure_ascii=False, default=str)))
     found: dict[tuple[str, int], dict[str, Any]] = {}

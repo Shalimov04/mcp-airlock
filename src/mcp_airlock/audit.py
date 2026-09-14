@@ -21,14 +21,25 @@ FIELDS = ("phase", "call_id", "principal", "method", "tool", "args", "verdict", 
           "tier", "dry_run", "latency_ms", "upstream_status", "trace_id", "detail")
 
 
+_SECRET_INLINE = re.compile(r"(Bearer\s+[A-Za-z0-9._~+/=-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)")
+
+
 def redact(value: Any, key: str = "") -> Any:
+    """Structured redaction: anything under a secret-looking key, and any leaf that looks like a credential."""
+    if _SECRET_KEY.search(key):
+        return REDACTED  # the whole subtree: a dict under "credentials" is as secret as a string
     if isinstance(value, dict):
         return {k: redact(v, str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact(v, key) for v in value]
-    if isinstance(value, str) and (_SECRET_KEY.search(key) or _SECRET_VALUE.match(value)):
+    if isinstance(value, str) and _SECRET_VALUE.match(value):
         return REDACTED
     return value
+
+
+def scrub(text: str) -> str:
+    """Free-text redaction: credential-shaped substrings inside prose (previews, messages)."""
+    return _SECRET_INLINE.sub(REDACTED, text)
 
 
 def _row(rec: dict[str, Any]) -> dict[str, Any]:

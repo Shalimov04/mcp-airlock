@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -31,21 +32,25 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from . import approvals, guard
-from .audit import audit_from_env, redact
+from .audit import audit_from_env, redact, scrub
 from .identity import IdentityConfig, Principal, resolve
 from .policy import Engine, Policy
 from .store import store_from_env
 
 log = logging.getLogger("mcp_airlock")
 META = "io.mcp-airlock/"
-FORWARD_HEADERS = ("mcp-protocol-version", "mcp-method", "mcp-name", "accept", "content-type")
-MCP_PARAM_PREFIX = "mcp-param-"  # forwarded verbatim; a param the proxy rewrites (dry_run) must not be header-mirrored
+FORWARD_HEADERS = ("mcp-protocol-version", "mcp-method", "mcp-name", "content-type")  # accept is always the dual value
+MCP_PARAM_PREFIX = "mcp-param-"
 PROXIED_METHODS = frozenset({"server/discover", "tools/list", "tools/call"})
-PRINCIPAL_REQUIRED = -32001  # airlock-specific JSON-RPC code, HTTP 401
+PRINCIPAL_REQUIRED = -32011  # airlock-specific JSON-RPC code (implementation range, not used by the SDK), HTTP 401
 TOKEN_PREFIX = "al1."  # requestState: held by the agent
 APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derived key the agent never sees
 CONFIRM_KEY = "airlock-confirm"
 _tracer = trace.get_tracer("mcp-airlock")
+
+
+class CatalogUnavailable(Exception):
+    """The upstream did not give us a usable tools/list; we cannot tell whether a tool has dry_run."""
 
 
 def _b64(b: bytes) -> str:
@@ -150,9 +155,9 @@ class Airlock:
         if any(claims.get(k) != v for k, v in self._binding(principal, tool, args).items()):
             return "deny:mrtr.mismatch", None
         responses = params.get("inputResponses")
-        if responses is None:  # no answer in-band: approved out-of-band, or still waiting (nothing burned)
+        answer = responses.get(CONFIRM_KEY) if isinstance(responses, dict) else responses
+        if answer is None:  # no answer for our question: approved out-of-band, or still waiting (nothing burned)
             return ("accepted" if await self.engine.store.is_approved(claims["k"]) else "pending"), claims
-        answer = responses.get(CONFIRM_KEY) if isinstance(responses, dict) else None
         content = answer.get("content") if isinstance(answer, dict) else None
         if isinstance(answer, dict) and answer.get("action") == "accept" and isinstance(content, dict) and content.get("confirm") is True:
             return "accepted", claims
@@ -162,7 +167,8 @@ class Airlock:
     # ---------- request handling ----------
     async def handle(self, request: Request) -> Response:
         headers = {k.lower(): v for k, v in request.headers.items()}
-        who = resolve(headers, self.identity)
+        # JWKS verification may fetch keys over the network (blocking urllib): keep it off the event loop.
+        who = await asyncio.to_thread(resolve, headers, self.identity) if self.identity.jwks_url else resolve(headers, self.identity)
         sub = who.sub if who else None
         try:
             body = json.loads(await request.body())
@@ -203,19 +209,18 @@ class Airlock:
                 if method == "tools/call":
                     return await self._call(rid, body, params, headers, who, tool, args, base, span)
                 return await self._passthrough(body, headers, who, method, base)
-            except Exception as e:  # never lose the outcome record, never leak a traceback
+            except Exception as e:  # never leak a traceback; try hard to leave an outcome record
                 log.exception("airlock internal error")
-                self.audit.write(phase="outcome", verdict="error", rule_id="internal.error", detail=repr(e), **base)
+                self._outcome(verdict="error", rule_id="internal.error", detail=repr(e), **base)
                 return _rpc_error(rid, INTERNAL_ERROR, "airlock: internal error")
 
     async def _passthrough(self, body, headers, who: Principal, method, base) -> Response:
-        self.audit.write(phase="intent", verdict="allow", rule_id="passthrough", **base)
+        self.audit.write(phase="intent", verdict="allow", rule_id="passthrough", **base)  # raises → fail closed
         t0 = time.perf_counter()
         status, reply = await self.forward(body, headers, who)
         if method == "tools/list" and isinstance(reply.get("result"), dict):
             self._filter_tools(reply["result"], who)
-        self.audit.write(phase="outcome", verdict="allow", rule_id="passthrough", upstream_status=status,
-                         latency_ms=_ms(t0), **base)
+        self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
         return JSONResponse(reply, status_code=status)
 
     async def _call(self, rid, body, params, headers, who: Principal, tool, args, base, span) -> Response:
@@ -227,8 +232,15 @@ class Airlock:
             span.set_attribute("airlock.verdict", "deny")
             return _tool_error(rid, f"airlock: denied ({rule})", rule)
         tier = policy.tier(tool, who.sub, who.groups)
-        supported = await self._declares_dry_run(headers, who, tool) if tier in ("L1", "L2") else True
-        d = await self.engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups, dry_run_supported=supported)
+        dry_run_prop: dict[str, Any] | None = None
+        if tier in ("L1", "L2") or (tier == "L3" and "dry_run" in args):
+            try:
+                dry_run_prop = await self._dry_run_property(headers, who, tool)
+            except CatalogUnavailable as e:
+                self._audit_deny(base, "catalog.unavailable", tier, str(e))
+                return _tool_error(rid, f"airlock: denied (catalog.unavailable): {e}", "catalog.unavailable")
+        d = await self.engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups,
+                                       dry_run_supported=dry_run_prop is not None)
         span.set_attributes({"airlock.verdict": d.verdict, "airlock.rule_id": d.rule_id, "airlock.tier": d.tier or ""})
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
@@ -241,52 +253,62 @@ class Airlock:
                 "resultType": "input_required", "requestState": params["requestState"],
                 "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"],
                           META + "message": "Awaiting approval. Retry with this requestState once the approver has confirmed."}}})
-        if d.rule_id == "tier.L2.confirmed" and await self.engine.store.is_consumed(claims["k"]):
-            self._audit_deny(base, "mrtr.replay", d.tier, "idempotency key already used")  # cheap pre-check: a replay must not charge the window
-            return _tool_error(rid, "airlock: denied (mrtr.replay)", "mrtr.replay")
-        d = await self.engine.reserve(who.sub, tool, d)  # atomic window charge; before the key so a lost race burns nothing
-        if d.verdict == "deny":
-            self._audit_deny(base, d.rule_id, d.tier, d.message)
-            return _tool_error(rid, f"airlock: denied ({d.rule_id}): {d.message}", d.rule_id)
-        if d.rule_id == "tier.L2.confirmed":  # the one path that executes for real: burn the key now
+        if d.rule_id == "tier.L2.confirmed":  # the one path that executes for real: burn the key first, atomically
             if not await self.engine.store.consume_once(claims["k"], claims["exp"]):
                 self._audit_deny(base, "mrtr.replay", d.tier, "idempotency key already used")
                 return _tool_error(rid, "airlock: denied (mrtr.replay)", "mrtr.replay")
+        d = await self.engine.reserve(who.sub, tool, d)  # atomic window charge; a replay never gets this far
+        if d.verdict == "deny":
+            self._audit_deny(base, d.rule_id, d.tier, d.message)
+            return _tool_error(rid, f"airlock: denied ({d.rule_id}): {d.message}", d.rule_id)
 
         if d.verdict == "confirm" and not d.preview:
             # Tool has no dry_run: nothing safe to forward. Prompt the human without a preview.
             self.audit.write(phase="intent", verdict="confirm", rule_id=d.rule_id, tier=d.tier, dry_run=None, **base)
             result = self._input_required(who.sub, tool, args, None)
             await self._notify(result, who.sub)
-            self.audit.write(phase="outcome", verdict="confirm", rule_id=d.rule_id, tier=d.tier, dry_run=None,
-                             upstream_status=None, latency_ms=0, **base)
+            self._outcome(verdict="confirm", rule_id=d.rule_id, tier=d.tier, dry_run=None, upstream_status=None, latency_ms=0, **base)
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": result})
 
-        fwd_args = dict(args)
+        fwd_args, fwd_headers = dict(args), dict(headers)
         if d.dry_run is not None:
             fwd_args["dry_run"] = d.dry_run
+            if mirror := (dry_run_prop or {}).get("x-mcp-header"):  # keep the mirrored header in step with the body
+                fwd_headers[f"{MCP_PARAM_PREFIX}{str(mirror).lower()}"] = "true" if d.dry_run else "false"
         fwd = dict(body, params={k: v for k, v in params.items() if k not in ("inputResponses", "requestState")}
                    if mode != "none" or d.verdict == "confirm" else dict(params))
         fwd["params"]["arguments"] = fwd_args
         self.audit.write(phase="intent", verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run, **base)
         t0 = time.perf_counter()
-        status, reply = await self.forward(fwd, headers, who)
+        status, reply = await self.forward(fwd, fwd_headers, who)
         result = reply.get("result")
         detail: dict[str, Any] = {}
         if isinstance(result, dict):
             result.setdefault("_meta", {}).update({META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run})
-            if truncated := self._cap_output(tool, result):  # after the _meta additions so the cap covers the final size
-                detail.update(truncated)
-            if findings := guard.scan(result, policy.tools):
-                result["_meta"][META + "suspicious"] = findings  # marked, never blocked: the client decides how to render
-                detail["suspicious"] = sorted({f["rule"] for f in findings})
-                span.set_attribute("airlock.suspicious", len(findings))
+            try:  # the upstream already acted: a malformed result must reach the caller, not become a 500
+                if truncated := self._cap_output(tool, result):  # after the _meta additions so the cap covers the final size
+                    detail.update(truncated)
+                if findings := guard.scan(result, policy.tools):
+                    result["_meta"][META + "suspicious"] = findings  # marked, never blocked: the client decides how to render
+                    detail["suspicious"] = sorted({f["rule"] for f in findings})
+                    span.set_attribute("airlock.suspicious", len(findings))
+            except Exception as e:
+                log.exception("post-processing failed; returning the upstream result as-is")
+                detail["postprocess_error"] = repr(e)
             if d.verdict == "confirm" and status == 200 and not result.get("isError"):
                 reply["result"] = self._input_required(who.sub, tool, args, result)  # preview failed → no gate, just the error
                 await self._notify(reply["result"], who.sub)
-        self.audit.write(phase="outcome", verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
-                         upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
+        self._outcome(verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
+                      upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
+
+    # ---------- audit helpers ----------
+    def _outcome(self, **rec: Any) -> None:
+        """Outcome records are written after the upstream acted: a failing log must not hide the result from the caller."""
+        try:
+            self.audit.write(phase="outcome", **rec)
+        except Exception:
+            log.exception("audit outcome write failed for call %s", rec.get("call_id"))
 
     def _reject(self, rid, code, message, principal, method, tool, data=None) -> JSONResponse:
         base = dict(call_id=uuid.uuid4().hex, principal=principal, method=method, tool=tool, args=None, trace_id=None)
@@ -295,20 +317,20 @@ class Airlock:
 
     def _audit_deny(self, base: dict[str, Any], rule_id: str, tier: str | None, detail: str) -> None:
         self.audit.write(phase="intent", verdict="deny", rule_id=rule_id, tier=tier, detail=detail, **base)
-        self.audit.write(phase="outcome", verdict="deny", rule_id=rule_id, tier=tier, detail=detail,
-                         upstream_status=None, latency_ms=0, **base)
+        self._outcome(verdict="deny", rule_id=rule_id, tier=tier, detail=detail, upstream_status=None, latency_ms=0, **base)
 
     # ---------- upstream catalog ----------
     async def _catalog_tools(self, headers: dict[str, str], who: Principal) -> dict[str, dict[str, Any]]:
-        """Upstream tools by name. Cached for `ttlMs` when the upstream sets one (0 → refetched every time).
-        The proxy talks to the upstream under its own credential, so `cacheScope: private` is one context here."""
-        ckey = (headers.get("mcp-protocol-version", ""), who.sub, who.groups)  # an upstream may filter its catalog per caller
+        """Upstream tools by name. Cached for `ttlMs` when the upstream sets one (0 → refetched every time),
+        per caller because an upstream may filter its catalog by principal. Raises CatalogUnavailable on any failure."""
+        ckey = (headers.get("mcp-protocol-version", ""), who.sub, who.groups)
         cached = self._catalog.get(ckey)
         if cached and cached[0] > time.monotonic():
             return cached[1]
         envelope = {"io.modelcontextprotocol/protocolVersion": headers.get("mcp-protocol-version", ""),
                     "io.modelcontextprotocol/clientCapabilities": {}}
-        list_headers = {**headers, "mcp-method": "tools/list"}
+        list_headers = {k: v for k, v in headers.items() if not k.startswith(MCP_PARAM_PREFIX)}
+        list_headers["mcp-method"] = "tools/list"
         list_headers.pop("mcp-name", None)
         tools: dict[str, dict[str, Any]] = {}
         ttl_ms, cursor = 0, None
@@ -318,21 +340,27 @@ class Airlock:
                                                 "method": "tools/list", "params": params}, list_headers, who)
             result = reply.get("result") if status == 200 else None
             if not isinstance(result, dict):
-                return tools
+                raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {reply.get('error') or 'no result'}")
             tools.update({t["name"]: t for t in result.get("tools") or [] if isinstance(t, dict) and "name" in t})
             ttl_ms = result.get("ttlMs") if isinstance(result.get("ttlMs"), int) else 0
             cursor = result.get("nextCursor")
             if not isinstance(cursor, str):
                 break
+        else:
+            raise CatalogUnavailable("upstream tools/list did not finish within 10 pages")
         if ttl_ms > 0:
             now = time.monotonic()
             self._catalog = {k: v for k, v in self._catalog.items() if v[0] > now}  # bounded by live principals
             self._catalog[ckey] = (now + ttl_ms / 1000, tools)
         return tools
 
-    async def _declares_dry_run(self, headers: dict[str, str], who: Principal, tool: str) -> bool:
+    async def _dry_run_property(self, headers: dict[str, str], who: Principal, tool: str) -> dict[str, Any] | None:
+        """The tool's `dry_run` schema property, or None when the tool does not declare one."""
         t = (await self._catalog_tools(headers, who)).get(tool)
-        return bool(t) and "dry_run" in ((t.get("inputSchema") or {}).get("properties") or {})
+        props = ((t or {}).get("inputSchema") or {}).get("properties") or {}
+        if "dry_run" not in props:
+            return None
+        return props["dry_run"] if isinstance(props["dry_run"], dict) else {}
 
     async def forward(self, body: dict[str, Any], headers: dict[str, str], who: Principal) -> tuple[int, dict[str, Any]]:
         params = dict(body["params"])
@@ -344,7 +372,7 @@ class Airlock:
         inject(meta)  # traceparent/tracestate from the current span
         params["_meta"] = meta
         out_headers = {k: v for k, v in headers.items() if k in FORWARD_HEADERS or k.startswith(MCP_PARAM_PREFIX)}
-        out_headers.setdefault("accept", "application/json, text/event-stream")
+        out_headers["accept"] = "application/json, text/event-stream"  # we parse both; never let a picky client cause a 406
         out_headers["traceparent"] = meta.get("traceparent", "")
         out_headers.update(self.upstream_headers)
         try:
@@ -355,9 +383,12 @@ class Airlock:
         if ctype.startswith("text/event-stream"):
             return r.status_code, _last_sse_message(r.text)
         try:
-            return r.status_code, r.json()
+            reply = r.json()
         except ValueError:
             return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream returned non-JSON ({r.status_code})"}}
+        if not isinstance(reply, dict):
+            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": "upstream returned a non-object"}}
+        return r.status_code, reply
 
     def _filter_tools(self, result: dict[str, Any], who: Principal) -> None:
         tools = result.get("tools")
@@ -377,7 +408,9 @@ class Airlock:
         result.pop("structuredContent", None)
         result.setdefault("_meta", {})[META + "output"] = info
         note = f"\n\n[airlock: output truncated to {cap.max_chars} chars from {size}]"
-        texts = [b for b in result.get("content") or [] if b.get("type") == "text"]
+        content = result.get("content")
+        texts = [b for b in (content if isinstance(content, list) else [])
+                 if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
         # ponytail: non-text blocks dropped when over cap; count their bytes if you need images
         shell = {**result, "content": [{**b, "text": ""} for b in texts[:1]] or [{"type": "text", "text": ""}]}
         budget = max(cap.max_chars - len(json.dumps(shell, ensure_ascii=False, default=str)) - len(json.dumps(note)), 0)
@@ -411,16 +444,20 @@ class Airlock:
         shown = redact({k: v for k, v in args.items() if k != "dry_run"})  # this text reaches humans, Slack, logs
         if preview is None:
             preview_line = "No dry-run preview: this tool has no dry_run argument, nothing was executed."
+            preview_blocks = None
         else:
-            text = " ".join(b.get("text", "") for b in preview.get("content") or [] if b.get("type") == "text")[:2000]
+            raw = preview.get("content")
+            preview_blocks = [{**b, "text": scrub(b["text"])} if isinstance(b, dict) and isinstance(b.get("text"), str) else b
+                              for b in (raw if isinstance(raw, list) else [])]
+            text = " ".join(b["text"] for b in preview_blocks if isinstance(b, dict) and isinstance(b.get("text"), str))[:2000]
             preview_line = f"Dry-run preview: {text or '(empty)'}"
         message = (f"[{env}] {tool} — {rule.description or 'write operation'} (tier L2).\n"
                    f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
                    f"Confirm to execute for real. Idempotency key: {key}")
         meta = {**((preview or {}).get("_meta") or {}), META + "idempotency_key": key, META + "verdict": "confirm",
                 META + "rule_id": "tier.L2.confirm"}
-        if preview is not None:
-            meta[META + "dry_run_preview"] = preview.get("content")
+        if preview_blocks is not None:
+            meta[META + "dry_run_preview"] = preview_blocks
         return {
             "resultType": "input_required",
             "inputRequests": {CONFIRM_KEY: {"method": "elicitation/create", "params": {
@@ -459,12 +496,15 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         await self.engine.store.approve(claims["k"], claims["exp"])
         headers = {k.lower(): v for k, v in request.headers.items()}
         who = resolve(headers, self.identity)
-        # Who clicked: verified identity when there is one, else whatever the fronting SSO proxy put in the header (informational).
-        approver = who.sub if who else headers.get("x-airlock-principal") or headers.get("x-forwarded-user")
+        # Who clicked: a verified token when there is one, else whatever the fronting SSO proxy put in a header.
+        if who and headers.get("authorization"):
+            approver, source = who.sub, "verified"
+        else:
+            approver, source = (who.sub if who else headers.get("x-airlock-principal") or headers.get("x-forwarded-user")), "header"
         base = dict(call_id=uuid.uuid4().hex, principal=claims["p"], method="approve", tool=claims["t"], args=None, trace_id=None)
-        detail = {"key": claims["k"], "approved_by": approver}
+        detail = {"key": claims["k"], "approved_by": approver, "approved_by_source": source if approver else None}
         self.audit.write(phase="intent", verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
-        self.audit.write(phase="outcome", verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
+        self._outcome(verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
         return HTMLResponse(f"Approved {html.escape(claims['t'])} for {html.escape(claims['p'])}. The agent can retry now.")
 
 

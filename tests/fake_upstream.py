@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
+
+from pydantic import Field
 
 from mcp.server.mcpserver import Context, MCPServer
 
@@ -55,6 +57,14 @@ def restart_service(name: str, ctx: Context) -> str:
     """Restart a service (write) — deliberately has NO dry_run argument."""
     _rec("restart_service", {"name": name}, ctx)
     return f"restarted {name}"
+
+
+@srv.tool()
+def rotate_key(name: str, ctx: Context,
+               dry_run: Annotated[bool, Field(json_schema_extra={"x-mcp-header": "Dry-Run"})] = False) -> str:
+    """Rotate a credential (write). dry_run is mirrored into the Mcp-Param-Dry-Run header (SDK validates agreement)."""
+    _rec("rotate_key", {"name": name, "dry_run": dry_run}, ctx)
+    return f"{'would rotate' if dry_run else 'ROTATED'} {name}"
 
 
 @srv.tool()

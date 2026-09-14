@@ -259,6 +259,7 @@ async def test_approver_identity_recorded(upstream, audit_path):
         assert (await c.post(path, headers={"x-airlock-principal": "boss"})).status_code == 200
     row = audit_rows(audit_path)[-1]
     assert row["rule_id"] == "mrtr.approved_oob" and row["detail"]["approved_by"] == "boss" and row["principal"] == "alice"
+    assert row["detail"]["approved_by_source"] == "header"  # unverified: the fronting proxy's word, marked as such
 
 
 async def test_accept_with_explicit_dry_run_does_not_burn_key(client, upstream):
@@ -318,3 +319,163 @@ async def test_no_webhook_means_no_notification(upstream, audit_path):
     async with proxy_client(al) as c:
         res = await call(c, "delete_service", {"name": "api"})
     assert res["resultType"] == "input_required" and META + "approve_url" not in res["_meta"]
+
+
+# 7. second review pass ----------------------------------------------------------------------------------------------
+def webhook_airlock(upstream, audit_path, posted: list, **kw):
+    return make_airlock(upstream, audit_path, webhook="https://hooks.example/x", public_url="https://a.example",
+                        notify_http=httpx.AsyncClient(transport=httpx.MockTransport(
+                            lambda r: (posted.append(json.loads(r.content)["text"]), httpx.Response(200))[1])), **kw)
+
+
+def approve_path(posted: list) -> str:
+    return next(w for w in posted[-1].split() if w.startswith("https://a.example/approve/")).removeprefix("https://a.example")
+
+
+async def test_l3_client_dry_run_on_tool_without_dry_run_counts_as_real(upstream, audit_path):
+    from mcp_airlock.policy import BlastRadius
+    dev = make_airlock(upstream, audit_path, env="dev")  # restart_service: L3, no dry_run in schema
+    dev.engine.policy.tools["restart_service"].blast_radius = BlastRadius(max_per_call=1, max_per_principal=2, window_s=3600)
+    async with proxy_client(dev) as c:
+        for _ in range(2):
+            assert (await call(c, "restart_service", {"name": "api", "dry_run": True}))["isError"] is False
+        res = await call(c, "restart_service", {"name": "api", "dry_run": True})
+        assert res["isError"] and res["_meta"][META + "rule_id"] == "blast_radius.per_principal"
+        res = await call(c, "restart_service", {"name": "api", "dry_run": {"x": 1}})  # garbage stays garbage, not a crash
+        assert res["isError"]  # per_principal again; the point is no 500 and a well-typed audit row
+    rows = [r for r in audit_rows(audit_path) if r["tool"] == "restart_service"]
+    assert all(r["dry_run"] in (None, False) for r in rows)  # never recorded as a dry run
+
+
+async def test_l3_real_dry_run_is_still_exempt(upstream, audit_path):
+    dev = make_airlock(upstream, audit_path, env="dev")  # set_replicas L3 in dev, declares dry_run, per_principal 5
+    async with proxy_client(dev) as c:
+        for _ in range(4):
+            res = await call(c, "set_replicas", {"names": ["a", "b", "c"], "replicas": 1, "dry_run": True})
+            assert res["isError"] is False and res["_meta"][META + "dry_run"] is True
+
+
+async def test_empty_input_responses_means_pending_not_decline(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": token, "inputResponses": {}})
+        assert res["resultType"] == "input_required" and res["_meta"][META + "status"] == "pending"
+        assert (await c.post(approve_path(posted))).status_code == 200
+        res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": token, "inputResponses": {}})
+        assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+
+
+async def test_catalog_failure_fails_closed(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    orig = al.http.post
+
+    async def post(url, *, content, headers):
+        if json.loads(content)["method"] == "tools/list":
+            return httpx.Response(500, text="boom")
+        return await orig(url, content=content, headers=headers)
+
+    al.http.post = post
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+        assert res["isError"] and res["_meta"][META + "rule_id"] == "catalog.unavailable"
+        res = await call(c, "delete_service", {"name": "api", "dry_run": True})
+        assert res["isError"] and res["_meta"][META + "rule_id"] == "catalog.unavailable"
+    assert [x for x in upstream.CALLS if x["tool"] == "delete_service"] == []
+
+
+async def test_malformed_upstream_content_does_not_lose_the_result(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    orig = al.http.post
+
+    async def post(url, *, content, headers):
+        r = await orig(url, content=content, headers=headers)
+        body = json.loads(content)
+        if body["method"] == "tools/call":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
+                "resultType": "complete", "content": [{"type": "text", "text": 42}, None, "x", {"type": "text"}]}})
+        return r
+
+    al.http.post = post
+    async with proxy_client(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "big"}})  # cap path too (5000)
+        assert r.status_code == 200 and r.json()["result"]["content"][0]["text"] == 42
+    assert audit_rows(audit_path)[-1]["phase"] == "outcome"
+
+
+async def test_accept_header_is_always_dual_upstream(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    seen: list[dict] = []
+    orig = al.http.post
+
+    async def post(url, *, content, headers):
+        seen.append(headers)
+        return await orig(url, content=content, headers=headers)
+
+    al.http.post = post
+    async with proxy_client(al) as c:
+        await call(c, "get_service", {"name": "api"}, headers={"accept": "application/json"})
+    assert seen[-1]["accept"] == "application/json, text/event-stream"
+
+
+async def test_preview_text_is_scrubbed(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": secret})  # preview says "would delete ghp_..."
+    blob = json.dumps(res) + posted[0]
+    assert secret not in blob and "[REDACTED]" in res["inputRequests"][CONFIRM_KEY]["params"]["message"]
+
+
+async def test_header_mirrored_dry_run_is_rewritten_with_the_body(client, upstream):
+    res = await call(client, "rotate_key", {"name": "db"})  # no Mcp-Param header from the agent
+    assert res["resultType"] == "input_required" and "would rotate db" in res["inputRequests"][CONFIRM_KEY]["params"]["message"]
+    res = await call(client, "rotate_key", {"name": "db"}, extra=accept(res["requestState"]))
+    assert res["isError"] is False and "ROTATED db" in res["content"][0]["text"]
+    assert [x["args"]["dry_run"] for x in upstream.CALLS if x["tool"] == "rotate_key"] == [True, False]
+
+
+async def test_outcome_audit_failure_does_not_lose_the_result(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    real = al.audit.write
+
+    def flaky(**rec):
+        if rec.get("phase") == "outcome":
+            raise OSError(28, "No space left on device")
+        real(**rec)
+
+    al.audit.write = flaky
+    async with proxy_client(al) as c:
+        res = await call(c, "get_service", {"name": "api"})
+    assert res["isError"] is False  # executed and delivered; the failure is logged, not turned into a 500
+
+
+async def test_intent_audit_failure_fails_closed(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+
+    def broken(**rec):
+        raise OSError(28, "No space left on device")
+
+    al.audit.write = broken
+    async with proxy_client(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}})
+    assert r.status_code == 500 and r.json()["error"]["code"] == -32603
+    assert upstream.CALLS == []  # nothing forwarded without an intent record
+
+
+def test_redact_nested_containers_and_scrub():
+    from mcp_airlock.audit import redact, scrub
+    assert redact({"credentials": {"user": "x", "pass": "y"}, "tokens": ["a", "b"], "n": 1}) == {"credentials": "[REDACTED]", "tokens": "[REDACTED]", "n": 1}
+    text = "would delete ghp_abcdefghijklmnopqrstuvwxyz1234567890 with Bearer abc.def and sk-1234567890abcdef ok"
+    out = scrub(text)
+    assert "ghp_" not in out and "Bearer abc" not in out and "sk-1234" not in out and out.endswith(" ok")
+
+
+def test_chars_per_token_must_be_positive(tmp_path):
+    import pydantic
+    p = tmp_path / "p.yaml"
+    p.write_text("version: 1\nenvironment: prod\noutput: {max_chars: 100, chars_per_token: 0}\ntools: {}\n")
+    with pytest.raises(pydantic.ValidationError):
+        Policy.load(p)

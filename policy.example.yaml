@@ -27,3 +27,6 @@ tools:
   restart_service:
     description: restart a service (the tool has no dry_run argument → airlock refuses L1/L2 for it)
     tiers: {dev: L3, prod: L2}
+  rotate_key:
+    description: rotate a credential (its dry_run argument is header-mirrored)
+    tiers: {dev: L3, prod: L2}
