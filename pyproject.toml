@@ -1,6 +1,6 @@
 [project]
 name = "mcp-airlock"
-version = "0.1.0"
+version = "0.2.0"
 description = "Stateless governance proxy for MCP (2026-07-28): policy, dry-run, human confirmation, audit, tracing"
 readme = "README.md"
 requires-python = ">=3.11"

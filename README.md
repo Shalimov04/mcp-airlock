@@ -54,7 +54,7 @@ writes `audit.jsonl` into `/data`:
 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
-  ghcr.io/shalimov04/mcp-airlock:0.1 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
+  ghcr.io/shalimov04/mcp-airlock:0.2 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
 From a checkout:
