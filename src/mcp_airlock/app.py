@@ -282,6 +282,14 @@ class Airlock:
         t0 = time.perf_counter()
         status, reply = await self.forward(fwd, fwd_headers, who)
         result = reply.get("result")
+        gated = d.verdict == "confirm" or d.rule_id == "tier.L2.confirmed"
+        if gated and isinstance(result, dict) and result.get("resultType") == "input_required":
+            # The upstream's question and ours share requestState/inputResponses; passing it on loops forever
+            # (every retry is a new prompt and a real forward). Refuse instead.
+            rule, msg = "mrtr.upstream_input_required", "the upstream asked for its own input behind an L2 gate; put this tool at L0, L1 or L3"
+            self._outcome(verdict="deny", rule_id=rule, tier=d.tier, dry_run=d.dry_run, upstream_status=status,
+                          latency_ms=_ms(t0), detail=msg, **base)
+            return _tool_error(rid, f"airlock: denied ({rule}): {msg}", rule)
         detail: dict[str, Any] = {}
         if isinstance(result, dict):
             result.setdefault("_meta", {}).update({META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run})
@@ -405,9 +413,11 @@ class Airlock:
         if size <= cap.max_chars:
             return None
         info = {"truncated": True, "chars": size, "max_chars": cap.max_chars, "est_tokens": round(size / cap.chars_per_token)}
-        result.pop("structuredContent", None)
+        if result.pop("structuredContent", None) is not None:
+            # No longer matches the tool's outputSchema; SDK clients raise on that unless the result is an error.
+            result["isError"] = True
         result.setdefault("_meta", {})[META + "output"] = info
-        note = f"\n\n[airlock: output truncated to {cap.max_chars} chars from {size}]"
+        note = f"\n\n[airlock: output truncated to {cap.max_chars} chars from {size}; the call itself ran]"
         content = result.get("content")
         texts = [b for b in (content if isinstance(content, list) else [])
                  if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]

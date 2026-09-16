@@ -168,6 +168,9 @@ async def test_output_cap(client, upstream, audit_path):
     import json as _json
     assert len(_json.dumps(res, ensure_ascii=False)) <= 5000 and "structuredContent" not in res
     assert res["content"][-1]["text"].endswith("from 200267]") or "truncated" in res["content"][-1]["text"]
+    # structuredContent is gone, so the result no longer matches the tool's outputSchema: SDK clients validate
+    # non-error results and would raise instead of showing the truncated text. isError results are not validated.
+    assert res["isError"] is True and "the call itself ran" in res["content"][-1]["text"]
     assert audit_rows(audit_path)[-1]["detail"]["truncated"] is True
 
 

@@ -479,3 +479,53 @@ def test_chars_per_token_must_be_positive(tmp_path):
     p.write_text("version: 1\nenvironment: prod\noutput: {max_chars: 100, chars_per_token: 0}\ntools: {}\n")
     with pytest.raises(pydantic.ValidationError):
         Policy.load(p)
+
+
+def upstream_asks_back(al: Airlock, tool: str) -> list[dict]:
+    """Make every tools/call to `tool` answer with the upstream's own input_required (its own elicitation)."""
+    sent: list[dict] = []
+    orig = al.http.post
+
+    async def post(url, *, content, headers):
+        body = json.loads(content)
+        if body["method"] == "tools/call" and body["params"]["name"] == tool:
+            sent.append(body)
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {
+                "resultType": "input_required", "requestState": "upstream-owned",
+                "inputRequests": {"which": {"method": "elicitation/create", "params": {"message": "which one?"}}}}})
+        return await orig(url, content=content, headers=headers)
+
+    al.http.post = post
+    return sent
+
+
+async def test_upstream_input_required_behind_l2_preview_is_refused_not_looped(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    sent = upstream_asks_back(al, "delete_service")
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.upstream_input_required"
+    assert "inputRequests" not in res and [b["params"]["arguments"]["dry_run"] for b in sent] == [True]
+    assert audit_rows(audit_path)[-1]["rule_id"] == "mrtr.upstream_input_required"
+
+
+async def test_upstream_input_required_after_confirmation_is_refused_not_reprompted(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    sent = upstream_asks_back(al, "restart_service")  # L2 without dry_run: the confirmed call is the first forward
+    async with proxy_client(al) as c:
+        res = await call(c, "restart_service", {"name": "api"})
+        assert res["resultType"] == "input_required" and sent == []
+        res = await call(c, "restart_service", {"name": "api"}, extra=accept(res["requestState"]))
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.upstream_input_required"
+    assert "requestState" not in res and len(sent) == 1
+
+
+async def test_upstream_input_required_at_l1_passes_through_with_its_own_state(upstream, audit_path):
+    al = make_airlock(upstream, audit_path, env="staging")  # set_replicas is L1 there: no airlock prompt to tangle with
+    sent = upstream_asks_back(al, "set_replicas")
+    async with proxy_client(al) as c:
+        res = await call(c, "set_replicas", {"names": ["api"], "replicas": 2})
+        assert res["resultType"] == "input_required" and res["requestState"] == "upstream-owned"
+        retry = {"requestState": "upstream-owned", "inputResponses": {"which": {"action": "accept", "content": {}}}}
+        await call(c, "set_replicas", {"names": ["api"], "replicas": 2}, extra=retry)
+    assert sent[-1]["params"]["requestState"] == "upstream-owned" and sent[-1]["params"]["arguments"]["dry_run"] is True

@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from .app import _last_sse_message
 from .policy import Policy
 
 Finding = tuple[str, str, str]  # (level, code, message)
@@ -54,7 +55,7 @@ async def _catalog(http: httpx.AsyncClient, upstream: str, principal: str) -> di
             params["cursor"] = cursor
         r = await http.post(upstream, headers=headers, json={"jsonrpc": "2.0", "id": i, "method": "tools/list", "params": params})
         r.raise_for_status()
-        body = r.json()
+        body = _last_sse_message(r.text) if r.headers.get("content-type", "").startswith("text/event-stream") else r.json()
         if "error" in body:
             raise RuntimeError(f"tools/list failed: {body['error']}")
         tools.update((t["name"], t) for t in body["result"].get("tools") or [])
@@ -96,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     l.add_argument("--env", action="append", default=[], help="environment(s) that must be covered (repeatable)")
     d = sub.add_parser("diff", help="compare the policy with the upstream's live tools/list")
     d.add_argument("policy")
-    d.add_argument("--upstream", required=True, help="MCP endpoint, e.g. http://127.0.0.1:9001/mcp (proxy works too)")
+    d.add_argument("--upstream", required=True, help="MCP endpoint, e.g. http://127.0.0.1:9001/mcp. Point it at the server, not the proxy: the proxy hides tools the policy does not list")
     d.add_argument("--env", help="environment column to check (default: the policy's own)")
     d.add_argument("--principal", default="airlock-policy", help="X-Airlock-Principal to send")
     a = ap.parse_args(argv)
@@ -105,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             findings = asyncio.run(diff(a.policy, a.upstream, a.env, a.principal))
-        except (httpx.HTTPError, RuntimeError, ValidationError) as e:
+        except (httpx.HTTPError, RuntimeError, ValidationError, ValueError) as e:  # ValueError: not JSON
             findings = [("ERROR", "upstream", str(e))]
     for level, code, msg in findings:
         print(f"{level} {code}: {msg}")

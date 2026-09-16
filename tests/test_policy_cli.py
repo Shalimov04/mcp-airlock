@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -159,3 +160,23 @@ def test_main_diff_exit_code(monkeypatch, capsys):
 def test_main_diff_requires_upstream():
     with pytest.raises(SystemExit):
         policy_cli.main(["diff", str(EXAMPLE)])
+
+
+async def test_diff_reads_an_sse_upstream():
+    # kubernetes-mcp-server answers every POST as text/event-stream
+    def handler(request):
+        msg = json.dumps({"jsonrpc": "2.0", "id": 0, "result": {"tools": [{"name": "get_service", "inputSchema": {}}]}})
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"event: message\ndata: {msg}\n\n")
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    f = await policy_cli.diff(EXAMPLE, "http://x/mcp", env="prod", http=http)
+    assert any(c == "ok" and "1 in catalog" in m for _, c, m in f)
+
+
+def test_main_diff_non_json_upstream_is_an_error_line_not_a_traceback(monkeypatch, capsys):
+    async def fake(*a, **kw):
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    monkeypatch.setattr(policy_cli, "diff", fake)
+    assert policy_cli.main(["diff", str(EXAMPLE), "--upstream", "http://x/mcp"]) == 1
+    assert "ERROR upstream" in capsys.readouterr().out
