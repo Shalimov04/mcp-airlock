@@ -289,6 +289,7 @@ src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
 tests/fake_upstream.py         фейковый сервер для тестов и демо
 docs/clients.md                подключение Claude Code и Cursor (по-английски)
 Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock
+Dockerfile.demo                тестовый сервер и прокси в одном контейнере, для краулеров
 server.json                    манифест для MCP Registry
 docs/make_demo_gif.py          записывает docs/demo.gif
 examples/policies/             политики для GitHub, Grafana, Kubernetes

@@ -7,3 +7,6 @@ docs
 examples
 tests
 demo.py
+# Dockerfile.demo needs these two; the real image copies neither
+!tests/fake_upstream.py
+!examples/demo_container.py

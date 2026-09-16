@@ -1,0 +1,19 @@
+# A sample upstream plus the proxy in front of it, one container, one port, no configuration.
+# The real image is `Dockerfile`. This one exists so a directory crawler can start an image and get
+# a real answer to tools/list; see examples/demo_container.py. Do not deploy it: it trusts a
+# principal header it sets for itself.
+FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY src ./src
+RUN uv sync --frozen --no-dev --no-editable
+
+FROM python:3.12-slim-bookworm
+COPY --from=build /app/.venv /app/.venv
+ENV PATH=/app/.venv/bin:$PATH
+COPY tests/fake_upstream.py policy.example.yaml examples/demo_container.py /app/demo/
+RUN mkdir /data && chown 65532:65532 /data
+WORKDIR /data
+USER 65532:65532
+EXPOSE 9000
+ENTRYPOINT ["python", "/app/demo/demo_container.py"]

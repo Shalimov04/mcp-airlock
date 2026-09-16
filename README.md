@@ -290,6 +290,7 @@ src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
 tests/fake_upstream.py         the fake server the tests and demo run against
 docs/clients.md                connecting Claude Code and Cursor
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image
+Dockerfile.demo                the example server and the proxy in one container, for crawlers
 server.json                    MCP Registry manifest
 docs/make_demo_gif.py          records docs/demo.gif
 examples/policies/             GitHub, Grafana, Kubernetes policies
