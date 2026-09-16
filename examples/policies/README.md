@@ -5,6 +5,7 @@
 | `github.yaml` | [github/github-mcp-server](https://github.com/github/github-mcp-server) | `dev` (sandbox org), `prod` |
 | `grafana.yaml` | [grafana/mcp-grafana](https://github.com/grafana/mcp-grafana) | `dev`, `staging`, `prod` |
 | `kubernetes.yaml` | [containers/kubernetes-mcp-server](https://github.com/containers/kubernetes-mcp-server) | `dev`, `staging`, `prod` |
+| `postgres.yaml` | [bettyguo/mcp-postgres](https://github.com/bettyguo/mcp-postgres) | `dev`, `staging`, `prod` |
 
 Reads are `L0` everywhere; comments/annotations/incidents are `L3` in dev and `L2` in prod; file writes,
 merges, deletes and anything that pages a human are `L2` everywhere with a one-object blast radius. Tools not

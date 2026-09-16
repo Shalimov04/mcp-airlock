@@ -1,0 +1,120 @@
+# mcp-airlock policy for bettyguo/mcp-postgres
+# Repo:        https://github.com/bettyguo/mcp-postgres
+# Tool list:   README.md tools table + src/mcp_postgres/server.py at commit fc5ae83, checked 2026-09-16.
+#              The server provides tools for schema introspection, query execution, pgvector
+#              similarity search, and guarded database administration.
+#
+# Conditional catalog & startup flags:
+# - Admin tools (kill_session, run_vacuum, run_analyze) only exist when mcp-postgres runs
+#   with --allow-admin.
+# - pgvector tools (list_vector_columns, similarity_search, cosine_distance_top) only exist
+#   when the connected database has the 'vector' extension installed. On databases without
+#   pgvector, upstream exposes 24 tools instead of 27.
+# - io_stats requires PostgreSQL 16+ (backed by pg_stat_io).
+# Run mcp-postgres with --allow-admin against a pgvector-enabled PostgreSQL 16+ instance to
+# expose all 27 tools allowlisted here.
+#
+# Tiering rationale (derived from source code inspection and argument shapes, not MCP annotations;
+# the upstream catalog publishes no annotations object):
+# - Schema introspection, metadata reads, and observability metrics are L0 everywhere (read-only).
+# - explain_query takes an `analyze` boolean argument; EXPLAIN ANALYZE executes the statement,
+#   including writes (INSERT/UPDATE/DELETE). Because --readonly is not enforced by this policy,
+#   explain_query can write to the database and is tiered like run_query: L3 in dev, L2 in staging/prod.
+# - Arbitrary SQL execution (run_query, run_query_streaming) passes SQL through: L3 in dev,
+#   L2 in staging/prod.
+# - Note on DDL: --allow-ddl adds no separate tools; it allows DROP, TRUNCATE, ALTER, and GRANT
+#   through run_query. Tiering run_query as L3 in dev means an unprompted DROP TABLE is permitted
+#   in dev if the server is started with --allow-ddl. In staging and prod, L2 prompts a human.
+# - Statistical maintenance (run_analyze) is L3 in dev/staging and L2 in prod.
+# - Session termination (kill_session) and maintenance (run_vacuum) are L2 everywhere with
+#   blast_radius.max_per_call: 1.
+# - refresh_schema_cache takes no arguments and only flushes an in-memory schema cache; tiering
+#   it L2 in prod would needlessly page a human for a cache flush, so it is L3 everywhere.
+#
+# Execution caveat:
+# At commit fc5ae83, live tool execution fails upstream with `syntax error at or near "$1"`
+# from `SET LOCAL statement_timeout = $1`. The MCP tools/list endpoint works cleanly, so
+# airlock-policy diff succeeds for catalog verification, but tool call execution verification
+# currently requires an upstream patch for statement_timeout syntax.
+#
+# Most write tools declare no dry_run. Through mcp-airlock that means: L1 is denied,
+# L2 prompts the human WITHOUT a dry-run preview, L3 executes as sent. Admin tools
+# (kill_session, run_vacuum, run_analyze) declare dry_run and surface impact preview.
+#
+# Omitted on purpose:
+# - run_vacuum(full=true) takes ACCESS EXCLUSIVE table locks and is excluded from unattended
+#   workflows; run_vacuum full=true should be gated behind human DBA approval.
+version: 1
+environment: prod
+output:
+  max_chars: 16000
+  chars_per_token: 4
+blast_radius:
+  max_per_call: 50
+  max_per_principal: 500
+  window_s: 3600
+tools:
+  # ---- schema introspection / metadata: L0 everywhere ------------------------------------------
+  list_schemas:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_tables:              {tiers: {dev: L0, staging: L0, prod: L0}}
+  describe_table:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_views:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  describe_view:            {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_indexes:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_extensions:          {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_functions:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  validate_query:           {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- streaming reads: L0 everywhere ----------------------------------------------------------
+  fetch_more:               {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- stats, health and observability: L0 everywhere ------------------------------------------
+  table_stats:              {tiers: {dev: L0, staging: L0, prod: L0}}
+  growing_tables:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  missing_indexes:          {tiers: {dev: L0, staging: L0, prod: L0}}
+  slow_queries:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  lock_waits:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  io_stats:                 {tiers: {dev: L0, staging: L0, prod: L0}}
+  active_sessions:          {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- pgvector similarity search: L0 everywhere -----------------------------------------------
+  list_vector_columns:      {tiers: {dev: L0, staging: L0, prod: L0}}
+  similarity_search:        {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  cosine_distance_top:      {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+
+  # ---- cache management: L3 everywhere (in-memory flush, takes no arguments) -------------------
+  refresh_schema_cache:
+    description: flush in-memory schema and relation cache
+    tiers: {dev: L3, staging: L3, prod: L3}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}
+
+  # ---- query plan analysis & execution: L3 dev, L2 staging/prod --------------------------------
+  explain_query:
+    description: explain query plan; analyze=true executes statement (including writes)
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 20, window_s: 3600}
+    output: {max_chars: 8000}
+  run_query:
+    description: execute SQL query against database (arbitrary SQL; permits DDL if --allow-ddl)
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 20, window_s: 3600}
+  run_query_streaming:
+    description: open cursor and stream SQL results (arbitrary SQL; permits DDL if --allow-ddl)
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 20, window_s: 3600}
+
+  # ---- maintenance: L3 dev/staging, L2 prod ----------------------------------------------------
+  run_analyze:
+    description: run ANALYZE to refresh query planner statistics on a table
+    tiers: {dev: L3, staging: L3, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+
+  # ---- administrative actions: L2 everywhere (destructive or human-visible) --------------------
+  kill_session:
+    description: terminate an active backend session via pg_terminate_backend
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+  run_vacuum:
+    description: run VACUUM to reclaim storage and update visibility maps on a table
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 2, window_s: 3600}
