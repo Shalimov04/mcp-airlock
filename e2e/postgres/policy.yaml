@@ -1,0 +1,33 @@
+# Policy for the e2e customers-db service. Default-deny: truncate_all is deliberately absent.
+version: 1
+environment: prod
+output: {max_chars: 16000, chars_per_token: 4}
+blast_radius: {max_per_call: 50, max_per_principal: 500, window_s: 3600}
+tools:
+  list_rows:
+    tiers: {prod: L0}
+    output: {max_chars: 3000}
+  get_note:
+    tiers: {prod: L0}
+  update_note:
+    description: overwrite a customer note
+    tiers: {prod: L3}
+  delete_rows:
+    description: permanently delete customers (irreversible)
+    tiers: {prod: L2}
+    count_arg: ids
+    principals:
+      "group:juniors": {prod: L1}
+      bob: {prod: L3}
+    blast_radius: {max_per_call: 5, max_per_principal: 6, window_s: 3600}
+  drop_table:
+    description: drop a table (irreversible, no preview)
+    tiers: {prod: L2}
+    principals:
+      "group:juniors": {prod: L1}
+  archive_rows:
+    description: archive customers (the tool asks its own question)
+    tiers: {prod: L2}
+    count_arg: ids
+  crash:
+    tiers: {prod: L3}

@@ -1,0 +1,7 @@
+apiVersion: 1
+datasources:
+  - name: TestData
+    uid: e2e-testdata
+    type: grafana-testdata-datasource
+    access: proxy
+    isDefault: true

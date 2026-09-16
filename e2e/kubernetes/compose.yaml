@@ -1,0 +1,91 @@
+# Isolated e2e stack: k3s, kubernetes-mcp-server, two airlocks (prod, dev) and a runner.
+# All runtime traffic stays on the internal network (no egress). Images the cluster needs
+# (pause, busybox) are pre-imported from a tar that run.sh writes with `docker save`.
+name: airlock-e2e-k8s
+
+networks:
+  e2e:
+    internal: true
+
+volumes:
+  kube: {}
+  audit: {}
+
+x-airlock: &airlock
+  image: mcp-airlock:e2e
+  networks: [e2e]
+  volumes:
+    - audit:/data
+    - ../../examples/policies/kubernetes.yaml:/policy/kubernetes.yaml:ro
+  environment:
+    AIRLOCK_TRUST_PRINCIPAL_HEADER: "1"   # the runner plays the gateway and sets X-Airlock-Principal
+  depends_on:
+    mcp: {condition: service_started}
+
+services:
+  k3s:
+    image: rancher/k3s:v1.33.4-k3s1
+    privileged: true
+    networks: [e2e]
+    tmpfs: [/run, /var/run]
+    environment:
+      KUBECONFIG: /tmp/k3s.yaml
+    volumes:
+      - kube:/kube
+      - ${E2E_IMAGES_TAR:-./.build/images.tar}:/var/lib/rancher/k3s/agent/images/e2e.tar:ro
+    # k3s writes its kubeconfig with 127.0.0.1; publish a copy pointing at the service name
+    # (covered by --tls-san) for the MCP server and the runner.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        rm -f /kube/config
+        # k3s moves itself out of the root cgroup (cgroup v2) only when it is PID 1; here sh is PID 1.
+        if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+          mkdir -p /sys/fs/cgroup/init
+          for p in $$(cat /sys/fs/cgroup/cgroup.procs); do echo $$p > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; done
+          sed -e 's/ / +/g' -e 's/^/+/' /sys/fs/cgroup/cgroup.controllers > /sys/fs/cgroup/cgroup.subtree_control
+        fi
+        k3s server --tls-san k3s --write-kubeconfig /tmp/k3s.yaml --write-kubeconfig-mode 644 \
+          --disable traefik,metrics-server,local-storage,coredns,servicelb --disable-helm-controller \
+          --disable-network-policy --pause-image registry.k8s.io/pause:3.10 --flannel-iface eth0 &
+        until [ -s /tmp/k3s.yaml ]; do sleep 1; done
+        sed 's#https://127.0.0.1:6443#https://k3s:6443#' /tmp/k3s.yaml > /kube/config.tmp
+        chmod 644 /kube/config.tmp && mv /kube/config.tmp /kube/config
+        wait
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /kube/config && kubectl get --raw /readyz && kubectl get sa default -n default"]
+      interval: 2s
+      retries: 90
+
+  mcp:
+    image: ghcr.io/containers/kubernetes-mcp-server:latest
+    networks: [e2e]
+    command: ["--port", "8080", "--stateless", "--toolsets", "core,config,helm"]
+    environment:
+      KUBECONFIG: /kube/config
+    volumes:
+      - kube:/kube:ro
+    depends_on:
+      k3s: {condition: service_healthy}
+
+  airlock-prod:
+    <<: *airlock
+    command: ["--policy", "/policy/kubernetes.yaml", "--upstream", "http://mcp:8080/mcp", "--env", "prod", "--audit", "/data/prod.jsonl"]
+
+  airlock-dev:
+    <<: *airlock
+    command: ["--policy", "/policy/kubernetes.yaml", "--upstream", "http://mcp:8080/mcp", "--env", "dev", "--audit", "/data/dev.jsonl"]
+
+  runner:
+    image: mcp-airlock:e2e
+    profiles: [runner]
+    networks: [e2e]
+    entrypoint: ["python", "/e2e/scenarios.py"]
+    volumes:
+      - kube:/kube:ro
+      - audit:/audit:ro
+      - ./scenarios.py:/e2e/scenarios.py:ro
+      - ../../examples/policies/kubernetes.yaml:/policy/kubernetes.yaml:ro
+    depends_on:
+      airlock-prod: {condition: service_started}
+      airlock-dev: {condition: service_started}

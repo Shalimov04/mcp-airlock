@@ -1,0 +1,8 @@
+{
+  "uid": "e2e-plain",
+  "title": "E2E plain dashboard",
+  "description": "Nothing to see here.",
+  "tags": ["e2e"],
+  "schemaVersion": 39,
+  "panels": []
+}

@@ -1,0 +1,76 @@
+# Isolated e2e: real Grafana + real grafana/mcp-grafana behind mcp-airlock. One internal network, no published ports.
+# Python containers (airlocks, runner) use the image built from the repo Dockerfile by run.sh.
+name: airlock-e2e-grafana
+
+networks:
+  e2e:
+    internal: true
+
+x-airlock: &airlock
+  image: mcp-airlock-e2e-grafana:local
+  volumes: ["../../examples/policies/grafana.yaml:/policy/grafana.yaml:ro"]
+  networks: [e2e]
+  environment:
+    AIRLOCK_TRUST_PRINCIPAL_HEADER: "1"
+  depends_on:
+    mcp-grafana: {condition: service_started}
+
+services:
+  grafana:
+    image: grafana/grafana-oss:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: e2e-admin-pw
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    networks: [e2e]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      retries: 90
+
+  mcp-grafana:
+    image: grafana/mcp-grafana:1.4.2
+    entrypoint: ["/app/mcp-grafana", "-t", "streamable-http", "-address", "0.0.0.0:8000",
+                 "-allowed-hosts", "mcp-grafana:8000"]
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_USERNAME: admin
+      GRAFANA_PASSWORD: e2e-admin-pw
+    networks: [e2e]
+    depends_on:
+      grafana: {condition: service_healthy}
+
+  airlock-dev:
+    <<: *airlock
+    command: ["--policy", "/policy/grafana.yaml", "--upstream", "http://mcp-grafana:8000/mcp", "--env", "dev",
+              "--audit", "/data/audit.jsonl"]
+
+  airlock-prod:
+    <<: *airlock
+    command: ["--policy", "/policy/grafana.yaml", "--upstream", "http://mcp-grafana:8000/mcp", "--env", "prod",
+              "--audit", "/data/audit.jsonl"]
+
+  runner:
+    image: mcp-airlock-e2e-grafana:local
+    entrypoint: ["python", "-u", "/e2e/scenarios.py"]
+    environment:
+      UPSTREAM: http://mcp-grafana:8000/mcp
+      AIRLOCK_DEV: http://airlock-dev:9000/mcp
+      AIRLOCK_PROD: http://airlock-prod:9000/mcp
+      GRAFANA: http://grafana:3000
+      GRAFANA_AUTH: admin:e2e-admin-pw
+      POLICY: /policy/grafana.yaml
+    volumes:
+      - ./:/e2e:ro
+      - ../../examples/policies/grafana.yaml:/policy/grafana.yaml:ro
+    networks: [e2e]
+    depends_on:
+      airlock-dev: {condition: service_started}
+      airlock-prod: {condition: service_started}

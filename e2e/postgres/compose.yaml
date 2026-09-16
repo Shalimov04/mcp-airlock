@@ -1,0 +1,82 @@
+# Isolated e2e: everything on one internal network, no published ports.
+# Every Python container runs the airlock image built from the repo Dockerfile (it already has the MCP SDK,
+# psycopg, pyjwt and httpx), with this directory mounted read-only at /e2e.
+name: airlock-e2e-pg
+
+x-airlock: &airlock
+  image: mcp-airlock-e2e:local
+  command: ["--policy", "/e2e/policy.yaml", "--upstream", "http://service:8000/mcp", "--env", "prod",
+            "--audit", "/data/audit.jsonl", "--otel-file", "/data/spans.jsonl"]
+  volumes: ["./:/e2e:ro"]
+  networks: [e2e]
+  depends_on:
+    airlock-db: {condition: service_healthy}
+    service: {condition: service_started}
+    webhook: {condition: service_started}
+
+x-env: &airlock-env
+  AIRLOCK_SECRET: e2e-shared-confirm-secret-0123456789
+  AIRLOCK_JWT_SECRET: e2e-jwt-secret-0123456789abcdef0123456789
+  AIRLOCK_STORE_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
+  AIRLOCK_AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
+  AIRLOCK_APPROVAL_WEBHOOK: http://webhook:8080/hook
+
+networks:
+  e2e:
+    internal: true
+
+services:
+  data-db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: app}
+    networks: [e2e]
+    healthcheck: {test: ["CMD", "pg_isready", "-U", "app"], interval: 1s, retries: 60}
+
+  airlock-db:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: airlock, POSTGRES_PASSWORD: airlock, POSTGRES_DB: airlock}
+    networks: [e2e]
+    healthcheck: {test: ["CMD", "pg_isready", "-U", "airlock"], interval: 1s, retries: 60}
+
+  service:
+    image: mcp-airlock-e2e:local
+    entrypoint: ["python", "/e2e/service.py"]
+    environment: {DATA_DSN: "postgresql://app:app@data-db:5432/app"}
+    volumes: ["./:/e2e:ro"]
+    networks: [e2e]
+    restart: "no"
+    depends_on:
+      data-db: {condition: service_healthy}
+
+  webhook:
+    image: mcp-airlock-e2e:local
+    entrypoint: ["python", "/e2e/webhook.py"]
+    volumes: ["./:/e2e:ro"]
+    networks: [e2e]
+
+  airlock-a:
+    <<: *airlock
+    environment:
+      <<: *airlock-env
+      AIRLOCK_PUBLIC_URL: http://airlock-a:9000
+
+  airlock-b:
+    <<: *airlock
+    environment:
+      <<: *airlock-env
+      AIRLOCK_PUBLIC_URL: http://airlock-b:9000
+
+  runner:
+    image: mcp-airlock-e2e:local
+    entrypoint: ["python", "-u", "/e2e/scenarios.py"]
+    environment:
+      AIRLOCK_A: http://airlock-a:9000/mcp
+      AIRLOCK_B: http://airlock-b:9000/mcp
+      AIRLOCK_JWT_SECRET: e2e-jwt-secret-0123456789abcdef0123456789
+      DATA_DSN: postgresql://app:app@data-db:5432/app
+      AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
+      WEBHOOK: http://webhook:8080/
+    volumes: ["./:/e2e:ro"]
+    networks: [e2e]
+    profiles: [runner]
+    depends_on: [airlock-a, airlock-b]
