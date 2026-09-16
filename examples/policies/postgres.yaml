@@ -1,0 +1,96 @@
+# mcp-airlock policy for bettyguo/mcp-postgres
+# Repo:        https://github.com/bettyguo/mcp-postgres
+# Tool list:   README.md tools table + src/mcp_postgres/server.py at commit fc5ae83, checked 2026-09-16.
+#              The server provides tiered tools for schema introspection, query execution,
+#              pgvector similarity search, and guarded database administration.
+#
+# Tiering rationale:
+# - Schema introspection, EXPLAIN, query validation, and metrics are L0 everywhere (read-only).
+# - Arbitrary SQL execution (run_query, run_query_streaming) can run raw SQL as written;
+#   per maintainer instructions and destructiveHint analysis, raw SQL execution is L3 in dev,
+#   L2 in staging/prod.
+# - Statistical maintenance (run_analyze) is L3 in dev/staging and L2 in prod.
+# - Session termination (kill_session) and heavy maintenance (run_vacuum) are L2 everywhere
+#   with blast_radius.max_per_call: 1.
+# - Cache invalidation (refresh_schema_cache) modifies in-memory state: L3 in dev, L2 in prod.
+#
+# Most query tools declare no dry_run. Through mcp-airlock that means: L1 is denied,
+# L2 prompts the human WITHOUT a dry-run preview, L3 executes as sent. Admin tools
+# (kill_session, run_vacuum, run_analyze) declare dry_run and surface impact preview.
+#
+# Omitted on purpose:
+# - Direct DDL/DML drop tools (e.g. drop_table, truncate_table, drop_schema) are intentionally
+#   not exposed by the server and omitted from the policy; schema modifications must be applied
+#   out-of-band through managed migration pipelines.
+# - vacuum full (--allow-vacuum-full) takes ACCESS EXCLUSIVE locks and is excluded from unattended
+#   workflows; run_vacuum full=true should be gated behind human DBA approval.
+version: 1
+environment: prod
+output:
+  max_chars: 16000
+  chars_per_token: 4
+blast_radius:
+  max_per_call: 50
+  max_per_principal: 500
+  window_s: 3600
+tools:
+  # ---- schema introspection / metadata: L0 everywhere ------------------------------------------
+  list_schemas:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_tables:              {tiers: {dev: L0, staging: L0, prod: L0}}
+  describe_table:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_views:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  describe_view:            {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_indexes:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_extensions:          {tiers: {dev: L0, staging: L0, prod: L0}}
+  list_functions:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  validate_query:           {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- query analysis and streaming reads: L0 everywhere ---------------------------------------
+  explain_query:            {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  fetch_more:               {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- stats, health and observability: L0 everywhere ------------------------------------------
+  table_stats:              {tiers: {dev: L0, staging: L0, prod: L0}}
+  growing_tables:           {tiers: {dev: L0, staging: L0, prod: L0}}
+  missing_indexes:          {tiers: {dev: L0, staging: L0, prod: L0}}
+  slow_queries:             {tiers: {dev: L0, staging: L0, prod: L0}}
+  lock_waits:               {tiers: {dev: L0, staging: L0, prod: L0}}
+  io_stats:                 {tiers: {dev: L0, staging: L0, prod: L0}}
+  active_sessions:          {tiers: {dev: L0, staging: L0, prod: L0}}
+
+  # ---- pgvector similarity search: L0 everywhere -----------------------------------------------
+  list_vector_columns:      {tiers: {dev: L0, staging: L0, prod: L0}}
+  similarity_search:        {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+  cosine_distance_top:      {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
+
+  # ---- cache management: L3 in dev, L2 in staging/prod -----------------------------------------
+  refresh_schema_cache:
+    description: invalidate in-memory schema and relation cache
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 10, window_s: 3600}
+
+  # ---- query execution (unfiltered SQL): L3 dev, L2 staging/prod -------------------------------
+  run_query:
+    description: execute SQL query against the database (can pass arbitrary SQL; gated in prod)
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 20, window_s: 3600}
+  run_query_streaming:
+    description: open cursor and stream SQL query results (can pass arbitrary SQL; gated in prod)
+    tiers: {dev: L3, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 20, window_s: 3600}
+
+  # ---- maintenance: L3 dev/staging, L2 prod ----------------------------------------------------
+  run_analyze:
+    description: run ANALYZE to refresh query planner statistics on a table
+    tiers: {dev: L3, staging: L3, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+
+  # ---- administrative actions: L2 everywhere (destructive or human-visible) --------------------
+  kill_session:
+    description: terminate an active backend session via pg_terminate_backend
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 5, window_s: 3600}
+  run_vacuum:
+    description: run VACUUM to reclaim storage and update visibility maps on a table
+    tiers: {dev: L2, staging: L2, prod: L2}
+    blast_radius: {max_per_call: 1, max_per_principal: 2, window_s: 3600}
