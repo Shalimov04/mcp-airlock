@@ -150,7 +150,8 @@ Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unas
 `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`, `tier.L2.dry_run`,
 `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
 `catalog.unavailable`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
-`mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `internal.error`.
+`mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
+`internal.error`.
 
 ## Confirmations in detail
 
@@ -178,7 +179,10 @@ only ever sees `requestState`, cannot approve its own call. Opening the link sho
 with a button; the `GET` does nothing (link previews and prefetchers would otherwise
 approve things), the `POST` records the approval. The agent finds out by repeating the call
 with `requestState` and no `inputResponses`: it gets `input_required` back with
-`status: pending` until the button is pressed, then the call runs.
+`status: pending` until the button is pressed, then the call runs. A human takes minutes; the
+retry loop built into the official Python SDK client gives up after about two seconds of
+polling with `InputRequiredRoundsExceededError`. Catch it and retry later with the same
+`requestState`.
 
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
@@ -240,14 +244,20 @@ yourself before putting a tool at `L1` or `L2`. A client-sent `dry_run: true` on
 that does not declare the argument is treated as a real execution.
 
 Upstreams that themselves answer with `input_required` (a tool that asks its own questions
-through the 2026-07-28 elicitation channel) do not work behind an `L2` gate: the proxy's own
-prompt and the upstream's get tangled. Put such tools at `L0` or `L3`, or don't proxy them.
+through the 2026-07-28 elicitation channel) do not work behind an `L2` gate: both questions
+would share one `requestState`, and every retry would become a new prompt and a new real call.
+The proxy refuses such a call with `mrtr.upstream_input_required` the first time the upstream
+asks, at the dry run if the tool has one, otherwise after the human's yes. At `L0`, `L1` and `L3`
+the upstream's question and state pass through untouched. Put such tools there.
 
 Blast radius counts what it can see: the length of the argument you named, or one. A tool
 whose fan-out is not visible in its arguments cannot be measured here.
 
 Output capping works on the serialized result. Over the cap, text blocks are trimmed and
-`structuredContent` and non-text blocks are dropped. The token estimate is `chars / 4`.
+`structuredContent` and non-text blocks are dropped. The token estimate is `chars / 4`. A result
+that had `structuredContent` comes back with `isError: true`, because it no longer matches the
+tool's `outputSchema` and SDK clients refuse non-error results that don't. The text says the
+call itself ran, so an agent does not repeat a write because its output was too long.
 
 Upstream responses arriving as SSE are reduced to the final message; progress
 notifications are dropped. Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
@@ -255,9 +265,15 @@ notifications are dropped. Legacy HTTP+SSE, Roots, Sampling and Logging are not 
 There is no rate limit on prompting. An agent that keeps re-sending an `L2` call gets a new
 prompt, and a new webhook message, each time.
 
-The test suite runs against a fake FastMCP upstream, in-process and over real sockets. It
-has not been run against the real GitHub, Grafana or Kubernetes servers; the example
-policies are the best effort of reading their source at a pinned commit.
+The unit tests run against a fake FastMCP upstream, in-process and over real sockets. `e2e/` has
+three docker compose stacks on networks with no outside access, each driving the proxy image with
+the official Python SDK client and checking the side effects where they land:
+`e2e/kubernetes` runs the real kubernetes-mcp-server against k3s with the example policy (pods
+really deleted once, declines and replays leave them alone), `e2e/grafana` runs grafana/mcp-grafana
+against Grafana OSS, and `e2e/postgres` runs a small SDK server with an honest dry run against
+Postgres, two proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
+failure. The GitHub policy has still only been checked against the server's source, since its
+server needs github.com.
 
 ## Layout
 
@@ -277,6 +293,7 @@ Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image
 server.json                    MCP Registry manifest
 docs/make_demo_gif.py          records docs/demo.gif
 examples/policies/             GitHub, Grafana, Kubernetes policies
+e2e/                           isolated end-to-end stacks: kubernetes, grafana, postgres
 ```
 
 Tests: `uv run pytest`. Set `AIRLOCK_TEST_PG_DSN` to a Postgres DSN to also run the

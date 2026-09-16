@@ -9,6 +9,12 @@
 # L2 prompts the human WITHOUT a dry-run preview, L3 executes as sent. Verify against the
 # live catalog with `airlock-policy diff <file> --upstream <url>`.
 #
+# Checked against the live server on 2026-09-16 (grafana/mcp-grafana:1.4.2, 74 tools by default).
+# get_query_examples, run_panel_query, query_sql and the three sql listing tools only exist when the
+# server runs with `--enabled-tools` including examples, runpanelquery and sql; without that, diff
+# reports them as missing. The mcp/grafana image on Docker Hub predates the 2026-07-28 revision and
+# answers `Invalid session ID`: use grafana/mcp-grafana 1.0.0 or newer.
+#
 # airlock tiers by tool name, not by `operation`. Tools that mix reads and writes in one name
 # (alerting_manage_rules, alerting_manage_silences) are tiered for their most dangerous operation.
 # Run mcp-grafana with --disable-write to get their read-only variants (list/get only), then move
@@ -38,7 +44,7 @@ tools:
   list_datasources:                 {tiers: {dev: L0, staging: L0, prod: L0}}
   get_datasource:                   {tiers: {dev: L0, staging: L0, prod: L0}}
   get_query_examples:               {tiers: {dev: L0, staging: L0, prod: L0}}
-  generate_deeplink:                {tiers: {dev: L0, staging: L0, prod: L0}}
+  generate_deeplink:                {tiers: {dev: L0, staging: L0, prod: L0}}   # not readOnlyHint: stores a short URL, harmless
   # metric / log / panel queries: smaller cap, raw series and log lines flood the context
   query_prometheus:                 {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
   query_prometheus_histogram:       {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
@@ -52,7 +58,6 @@ tools:
   list_loki_label_names:            {tiers: {dev: L0, staging: L0, prod: L0}}
   list_loki_label_values:           {tiers: {dev: L0, staging: L0, prod: L0}}
   run_panel_query:                  {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
-  query_sql:                        {tiers: {dev: L0, staging: L0, prod: L0}, output: {max_chars: 8000}}
   list_sql_databases:               {tiers: {dev: L0, staging: L0, prod: L0}}
   list_sql_tables:                  {tiers: {dev: L0, staging: L0, prod: L0}}
   describe_sql_table:               {tiers: {dev: L0, staging: L0, prod: L0}}
@@ -75,6 +80,11 @@ tools:
   get_sift_analysis:                {tiers: {dev: L0, staging: L0, prod: L0}}
 
   # ---- annotations / incidents / alert groups: L3 in dev, L2 in staging and prod ---------------
+  query_sql:
+    description: run SQL against a datasource as written; the server does not filter it, so it can change data
+    tiers: {dev: L3, staging: L2, prod: L2}
+    output: {max_chars: 8000}
+    blast_radius: {max_per_call: 1, max_per_principal: 20, window_s: 3600}
   create_annotation:
     description: add an annotation to a dashboard or globally (deletable)
     tiers: {dev: L3, staging: L2, prod: L2}

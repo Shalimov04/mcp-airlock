@@ -9,6 +9,10 @@
 # L2 prompts the human WITHOUT a dry-run preview, L3 executes as sent. Verify against the
 # live catalog with `airlock-policy diff <file> --upstream <url>`.
 #
+# Checked against the live server on 2026-09-16 (ghcr.io/containers/kubernetes-mcp-server, image of
+# 2026-09-14, k3s v1.33): with a single-context kubeconfig the server does not expose
+# configuration_contexts_list or targets_list, so diff reports them missing. Harmless: they are reads.
+#
 # Belt and braces: in prod also start the server with --disable-destructive (or --read-only), so a
 # policy mistake here cannot turn into a delete.
 #
