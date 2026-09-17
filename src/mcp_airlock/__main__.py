@@ -4,21 +4,35 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 
 import uvicorn
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
 
 from .app import build
 
 
-def setup_otel(span_file: str | None) -> None:
+def setup_otel(span_file: str | None) -> TracerProvider:
     provider = TracerProvider(resource=Resource.create({"service.name": "mcp-airlock"}))
-    if span_file:  # ponytail: file/console exporter only; add opentelemetry-exporter-otlp when you have a collector
+    if span_file:  # file/console exporter; OTLP is added below when OTEL_EXPORTER_OTLP_ENDPOINT is set
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter(out=open(span_file, "a"))))
+    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        try:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        except ImportError:
+            print(
+                "OTEL_EXPORTER_OTLP_ENDPOINT is set but opentelemetry-exporter-otlp-proto-http "
+                "is not installed. Install the optional extra: pip install 'mcp-airlock[otlp]'",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        # Endpoint, headers and protocol come from the standard OTEL_* environment variables.
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(provider)
+    return provider
 
 
 def main() -> None:
