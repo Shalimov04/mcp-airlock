@@ -5,3 +5,4 @@ audit.jsonl
 spans.jsonl
 !examples/*.jsonl
 .pytest_cache/
+brag-output/
