@@ -2,6 +2,8 @@
 
 [Русская версия](README.ru.md)
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/shalimov04/mcp-airlock)](https://m8ven.ai/mcp/shalimov04/mcp-airlock)
+
 mcp-airlock is a proxy you put between an AI agent and an MCP server when the server can do
 things you don't want an agent doing on its own. It speaks the 2026-07-28 revision of the
 protocol (the stateless one: no session, no `initialize`, one POST per request) and adds
