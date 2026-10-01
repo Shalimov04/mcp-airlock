@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 import pytest
 
@@ -16,6 +18,9 @@ def _capture(status=200):
         return httpx.Response(status, json={"ok": True})
 
     return seen, handler
+
+
+TELEGRAM_SECRET_URL = "https://api.telegram.org/bot123:SECRET/sendMessage"
 
 
 async def test_slack_payload():
@@ -45,6 +50,40 @@ async def test_connection_error_is_false():
         raise httpx.ConnectError("nope")
 
     assert await approvals.notify("hi", "u", webhook="https://hooks/x", http=_http(boom)) is False
+
+
+async def test_invalid_url_and_closed_client_are_false():
+    _, h = _capture()
+    assert await approvals.notify("hi", "u", webhook="https://hooks.slack.com:abc/x", http=_http(h)) is False
+    closed = _http(h)
+    await closed.aclose()
+    assert await approvals.notify("hi", "u", webhook="https://hooks/x", http=closed) is False
+
+
+async def test_failed_delivery_log_has_no_url(caplog):
+    caplog.set_level(logging.WARNING, logger="httpx")  # httpx prints the URL at INFO by design; the proxy's own loggers are watched at DEBUG
+    caplog.set_level(logging.DEBUG, logger="mcp_airlock")
+
+    def unauthorized(request):
+        return httpx.Response(401, json={"description": "BODYMARK"})
+
+    ok = await approvals.notify("hi", "u", webhook=TELEGRAM_SECRET_URL, http=_http(unauthorized), telegram_chat="-100")
+    assert ok is False
+    assert "SECRET" not in caplog.text and "telegram" not in caplog.text and "BODYMARK" not in caplog.text
+    assert "HTTPStatusError" in caplog.text and "401" in caplog.text
+
+
+async def test_network_error_log_has_class_only(caplog):
+    caplog.set_level(logging.WARNING, logger="httpx")
+    caplog.set_level(logging.DEBUG, logger="mcp_airlock")
+
+    def boom(request):
+        raise httpx.ConnectError(f"cannot reach {request.url}", request=request)
+
+    ok = await approvals.notify("hi", "u", webhook=TELEGRAM_SECRET_URL, http=_http(boom), telegram_chat="-100")
+    assert ok is False
+    assert "SECRET" not in caplog.text and "telegram" not in caplog.text
+    assert "ConnectError" in caplog.text and "HTTP status" not in caplog.text
 
 
 async def test_no_webhook_no_io():

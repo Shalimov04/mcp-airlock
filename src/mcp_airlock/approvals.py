@@ -25,6 +25,8 @@ async def notify(text: str, approve_url: str, *, webhook: str | None, http: http
     try:
         (await http.post(webhook, json=payload, timeout=5.0)).raise_for_status()
         return True
-    except httpx.HTTPError as e:  # ponytail: no retry; the approve link still works, the human just isn't pinged
-        log.warning("approval notify failed: %s", e)
+    except Exception as e:  # ponytail: no retry; the approve link still works, the human just isn't pinged
+        # Exception, not HTTPError: a bad URL or a closed client must not become an internal error. str(e) carries the URL, the URL carries the token: class and status only
+        status = f", HTTP status {e.response.status_code}" if isinstance(e, httpx.HTTPStatusError) else ""
+        log.warning("approval notify failed: %s%s", type(e).__name__, status)
         return False

@@ -186,6 +186,10 @@ retry loop built into the official Python SDK client gives up after about two se
 polling with `InputRequiredRoundsExceededError`. Catch it and retry later with the same
 `requestState`.
 
+A failed webhook post is logged as the exception class and the HTTP status, never the URL,
+which holds the Telegram bot token or the Slack secret path. httpx itself logs every request
+URL at `INFO`, so if you configure logging, keep the `httpx` logger at `WARNING`.
+
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
 `X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as

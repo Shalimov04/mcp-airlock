@@ -219,6 +219,14 @@ async def test_webhook_approval_flow(upstream, audit_path):
     assert len([x for x in upstream.CALLS if x["tool"] == "delete_service" and not x["args"]["dry_run"]]) == 1
 
 
+async def test_failed_webhook_post_still_prompts(upstream, audit_path):
+    al = make_airlock(upstream, audit_path, webhook="https://hooks.example/x", public_url="https://a.example",
+                      notify_http=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(500))))
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+    assert res["resultType"] == "input_required" and res["requestState"]  # the link still works, nobody was pinged
+
+
 async def test_decline_wins_over_out_of_band_approval(upstream, audit_path):
     posted: list[str] = []
     al = make_airlock(upstream, audit_path, webhook="https://hooks.example/x", public_url="https://a.example",
