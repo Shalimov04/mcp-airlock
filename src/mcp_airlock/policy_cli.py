@@ -30,6 +30,8 @@ def lint(policy_path: str | Path, envs=()) -> list[Finding]:
     except Exception as e:  # yaml.YAMLError, OSError, pydantic ValidationError
         return [("ERROR", "invalid", str(e))]
     out: list[Finding] = []
+    known_envs = {p.environment} | {e for r in p.tools.values() for e in r.tiers} \
+        | {e for r in p.tools.values() for ov in r.principals.values() for e in ov}
     for name, rule in p.tools.items():
         if not rule.tiers:
             out.append(("ERROR", "no_tiers", f"{name} has no tiers -> denied everywhere"))
@@ -38,6 +40,10 @@ def lint(policy_path: str | Path, envs=()) -> list[Finding]:
             out.append(("WARN", "no_description", f"{name} is a write tool without a description (shown to the human on confirm)"))
         if rule.count_arg and not rule.blast_radius:
             out.append(("WARN", "blast_radius_default", f"{name} has count_arg={rule.count_arg} but uses the global blast_radius"))
+        for w in rule.where:
+            for env in w.env or ():
+                if env not in known_envs:  # a typo (prd) would make the rule silently inert
+                    out.append(("WARN", "where_env_unknown", f"{name} has a where rule for environment {env!r}, which no tier mentions: it never applies"))
     for env in dict.fromkeys([*envs, p.environment]):
         if not any(env in r.tiers for r in p.tools.values()):
             out.append(("WARN", "env_unused", f"no tool has a tier for environment {env!r}"))
@@ -78,10 +84,14 @@ async def diff(policy_path: str | Path, upstream: str, env: str | None = None, p
     for name, rule in p.tools.items():
         if name not in catalog:
             out.append(("ERROR", "missing_upstream", f"{name} is allowlisted but not in the upstream catalog"))
-        elif rule.tiers.get(p.environment) in ("L1", "L2") \
-                and "dry_run" not in ((catalog[name].get("inputSchema") or {}).get("properties") or {}):
+            continue
+        props = (catalog[name].get("inputSchema") or {}).get("properties") or {}
+        if rule.tiers.get(p.environment) in ("L1", "L2") and "dry_run" not in props:
             out.append(("WARN", "no_dry_run", f"{name} is {rule.tiers[p.environment]} in {p.environment!r} but declares no dry_run: "
                                               "L1 calls will be denied; L2 will prompt without a preview"))
+        for w in rule.where:
+            if w.arg not in props:  # a typo would make the rule fail every call
+                out.append(("WARN", "where_unknown_arg", f"{name} has a where rule on {w.arg!r}, which is not in its inputSchema"))
     for name in catalog.keys() - p.tools.keys():
         out.append(("WARN", "not_allowlisted", f"{name} is in the upstream catalog but not in the policy (denied)"))
     out.append(("INFO", "ok", f"{len(p.tools.keys() & catalog.keys())} tool(s) allowlisted and present upstream, "

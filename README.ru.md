@@ -145,8 +145,32 @@ tools:
 том порядке, в каком их перечисляет токен, затем `tiers[environment]`. `description`
 читает человек, который подтверждает вызов, пишите его для него.
 
+`where` ограничивает тул по значениям аргументов. Должны выполняться все применимые правила,
+иначе вызов отклоняется с `args.violation`. Проверка идёт сразу после списка разрешённых тулов,
+до тира и blast radius, на dry run и на подтверждённом вызове тоже, поэтому никого не просят
+подтвердить вызов, который политика запрещает.
+
+```yaml
+tools:
+  pods_delete:
+    tiers: { prod: L2 }
+    where:
+      - { arg: namespace, in: [staging, dev] }
+      - { arg: name, regex: "tmp-.*" }
+      - { arg: namespace, not_in: [kube-system], env: [staging, prod] }
+```
+
+В каждом правиле ровно один матчер: `equals`, `in`, `not_in` или `regex` (полное совпадение,
+только строки). `env` ограничивает правило этими окружениями, по умолчанию все. Отсутствующий
+аргумент не проходит правило, если нет `optional: true`. Значение-список должно подходить для
+каждого элемента. Строковый аргумент, который разбирается как JSON `null`, список или объект,
+отклоняется любым правилом, потому что upstream может декодировать его до валидации. По той же
+причине `not_in` отклоняет и значение, тип которого не встречается среди перечисленных (`3`
+против `[kube-system]`). Регулярное выражение выполняется на пути запроса при каждом вызове,
+поэтому избегайте вложенных повторений.
+
 Идентификаторы правил, которые встретятся в `_meta` и в аудите: `allowlist.deny`,
-`tier.unassigned`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
+`tier.unassigned`, `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
 `tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`,
 `dry_run.unsupported`, `catalog.unavailable`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`,
 `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`,

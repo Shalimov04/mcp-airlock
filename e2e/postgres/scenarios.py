@@ -350,6 +350,22 @@ async def s12():
     return f"{rule}; 0 human prompts; upstream saw one dry run; nothing changed"
 
 
+@check("18 where: argument conditions")
+async def s18():
+    before = q("SELECT count(*) FROM calls WHERE tool = 'drop_table'")[0][0]
+    rows = q("SELECT count(*) FROM customers")[0][0]
+    async with agent(A, token("alice")) as c:  # alice is L2 for drop_table; the where rule still applies first
+        r = await c.call_tool("drop_table", {"name": "customers"})
+        prompts = len(c.prompts)
+    rule = (r.meta or {}).get(M + "rule_id")
+    assert r.is_error and rule == "args.violation" and prompts == 0, (r, prompts)
+    assert q("SELECT count(*) FROM calls WHERE tool = 'drop_table'")[0][0] == before  # nothing reached the service
+    assert q("SELECT to_regclass('customers')")[0][0] == "customers" and q("SELECT count(*) FROM customers")[0][0] == rows
+    deny = aq("SELECT count(*) FROM airlock_audit WHERE tool = 'drop_table' AND rule_id = 'args.violation' AND verdict = 'deny'")[0][0]
+    assert deny >= 1, deny
+    return f"{rule}; 0 human prompts; service saw no drop_table call for it; customers intact ({rows} rows); denial audited"
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -503,7 +519,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

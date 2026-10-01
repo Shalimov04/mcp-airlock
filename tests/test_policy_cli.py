@@ -180,3 +180,55 @@ def test_main_diff_non_json_upstream_is_an_error_line_not_a_traceback(monkeypatc
     monkeypatch.setattr(policy_cli, "diff", fake)
     assert policy_cli.main(["diff", str(EXAMPLE), "--upstream", "http://x/mcp"]) == 1
     assert "ERROR upstream" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- where
+
+@pytest.mark.parametrize("rule", [
+    "{arg: name, contains: x}",  # unknown matcher
+    "{arg: name, in: [a], optinal: true}",  # unknown key next to a valid matcher
+    "{arg: name, regex: '('}",  # invalid regex
+    "{arg: name, in: [a], regex: 'a'}",  # two matchers
+    "{arg: name}",  # no matcher
+    "{arg: name, in: []}",  # would deny every value
+    "{arg: name, not_in: []}",  # would deny every value, with a false message
+    "{arg: name, in: [a], env: []}",  # would apply nowhere
+    "{arg: name, equals: [a]}",  # a list or dict element can never match
+    "{arg: name, in: [a, [b]]}",
+    "{arg: name, not_in: [{k: v}]}",
+])
+def test_lint_rejects_a_bad_where_rule(tmp_path, rule):
+    f = policy_cli.lint(write(tmp_path, f"  x:\n    description: d\n    tiers: {{prod: L0}}\n    where: [{rule}]\n"))
+    assert codes(f) == ["invalid"] and f[0][0] == "ERROR"
+
+
+def test_lint_accepts_a_good_where_rule(tmp_path):
+    f = policy_cli.lint(write(tmp_path, "  x:\n    description: d\n    tiers: {prod: L0}\n"
+                                        "    where: [{arg: name, in: [a, b]}, {arg: n, regex: 'a.*', env: [prod]}, "
+                                        "{arg: m, in: [a, null]}, {arg: k, equals: null}]\n"))
+    assert codes(f, "ERROR") == []
+
+
+def test_lint_where_env_unknown_warns_once_per_rule_and_name(tmp_path):
+    f = policy_cli.lint(write(tmp_path, "  x:\n    description: d\n    tiers: {prod: L0}\n"
+                                        "    where: [{arg: a, in: [a], env: [prd, prod]}, {arg: b, in: [b], env: [prd, stagin]}]\n"))
+    warns = [m for lvl, c, m in f if c == "where_env_unknown" and lvl == "WARN"]
+    assert len(warns) == 3 and all("x" in m for m in warns)
+    assert sum("'prd'" in m for m in warns) == 2 and sum("'stagin'" in m for m in warns) == 1
+    assert codes(f, "ERROR") == []
+
+
+def test_lint_where_env_known_from_any_tier_principal_or_the_policy(tmp_path):
+    p = write(tmp_path, "  x:\n    description: d\n    tiers: {dev: L0}\n    principals: {alice: {staging: L0}}\n"
+                        "    where: [{arg: a, in: [a], env: [dev, staging, prod, qa]}]\n"  # qa comes from another tool
+                        "  y:\n    description: d\n    tiers: {qa: L0}\n    where: [{arg: a, in: [a], env: [qa]}]\n")
+    assert "where_env_unknown" not in codes(policy_cli.lint(p))
+
+
+async def test_diff_warns_about_a_where_rule_on_an_unknown_argument(upstream, tmp_path):
+    p = write(tmp_path, "  delete_service:\n    description: d\n    tiers: {prod: L2}\n"
+                        "    where: [{arg: name, in: [a]}, {arg: nmae, in: [a]}]\n")
+    f = await policy_cli.diff(p, "http://localhost:9001/mcp", http=http_for(upstream))
+    warns = [m for lvl, c, m in f if c == "where_unknown_arg"]
+    assert len(warns) == 1 and "'nmae'" in warns[0] and "delete_service" in warns[0]
+    assert codes(f, "ERROR") == []

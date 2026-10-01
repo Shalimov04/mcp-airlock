@@ -149,7 +149,30 @@ A tier is resolved in this order: an entry for the exact principal, then the fir
 group in the order the token lists them, then `tiers[environment]`. The `description` is what
 the person approving the call gets to read, so write it for them.
 
-Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
+`where` limits a tool by argument values. Every rule that applies must hold, otherwise the call is
+denied with `args.violation`. The check runs right after the allowlist, before the tier and the
+blast radius, on dry runs and on the confirmed call too, so nobody is asked to approve a call the
+policy forbids.
+
+```yaml
+tools:
+  pods_delete:
+    tiers: { prod: L2 }
+    where:
+      - { arg: namespace, in: [staging, dev] }
+      - { arg: name, regex: "tmp-.*" }
+      - { arg: namespace, not_in: [kube-system], env: [staging, prod] }
+```
+
+Each rule has exactly one matcher: `equals`, `in`, `not_in` or `regex` (full match, strings only).
+`env` limits a rule to those environments, the default is all. An absent argument fails the rule
+unless it has `optional: true`. A list value must match for every element. A string argument that
+parses as JSON `null`, a list or an object is denied by any rule, because the upstream may decode
+it before it validates it. For the same reason `not_in` also denies a value whose type is not among
+the listed values (`3` against `[kube-system]`). A regex runs in the request path on every call, so
+avoid nested repetition.
+
+Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`, `args.violation`,
 `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`, `tier.L2.dry_run`,
 `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
 `catalog.unavailable`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
