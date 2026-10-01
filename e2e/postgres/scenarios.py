@@ -441,6 +441,54 @@ async def s16():
     return f"/healthz and /readyz on A, B and OOB without credentials: 200 {{status: ok}}; airlock_audit stays at {after} rows"
 
 
+@check("17 requestState carries the approval mode")
+async def s17():
+    who, tok = "heidi", token("heidi")
+
+    async def approve(key: str) -> str:
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
+            text = next(m["text"] for m in (await h.get(os.environ["WEBHOOK"])).json() if key in m["text"])
+            link = text.split("Approve: ", 1)[1].strip()
+            assert (await h.post(link)).status_code == 200
+        return link
+
+    async def prompt(url: str, ids: list[int]) -> tuple[str, str]:
+        issued = result(await rpc(url, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}}, tok=tok))
+        assert issued["resultType"] == "input_required" and present(ids) == 1, issued
+        return issued["_meta"][M + "idempotency_key"], issued["requestState"]
+
+    async def in_band(url: str, ids: list[int], st: str, ran: int) -> None:
+        r = result(await rpc(url, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st,
+                                                 "inputResponses": ACCEPT}, tok=tok))
+        assert r["resultType"] == "input_required" and r["_meta"][M + "status"] == "pending", r
+        assert present(ids) == 1 and len(real_calls("delete_rows", who)) == ran
+
+    # Part one: issued by the oob replica, accepted in-band on an inband replica.
+    ids1 = [120]
+    key, st = await prompt(OOB, ids1)
+    await in_band(A, ids1, st, 0)
+    link = await approve(key)
+    assert link.startswith("http://airlock-oob:9000/approve/al2."), link
+    retry = {"name": "delete_rows", "arguments": {"ids": ids1}, "requestState": st}
+    r = result(await rpc(A, "tools/call", retry, tok=tok))
+    assert not r.get("isError") and "deleted 1" in r["content"][0]["text"], r
+    assert present(ids1) == 0 and len(real_calls("delete_rows", who)) == 1
+    again = result(await rpc(B, "tools/call", retry, tok=tok))
+    assert again["isError"] and again["_meta"][M + "rule_id"] == "mrtr.replay", again
+    # Part two: issued by an inband replica, accepted in-band on the oob replica.
+    ids2 = [121]
+    key, st = await prompt(A, ids2)
+    await in_band(OOB, ids2, st, 1)
+    link = await approve(key)
+    assert link.startswith("http://airlock-a:9000/approve/al2."), link
+    r = result(await rpc(B, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids2}, "requestState": st}, tok=tok))
+    assert not r.get("isError") and "deleted 1" in r["content"][0]["text"], r
+    assert present(ids2) == 0 and len(real_calls("delete_rows", who)) == 2
+    return ("oob token accepted in-band on airlock-a stayed pending, row 120 in place; link POST, retry on airlock-a deleted once, "
+            "retry on airlock-b mrtr.replay; airlock-a token accepted in-band on airlock-oob stayed pending, row 121 in place; "
+            "link POST, retry on airlock-b deleted once")
+
+
 async def wait_ready() -> None:
     for _ in range(120):
         try:
@@ -455,7 +503,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

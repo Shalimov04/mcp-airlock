@@ -130,7 +130,8 @@ class Airlock:
 
     def issue_token(self, principal: str, tool: str, args: dict[str, Any]) -> tuple[str, str, float]:
         key, exp = uuid.uuid4().hex, time.time() + self.confirm_ttl_s
-        claims = {**self._binding(principal, tool, args), "k": key, "exp": exp}
+        # The mode is not part of the binding: a replica in another mode accepts the token and applies the stricter one.
+        claims = {**self._binding(principal, tool, args), "k": key, "exp": exp, "m": self.approval_mode}
         body = _b64(json.dumps(claims, separators=(",", ":")).encode())
         return self._sign(body, TOKEN_PREFIX), key, exp
 
@@ -157,7 +158,7 @@ class Airlock:
 
     async def verify_confirmation(self, params: dict[str, Any], principal: str, tool: str, args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Returns (mode, claims): mode is 'none' (no airlock token), 'accepted', 'pending' (token but no answer yet),
-        'pending:ignored' (pending, and an in-band accept was ignored in oob mode) or 'deny:<rule>'.
+        'pending:ignored' (pending, and an in-band accept was ignored in oob mode of the token or the replica) or 'deny:<rule>'.
         Never consumes the key on accept; `_call` does that right before forwarding."""
         state = params.get("requestState")
         if not isinstance(state, str) or not state.startswith(TOKEN_PREFIX):
@@ -173,7 +174,9 @@ class Airlock:
         answer = responses.get(CONFIRM_KEY) if isinstance(responses, dict) else responses
         content = answer.get("content") if isinstance(answer, dict) else None
         in_band = isinstance(answer, dict) and answer.get("action") == "accept" and isinstance(content, dict) and content.get("confirm") is True
-        if answer is None or (in_band and self.approval_mode == "oob"):
+        # The stricter mode wins; a token without m (issued before the upgrade) falls back to this replica's mode.
+        strict = self.approval_mode == "oob" or ("m" in claims and claims["m"] != "inband")
+        if answer is None or (in_band and strict):
             # No answer for our question (or, in oob mode, one that does not count): approved out-of-band, or still waiting (nothing burned)
             if await self.engine.store.is_approved(claims["k"]):
                 return "accepted", claims

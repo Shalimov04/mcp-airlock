@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from mcp_airlock import Airlock, Policy
-from mcp_airlock.app import CONFIRM_KEY, META
+from mcp_airlock.app import CONFIRM_KEY, META, TOKEN_PREFIX, _b64, _unb64
 from mcp_airlock.audit import AuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
 from mcp_airlock.store import MemoryStore, PostgresStore
@@ -685,6 +685,95 @@ async def test_oob_prompt_says_the_client_cannot_approve(upstream, audit_path):
     msg = res["inputRequests"][CONFIRM_KEY]["params"]["message"]
     assert "confirming in the client does not approve" in msg and "Confirm to execute" not in msg
     assert res["requestState"] and CONFIRM_KEY in res["inputRequests"]  # shape unchanged
+
+
+def replicas(upstream, tmp_path, posted: list, *modes: str) -> list[Airlock]:
+    """One replica per mode, all sharing the secret and the store (and the webhook, which oob needs)."""
+    secret, store = b"s" * 32, MemoryStore()
+    return [webhook_airlock(upstream, tmp_path / f"audit{i}.jsonl", posted, secret=secret, store=store, approval_mode=m)
+            for i, m in enumerate(modes)]
+
+
+def resign(al: Airlock, token: str, **claims) -> str:
+    """The token with its claims replaced (None drops one), signed with the replica's own key."""
+    body = json.loads(_unb64(token[len(TOKEN_PREFIX):].split(".", 1)[0]))
+    body = {k: v for k, v in {**body, **claims}.items() if v is not None}
+    return al._sign(_b64(json.dumps(body, separators=(",", ":")).encode()), TOKEN_PREFIX)
+
+
+@pytest.mark.parametrize("issuer, receiver", [("oob", "inband"), ("inband", "oob")])
+async def test_token_mode_is_not_dropped_by_a_replica_in_the_other_mode(upstream, tmp_path, issuer, receiver):
+    posted: list[str] = []
+    a, b = replicas(upstream, tmp_path, posted, issuer, receiver)
+    args = {"name": "api"}
+    async with proxy_client(a) as ca, proxy_client(b) as cb:
+        token = (await call(ca, "delete_service", args))["requestState"]
+        n = len(upstream.CALLS)
+        res = await call(cb, "delete_service", args, extra=accept(token))
+        assert res["resultType"] == "input_required" and res["_meta"][META + "status"] == "pending"
+        assert len(upstream.CALLS) == n and real_deletes(upstream) == []
+        assert (await cb.post(approve_path(posted))).status_code == 200  # the link approves whichever replica gets it
+        res = await call(cb, "delete_service", args, extra={"requestState": token})
+        assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+    assert len(real_deletes(upstream)) == 1
+    pending = [r for r in audit_rows(tmp_path / "audit1.jsonl") if r["rule_id"] == "mrtr.pending"]
+    assert len(pending) == 2 and all(r["detail"] == "in-band accept ignored (approval mode oob)" for r in pending)
+
+
+async def test_inband_token_accepted_in_band_by_an_inband_replica(upstream, tmp_path):
+    posted: list[str] = []
+    a, b = replicas(upstream, tmp_path, posted, "inband", "inband")
+    async with proxy_client(a) as ca, proxy_client(b) as cb:
+        token = (await call(ca, "delete_service", {"name": "api"}))["requestState"]
+        res = await call(cb, "delete_service", {"name": "api"}, extra=accept(token))
+    assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+    assert len(real_deletes(upstream)) == 1
+
+
+async def test_token_without_mode_runs_on_an_inband_replica(upstream, tmp_path):
+    posted: list[str] = []
+    (al,) = replicas(upstream, tmp_path, posted, "inband")
+    async with proxy_client(al) as c:
+        token = resign(al, (await call(c, "delete_service", {"name": "api"}))["requestState"], m=None)
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+    assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+    assert len(real_deletes(upstream)) == 1
+
+
+async def test_token_without_mode_stays_pending_on_an_oob_replica_until_the_link(upstream, tmp_path):
+    posted: list[str] = []
+    (al,) = replicas(upstream, tmp_path, posted, "oob")
+    async with proxy_client(al) as c:
+        token = resign(al, (await call(c, "delete_service", {"name": "api"}))["requestState"], m=None)
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+        assert res["_meta"][META + "status"] == "pending" and real_deletes(upstream) == []
+        assert (await c.post(approve_path(posted))).status_code == 200
+        res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": token})
+        assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+    assert len(real_deletes(upstream)) == 1
+
+
+async def test_unknown_token_mode_counts_as_oob(upstream, tmp_path):
+    posted: list[str] = []
+    (al,) = replicas(upstream, tmp_path, posted, "inband")
+    async with proxy_client(al) as c:
+        token = resign(al, (await call(c, "delete_service", {"name": "api"}))["requestState"], m="strict")
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+    assert res["_meta"][META + "status"] == "pending" and real_deletes(upstream) == []
+
+
+async def test_editing_the_token_mode_breaks_the_signature(upstream, tmp_path):
+    posted: list[str] = []
+    a, b = replicas(upstream, tmp_path, posted, "oob", "inband")
+    async with proxy_client(a) as ca, proxy_client(b) as cb:
+        token = (await call(ca, "delete_service", {"name": "api"}))["requestState"]
+        body, sig = token[len(TOKEN_PREFIX):].split(".", 1)
+        claims = json.loads(_unb64(body))
+        assert claims["m"] == "oob"
+        edited = TOKEN_PREFIX + _b64(json.dumps({**claims, "m": "inband"}, separators=(",", ":")).encode()) + "." + sig
+        res = await call(cb, "delete_service", {"name": "api"}, extra=accept(edited))
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.bad_signature"
+    assert real_deletes(upstream) == []
 
 
 async def test_default_without_webhook_is_inband(upstream, audit_path):

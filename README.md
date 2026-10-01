@@ -117,7 +117,7 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
-| `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
+| `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
 | `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
@@ -159,12 +159,12 @@ Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unas
 ## Confirmations in detail
 
 The confirmation token (`requestState`) is an HMAC-signed blob carrying the principal, the
-tool, a hash of the arguments, the environment, the upstream URL, a random idempotency key
-and an expiry (10 minutes). Nothing is stored when it is issued. When it comes back the
-proxy checks the signature, checks that all of those still match the call in front of it,
-re-runs the policy, burns the key, then charges the blast-radius counter. Burning is an
-atomic insert in the store, so two replicas cannot both execute the same confirmation. A
-decline burns the key too.
+tool, a hash of the arguments, the environment, the upstream URL, a random idempotency key,
+an expiry (10 minutes) and the approval mode. Nothing is stored when it is issued. When it
+comes back the proxy checks the signature, checks that all of those still match the call in
+front of it, re-runs the policy, burns the key, then charges the blast-radius counter.
+Burning is an atomic insert in the store, so two replicas cannot both execute the same
+confirmation. A decline burns the key too.
 
 Before the prompt is issued the proxy asks the upstream for `tools/list` and looks at the
 tool's schema. If the tool declares `dry_run`, the dry run is forwarded and its output is
@@ -189,6 +189,7 @@ polling with `InputRequiredRoundsExceededError`. Catch it and retry later with t
 
 In `oob` mode an in-band `accept` leaves the call `pending` and the audit record says the
 accept was ignored; a decline still burns the key.
+The mode travels in the token: an `oob` token or an `oob` replica ignores the in-band `accept`.
 
 A failed webhook post is logged as the exception class and the HTTP status, never the URL,
 which holds the Telegram bot token or the Slack secret path. In `oob` mode a failed post
