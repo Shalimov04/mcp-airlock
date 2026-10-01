@@ -46,6 +46,7 @@ PRINCIPAL_REQUIRED = -32011  # airlock-specific JSON-RPC code (implementation ra
 TOKEN_PREFIX = "al1."  # requestState: held by the agent
 APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derived key the agent never sees
 CONFIRM_KEY = "airlock-confirm"
+ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
 _tracer = trace.get_tracer("mcp-airlock")
@@ -225,7 +226,7 @@ class Airlock:
                 return await self._passthrough(body, headers, who, method, base)
             except Exception as e:  # never leak a traceback; try hard to leave an outcome record
                 log.exception("airlock internal error")
-                self._outcome(verdict="error", rule_id="internal.error", detail=repr(e), **base)
+                self._outcome(verdict="error", rule_id="internal.error", detail=_exc_text(e), **base)
                 return _rpc_error(rid, INTERNAL_ERROR, "airlock: internal error")
 
     async def _passthrough(self, body, headers, who: Principal, method, base) -> Response:
@@ -317,7 +318,7 @@ class Airlock:
                     span.set_attribute("airlock.suspicious", len(findings))
             except Exception as e:
                 log.exception("post-processing failed; returning the upstream result as-is")
-                detail["postprocess_error"] = repr(e)
+                detail["postprocess_error"] = _exc_text(e)
             if d.verdict == "confirm" and status == 200 and not result.get("isError"):
                 reply["result"] = self._input_required(who.sub, tool, args, result)  # preview failed: no gate, just the error
                 await self._notify(reply["result"], who.sub)
@@ -363,7 +364,7 @@ class Airlock:
                                                 "method": "tools/list", "params": params}, list_headers, who)
             result = reply.get("result") if status == 200 else None
             if not isinstance(result, dict):
-                raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {reply.get('error') or 'no result'}")
+                raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {_clip(str(reply.get('error') or 'no result'))}")
             tools.update({t["name"]: t for t in result.get("tools") or [] if isinstance(t, dict) and "name" in t})
             ttl_ms = result.get("ttlMs") if isinstance(result.get("ttlMs"), int) else 0
             cursor = result.get("nextCursor")
@@ -401,7 +402,7 @@ class Airlock:
         try:
             r = await self.http.post(self.upstream, content=json.dumps(dict(body, params=params)), headers=out_headers)
         except httpx.HTTPError as e:
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream unreachable: {e}"}}
+            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream unreachable: {type(e).__name__}"}}
         ctype = r.headers.get("content-type", "")
         if ctype.startswith("text/event-stream"):
             return r.status_code, _last_sse_message(r.text)
@@ -554,6 +555,15 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
 
 def _ms(t0: float) -> int:
     return round((time.perf_counter() - t0) * 1000)
+
+
+def _clip(text: str) -> str:
+    """Upstream or exception text bound for the caller or the audit: scrubbed first, so a cut never splits a credential."""
+    return scrub(text)[:ERROR_TEXT_MAX]
+
+
+def _exc_text(e: Exception) -> str:
+    return f"{type(e).__name__}: {_clip(str(e))}"
 
 
 def _rpc_error(rid: Any, code: int, message: str, data: Any = None, status: int | None = None) -> JSONResponse:

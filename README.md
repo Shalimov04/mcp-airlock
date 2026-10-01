@@ -215,7 +215,8 @@ Argument values under keys like `password`, `token`, `api_key`, `authorization` 
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
 `sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
 approvers, including the dry-run preview. `detail` holds
-the output-cap numbers and the injection rules that fired, when any did.
+the output-cap numbers and the injection rules that fired, when any did. Free text in
+`detail` is scrubbed the same way as the arguments.
 
 To read the log:
 

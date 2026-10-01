@@ -357,13 +357,15 @@ async def s14():
     assert crash.status_code == 502 and body["error"]["code"] == -32603 and "Traceback" not in crash.text, crash.text
     await asyncio.sleep(0.5)
     down_read = await rpc(B, "tools/call", {"name": "list_rows", "arguments": {}}, tok=token("alice"))
-    assert down_read.status_code == 502 and "upstream unreachable" in down_read.json()["error"]["message"], down_read.text
+    down_msg = down_read.json()["error"]["message"]
+    head, _, cls = down_msg.partition(": ")
+    assert down_read.status_code == 502 and head == "upstream unreachable" and cls.isidentifier(), down_read.text
     down_gated = result(await rpc(A, "tools/call", {"name": "delete_rows", "arguments": {"ids": [80]}}, tok=token("alice")))
     assert down_gated["_meta"][M + "rule_id"] == "catalog.unavailable", down_gated
     row = aq("SELECT upstream_status, verdict FROM airlock_audit WHERE tool = 'crash' AND phase = 'outcome'")
     assert row == [(502, "allow")], row
     assert aq("SELECT count(*) FROM airlock_audit WHERE tool = 'crash' AND phase = 'intent'")[0][0] == 1
-    return f"crash: HTTP 502 -32603 '{body['error']['message'][:60]}'; later read 502; L2 call catalog.unavailable; audit outcome upstream_status=502"
+    return f"crash: HTTP 502 -32603 '{body['error']['message']}'; later read 502 '{down_msg}'; L2 call catalog.unavailable; audit outcome upstream_status=502"
 
 
 @check("13 audit in Postgres: intent/outcome pairs, stats CLI, redaction")

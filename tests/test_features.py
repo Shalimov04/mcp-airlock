@@ -14,7 +14,7 @@ import pytest
 from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META
 from mcp_airlock.audit import AuditLog
-from mcp_airlock.identity import IdentityConfig
+from mcp_airlock.identity import IdentityConfig, Principal
 from mcp_airlock.store import MemoryStore, PostgresStore
 
 from .conftest import ROOT, audit_rows, call, make_airlock, rpc
@@ -392,6 +392,71 @@ async def test_catalog_failure_fails_closed(upstream, audit_path):
         res = await call(c, "delete_service", {"name": "api", "dry_run": True})
         assert res["isError"] and res["_meta"][META + "rule_id"] == "catalog.unavailable"
     assert [x for x in upstream.CALLS if x["tool"] == "delete_service"] == []
+
+
+async def test_catalog_error_text_is_scrubbed_for_caller_and_audit(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    orig = al.http.post
+    leak = "Bearer tok-SECRET123"
+
+    async def post(url, *, content, headers):
+        if json.loads(content)["method"] == "tools/list":
+            return httpx.Response(401, json={"jsonrpc": "2.0", "id": 1, "error": {"message": f"bad {leak} " + "x" * 400}})
+        return await orig(url, content=content, headers=headers)
+
+    al.http.post = post
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+    text = res["content"][0]["text"]
+    assert res["_meta"][META + "rule_id"] == "catalog.unavailable" and "[REDACTED]" in text and "SECRET123" not in text
+    assert len(text.split("): ", 2)[2]) == 300  # the upstream part is cut at 300 characters
+    raw = audit_path.read_text()
+    assert "SECRET123" not in raw and "[REDACTED]" in raw
+    assert {r["detail"] for r in audit_rows(audit_path) if r["verdict"] == "deny"} == {text.split("): ", 1)[1]}
+
+
+async def test_forward_failure_names_the_class_only(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+
+    async def post(url, *, content, headers):
+        raise httpx.ConnectError("illegal header value b'Bearer tok-SECRET123'")
+
+    al.http.post = post
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    status, reply = await al.forward(body, {}, Principal("alice"))
+    assert status == 502 and reply["error"]["message"] == "upstream unreachable: ConnectError"
+
+
+async def test_upstream_unreachable_secret_reaches_neither_caller_nor_audit(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+
+    async def post(url, *, content, headers):
+        raise httpx.ConnectError("illegal header value b'Bearer tok-SECRET123'")
+
+    al.http.post = post
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+    assert res["_meta"][META + "rule_id"] == "catalog.unavailable"
+    assert "SECRET123" not in json.dumps(res) + audit_path.read_text()
+
+
+async def test_internal_and_postprocess_error_text_is_scrubbed(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+
+    def boom(*a, **kw):
+        raise RuntimeError("failed with Bearer tok-SECRET123 " + "y" * 400)
+
+    al._cap_output = boom
+    async with proxy_client(al) as c:
+        await call(c, "get_service", {"name": "api"})
+        al.engine.evaluate = boom
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}})
+    assert r.json()["error"]["message"] == "airlock: internal error"
+    raw = audit_path.read_text()
+    assert "SECRET123" not in raw
+    details = [r["detail"] for r in audit_rows(audit_path) if r["detail"]]
+    assert details[0]["postprocess_error"].startswith("RuntimeError: failed with [REDACTED] y")
+    assert details[1].startswith("RuntimeError: failed with [REDACTED] y") and len(details[1]) == len("RuntimeError: ") + 300
 
 
 async def test_malformed_upstream_content_does_not_lose_the_result(upstream, audit_path):
