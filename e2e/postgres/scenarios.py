@@ -1,9 +1,10 @@
-"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against two airlock replicas in front of
-a Postgres-backed MCP service. Assertions are made on the real databases. Prints PASS/FAIL per check."""
+"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against three airlock replicas (two in-band,
+one oob) in front of a Postgres-backed MCP service. Assertions are made on the real databases. Prints PASS/FAIL per check."""
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import subprocess
@@ -20,7 +21,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp_types import ElicitResult
 
-A, B = os.environ["AIRLOCK_A"], os.environ["AIRLOCK_B"]
+A, B, OOB = os.environ["AIRLOCK_A"], os.environ["AIRLOCK_B"], os.environ["AIRLOCK_OOB"]
 SERVICE = "http://service:8000/mcp"
 V = "2026-07-28"
 ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotocol/clientCapabilities": {}}
@@ -245,6 +246,10 @@ async def s07():
         assert pend["_meta"][M + "status"] == "pending", pend
         page = await h.get(link)
         assert page.status_code == 200 and "<form method=\"post\">" in page.text, page.text
+        # The page shows what is approved: tool, arguments and the dry-run preview, HTML-escaped (both lines hold quotes).
+        shown = [f"Arguments: {json.dumps({'ids': ids})}", "Dry-run preview: would delete 1 row(s): [(40, 'customer-40')]"]
+        assert "delete_rows" in page.text, page.text
+        assert all(html.escape(x) in page.text and x not in page.text for x in shown), page.text
         pend2 = result(await rpc(B, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st}, tok=tok))
         assert pend2["_meta"][M + "status"] == "pending" and present(ids) == 1, pend2
         # The SDK driver polls a state-only input_required a few times, then gives up: record that it does not execute.
@@ -266,7 +271,7 @@ async def s07():
     assert present(ids) == 0 and len(real_calls("delete_rows", "frank")) == 1
     again = result(await rpc(A, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st}, tok=tok))
     assert again["_meta"][M + "rule_id"] == "mrtr.replay", again
-    return f"webhook got link; pending before POST (GET changed nothing; SDK poll on pending: {sdk_pending}); POST on B approved; SDK retry executed once; re-retry mrtr.replay"
+    return f"webhook got link; page shows tool, arguments and preview escaped; pending before POST (GET changed nothing; SDK poll on pending: {sdk_pending}); POST on B approved; SDK retry executed once; re-retry mrtr.replay"
 
 
 @check("08 blast radius per call and per principal window across replicas")
@@ -382,10 +387,49 @@ async def s13():
             f"L2.confirmed={stats[('allow', 'tier.L2.confirmed')]}, replay={stats[('deny', 'mrtr.replay')]}); secret redacted")
 
 
+@check("15 oob mode: in-band accept is ignored, only the webhook link approves, retry runs once")
+async def s15():
+    ids, who = [110], "grace"
+    tok = token(who)
+    issued = result(await rpc(OOB, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}}, tok=tok))
+    assert issued["resultType"] == "input_required" and present(ids) == 1, issued
+    key, st = issued["_meta"][M + "idempotency_key"], issued["requestState"]
+    accept = {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st, "inputResponses": ACCEPT}
+    ignored = result(await rpc(OOB, "tools/call", accept, tok=tok))
+    assert ignored["resultType"] == "input_required" and ignored["_meta"][M + "status"] == "pending", ignored
+    assert present(ids) == 1 and not real_calls("delete_rows", who)
+    # The SDK client accepts the elicitation too; the polls on the state-only pending result end in an error.
+    async with agent(OOB, tok) as c:
+        try:
+            await c.call_tool("delete_rows", {"ids": ids})
+            sdk = "returned"
+        except Exception as e:
+            sdk = type(e).__name__
+        accepted = [p for p in c.prompts if "confirm" in p["props"]]
+    assert accepted and present(ids) == 1 and not real_calls("delete_rows", who), (accepted, sdk)
+    ignored_rows = aq("SELECT count(*) FROM airlock_audit WHERE rule_id = 'mrtr.pending' AND principal = %s "
+                      "AND rec->>'detail' LIKE %s", who, "%in-band accept ignored%")[0][0]
+    assert ignored_rows >= 2, ignored_rows
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
+        text = next(m["text"] for m in (await h.get(os.environ["WEBHOOK"])).json() if key in m["text"])
+        link = text.split("Approve: ", 1)[1].strip()
+        assert link.startswith("http://airlock-oob:9000/approve/al2."), text
+        assert (await h.post(link)).status_code == 200
+    retry = {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st}
+    r = result(await rpc(OOB, "tools/call", retry, tok=tok))
+    assert not r.get("isError") and "deleted 1" in r["content"][0]["text"], r
+    assert present(ids) == 0 and len(real_calls("delete_rows", who)) == 1
+    again = result(await rpc(OOB, "tools/call", retry, tok=tok))
+    assert again["isError"] and again["_meta"][M + "rule_id"] == "mrtr.replay", again
+    assert len(real_calls("delete_rows", who)) == 1
+    return (f"in-band accept (raw and SDK, poll: {sdk}) left row 110 in place, {ignored_rows} mrtr.pending audit records "
+            "say it was ignored; POST on the webhook link, then the retry deleted once; second retry mrtr.replay")
+
+
 async def wait_ready() -> None:
     for _ in range(120):
         try:
-            if [(await rpc(u, "tools/list")).status_code for u in (A, B)] == [401, 401]:
+            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB)] == [401, 401, 401]:
                 return
         except httpx.HTTPError:
             pass
@@ -396,7 +440,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

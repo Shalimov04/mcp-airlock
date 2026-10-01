@@ -284,7 +284,7 @@ the official Python SDK client and checking the side effects where they land:
 `e2e/kubernetes` runs the real kubernetes-mcp-server against k3s with the example policy (pods
 really deleted once, declines and replays leave them alone), `e2e/grafana` runs grafana/mcp-grafana
 against Grafana OSS, and `e2e/postgres` runs a small SDK server with an honest dry run against
-Postgres, two proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
+Postgres, three proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
 failure. The GitHub policy has still only been checked against the server's source, since its
 server needs github.com.
 

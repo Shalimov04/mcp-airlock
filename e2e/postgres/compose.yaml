@@ -20,7 +20,6 @@ x-env: &airlock-env
   AIRLOCK_STORE_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
   AIRLOCK_AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
   AIRLOCK_APPROVAL_WEBHOOK: http://webhook:8080/hook
-  AIRLOCK_APPROVAL_MODE: inband  # most scenarios approve by accepting in-band; 07 covers the link
 
 networks:
   e2e:
@@ -60,12 +59,20 @@ services:
     environment:
       <<: *airlock-env
       AIRLOCK_PUBLIC_URL: http://airlock-a:9000
+      AIRLOCK_APPROVAL_MODE: inband  # most scenarios approve by accepting in-band; 07 covers the link
 
   airlock-b:
     <<: *airlock
     environment:
       <<: *airlock-env
       AIRLOCK_PUBLIC_URL: http://airlock-b:9000
+      AIRLOCK_APPROVAL_MODE: inband  # most scenarios approve by accepting in-band; 07 covers the link
+
+  airlock-oob:  # no AIRLOCK_APPROVAL_MODE: with a webhook the default is oob (scenario 15)
+    <<: *airlock
+    environment:
+      <<: *airlock-env
+      AIRLOCK_PUBLIC_URL: http://airlock-oob:9000
 
   runner:
     image: mcp-airlock-e2e:local
@@ -73,6 +80,7 @@ services:
     environment:
       AIRLOCK_A: http://airlock-a:9000/mcp
       AIRLOCK_B: http://airlock-b:9000/mcp
+      AIRLOCK_OOB: http://airlock-oob:9000/mcp
       AIRLOCK_JWT_SECRET: e2e-jwt-secret-0123456789abcdef0123456789
       DATA_DSN: postgresql://app:app@data-db:5432/app
       AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
@@ -80,4 +88,4 @@ services:
     volumes: ["./:/e2e:ro"]
     networks: [e2e]
     profiles: [runner]
-    depends_on: [airlock-a, airlock-b]
+    depends_on: [airlock-a, airlock-b, airlock-oob]
