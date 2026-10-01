@@ -202,6 +202,11 @@ The approve page is a capability URL. Anyone holding it can press the button. Pu
 unverified unless it came from a bearer token the proxy could check. The page shows the
 redacted arguments and the dry-run preview, kept in the store until the prompt expires.
 
+`GET /healthz` answers `{"status":"ok"}` while the process is up. `GET /readyz` answers 200
+`{"status":"ok"}` when the store responds and 503 `{"status":"unavailable"}` after 2 seconds
+or on an error. Neither needs credentials, writes an audit record or calls the upstream;
+`/readyz` checks the store only.
+
 ## Audit
 
 Two JSON lines per call, with a shared `call_id`:

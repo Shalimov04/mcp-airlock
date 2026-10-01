@@ -3,6 +3,8 @@ L2 without dry_run, injection marking, out-of-band approvals. Written before the
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import html
 import json
 import os
@@ -17,7 +19,7 @@ from mcp_airlock.audit import AuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
 from mcp_airlock.store import MemoryStore, PostgresStore
 
-from .conftest import ROOT, audit_rows, call, make_airlock, rpc
+from .conftest import ROOT, SPANS, audit_rows, call, make_airlock, rpc
 
 PG = os.environ.get("AIRLOCK_TEST_PG_DSN")
 
@@ -845,3 +847,120 @@ async def test_approve_page_text_expires_with_the_prompt(upstream, audit_path):
         key = next(iter(al.engine.store._prompts))
         al.engine.store._prompts[key] = (0.0, "x")  # expired entry is not served
         assert (await c.get(approve_path(posted))).text.count("not available") == 1
+
+
+# 10. health and readiness probes ---------------------------------------------------------------------------------
+async def _raises() -> None:
+    raise RuntimeError("postgresql://user:pw@host/db is down")
+
+
+async def _hangs() -> None:
+    try:
+        await asyncio.sleep(30)
+    except asyncio.CancelledError:  # like psycopg on a silent query: the first cancel is caught and the wait goes on
+        await asyncio.sleep(0.2)  # short, so the loop can still close at teardown
+
+
+async def test_probes_answer_without_credentials_and_write_nothing(upstream, audit_path, monkeypatch):
+    al = make_airlock(upstream, audit_path, trust_principal_header=False, jwt_secret="s" * 32)  # a principal would be required
+    sent = spy(al)
+    monkeypatch.setattr("mcp_airlock.app.resolve", lambda *a: pytest.fail("a probe resolved identity"))
+    SPANS.clear()
+    async with proxy_client(al) as c:
+        for path in ("/healthz", "/readyz"):
+            r = await c.get(path)
+            assert r.status_code == 200 and r.json() == {"status": "ok"}, path
+        assert (await c.get("/nope")).status_code == 404
+    assert audit_rows(audit_path) == [] and upstream.CALLS == [] and sent == [] and SPANS.get_finished_spans() == ()
+
+
+@pytest.mark.parametrize("ping", [_raises, _hangs], ids=["raises", "hangs"])
+async def test_readyz_is_503_when_the_store_fails_and_keeps_the_error_out(upstream, audit_path, monkeypatch, caplog, ping):
+    monkeypatch.setattr("mcp_airlock.app.READY_TIMEOUT_S", 0.05)
+    al = make_airlock(upstream, audit_path)
+    al.engine.store.ping = ping
+    async with proxy_client(al) as c:
+        r = await c.get("/readyz")
+        assert r.status_code == 503 and r.json() == {"status": "unavailable"}
+        assert "pw@host" not in r.text and "pw@host" not in caplog.text
+        assert (await c.get("/healthz")).status_code == 200  # liveness does not look at the store
+    assert audit_rows(audit_path) == [] and upstream.CALLS == []
+
+
+async def test_readyz_shares_one_ping_while_the_store_hangs(upstream, audit_path, monkeypatch):
+    monkeypatch.setattr("mcp_airlock.app.READY_TIMEOUT_S", 0.05)
+    al = make_airlock(upstream, audit_path)
+    pings: list[int] = []
+
+    async def ping() -> None:
+        pings.append(1)
+        await _hangs()
+
+    al.engine.store.ping = ping
+    async with proxy_client(al) as c:
+        rs = await asyncio.gather(*(c.get("/readyz") for _ in range(5)))
+        assert {r.status_code for r in rs} == {503} and len(pings) == 1  # one connection however many probes arrive meanwhile
+        assert (await c.get("/readyz")).status_code == 503 and len(pings) == 2  # after one bound the hung ping is left behind
+
+
+async def test_readyz_recovers_once_the_store_answers_again(upstream, audit_path, monkeypatch):
+    monkeypatch.setattr("mcp_airlock.app.READY_TIMEOUT_S", 0.05)
+    al = make_airlock(upstream, audit_path)
+    calls: list[int] = []
+
+    async def ping() -> None:  # the first connection is black-holed for good; every later one answers
+        calls.append(1)
+        if len(calls) == 1:
+            await _hangs()
+
+    al.engine.store.ping = ping
+    async with proxy_client(al) as c:
+        assert (await c.get("/readyz")).status_code == 503
+        assert (await c.get("/readyz")).status_code == 200  # a fresh ping, not another wait on the hung one
+    assert len(calls) == 2
+
+
+async def test_readyz_follows_a_store_that_answered_down_and_back_up(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    calls: list[int] = []
+
+    async def ping() -> None:  # the store answers, goes down, comes back; all on one instance
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("postgresql://user:pw@host/db is down")
+
+    al.engine.store.ping = ping
+    async with proxy_client(al) as c:
+        assert (await c.get("/readyz")).status_code == 200
+        assert (await c.get("/readyz")).status_code == 503  # the first answer is not reused once it is in
+        assert (await c.get("/readyz")).status_code == 200
+    assert len(calls) == 3
+
+
+async def test_readyz_keeps_a_late_failure_out_of_the_log(upstream, audit_path, monkeypatch, caplog):
+    monkeypatch.setattr("mcp_airlock.app.READY_TIMEOUT_S", 0.05)
+    al = make_airlock(upstream, audit_path)
+    calls: list[int] = []
+
+    async def ping() -> None:  # the first connection dies after the probe gave up on it; every later one answers
+        calls.append(1)
+        if len(calls) == 1:
+            await asyncio.sleep(0.1)
+            raise RuntimeError("postgresql://user:pw@host/db is down")
+
+    al.engine.store.ping = ping
+    async with proxy_client(al) as c:
+        assert (await c.get("/readyz")).status_code == 503
+        await asyncio.sleep(0.2)  # the first ping fails with nobody waiting for it
+        assert (await c.get("/readyz")).status_code == 200  # the failed ping is garbage now
+    gc.collect()
+    assert "pw@host" not in caplog.text and "never retrieved" not in caplog.text
+
+
+@pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set")
+async def test_readyz_on_postgres(upstream, audit_path):
+    async with proxy_client(make_airlock(upstream, audit_path, store=PostgresStore(PG))) as c:
+        assert (await c.get("/readyz")).status_code == 200
+    async with proxy_client(make_airlock(upstream, audit_path, store=PostgresStore("postgresql://x:y@127.0.0.1:1/z"))) as c:
+        r = await c.get("/readyz")
+        assert r.status_code == 503 and r.json() == {"status": "unavailable"}

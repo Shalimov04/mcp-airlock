@@ -49,6 +49,7 @@ CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
+READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 _tracer = trace.get_tracer("mcp-airlock")
 
 
@@ -109,7 +110,10 @@ class Airlock:
         self.notify_http = notify_http or self.http
         self.public_url = (public_url or "").rstrip("/")
         self._catalog: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}  # (version, sub, groups) to (expires_at, tools)
+        self._ping: asyncio.Task | None = None  # the in-flight readiness check, shared by the probes that arrive within one bound
         self.app = Starlette(routes=[
+            Route("/healthz", self.healthz, methods=["GET"]),
+            Route("/readyz", self.readyz, methods=["GET"]),
             Route("/mcp", self.handle, methods=["POST"]),
             Route("/approve/{token}", self.approve_page, methods=["GET"]),
             Route("/approve/{token}", self.approve_submit, methods=["POST"]),
@@ -511,6 +515,26 @@ class Airlock:
         text = f"mcp-airlock approval request from {principal}\n" + message
         await approvals.notify(text, self.approve_link(result["requestState"]), webhook=self.webhook,
                                http=self.notify_http, telegram_chat=self.telegram_chat)
+
+    # ---------- probes: no identity, no audit, no span, no upstream ----------
+    async def healthz(self, request: Request) -> Response:
+        return JSONResponse({"status": "ok"})
+
+    async def readyz(self, request: Request) -> Response:
+        ping = self._ping
+        if ping is None or ping.done():
+            # Never cancelled: psycopg answers a cancel on a silent query by waiting for it without a bound.
+            ping = self._ping = asyncio.create_task(self.engine.store.ping())
+            # Retrieved here: a failure after the probe gave up is otherwise logged by asyncio with the exception text.
+            ping.add_done_callback(lambda t: t.cancelled() or t.exception())
+        try:
+            await asyncio.wait_for(asyncio.shield(ping), READY_TIMEOUT_S)
+        except Exception as e:  # the body never carries exception text
+            if self._ping is ping:
+                self._ping = None  # left behind: a ping stuck on a black-holed socket would otherwise pin /readyz at 503
+            log.warning("readiness check failed: %s", type(e).__name__)
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        return JSONResponse({"status": "ok"})
 
     # ---------- out-of-band approval page ----------
     def _approval_claims(self, request: Request) -> dict[str, Any] | None:

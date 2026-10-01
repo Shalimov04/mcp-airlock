@@ -30,6 +30,9 @@ class MemoryStore:
         self._approved = {k: e for k, e in self._approved.items() if e >= now}
         self._prompts = {k: v for k, v in self._prompts.items() if v[0] >= now}
 
+    async def ping(self) -> None:
+        return None
+
     async def consume_once(self, key: str, exp_ts: float) -> bool:
         self._purge_keys()  # no await between check and set, so atomic under asyncio
         if key in self._consumed:
@@ -110,6 +113,10 @@ class PostgresStore:
                     await c.execute(_DDL)
                 self._ready = True
             yield c
+
+    async def ping(self) -> None:
+        async with self._conn() as c:
+            await c.execute("SELECT 1")
 
     async def consume_once(self, key: str, exp_ts: float) -> bool:
         async with self._conn() as c:

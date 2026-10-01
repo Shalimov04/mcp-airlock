@@ -9,6 +9,8 @@ import httpx
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from mcp_airlock import Airlock, Policy
 from mcp_airlock.audit import AuditLog
@@ -16,7 +18,10 @@ from mcp_airlock.audit import AuditLog
 from . import fake_upstream
 
 ROOT = Path(__file__).resolve().parents[1]
-trace.set_tracer_provider(TracerProvider())  # real (non-noop) spans so traceparent is actually injected
+SPANS = InMemorySpanExporter()  # every span the proxy ends; clear it before counting
+_provider = TracerProvider()  # real (non-noop) spans so traceparent is actually injected
+_provider.add_span_processor(SimpleSpanProcessor(SPANS))
+trace.set_tracer_provider(_provider)
 V = "2026-07-28"
 ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotocol/clientCapabilities": {}}
 

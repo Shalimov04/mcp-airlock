@@ -428,6 +428,19 @@ async def s15():
             "say it was ignored; POST on the webhook link, then the retry deleted once; second retry mrtr.replay")
 
 
+@check("16 health endpoints: no credentials, no audit rows")
+async def s16():
+    before = aq("SELECT count(*) FROM airlock_audit")[0][0]
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
+        for name, url in (("A", A), ("B", B), ("OOB", OOB)):
+            for path in ("/healthz", "/readyz"):  # /readyz runs SELECT 1 on the replica's real Postgres store
+                r = await h.get(url.removesuffix("/mcp") + path)  # A, B and OOB are the /mcp endpoints
+                assert r.status_code == 200 and r.json() == {"status": "ok"}, (name, path, r.status_code, r.text)
+    after = aq("SELECT count(*) FROM airlock_audit")[0][0]
+    assert after == before, (before, after)
+    return f"/healthz and /readyz on A, B and OOB without credentials: 200 {{status: ok}}; airlock_audit stays at {after} rows"
+
+
 async def wait_ready() -> None:
     for _ in range(120):
         try:
@@ -442,7 +455,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")
