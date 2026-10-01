@@ -59,12 +59,51 @@ services:
     environment:
       <<: *airlock-env
       AIRLOCK_PUBLIC_URL: http://airlock-a:9000
+      AIRLOCK_APPROVAL_MODE: inband  # most scenarios approve by accepting in-band; 07 covers the link
 
   airlock-b:
     <<: *airlock
     environment:
       <<: *airlock-env
       AIRLOCK_PUBLIC_URL: http://airlock-b:9000
+      AIRLOCK_APPROVAL_MODE: inband  # most scenarios approve by accepting in-band; 07 covers the link
+
+  airlock-oob:  # no AIRLOCK_APPROVAL_MODE: with a webhook the default is oob (scenario 15)
+    <<: *airlock
+    environment:
+      <<: *airlock-env
+      AIRLOCK_PUBLIC_URL: http://airlock-oob:9000
+
+  pin-init:  # pins the service's tools with the real command, then changes one pin the way a changed description would
+    image: mcp-airlock-e2e:local
+    user: root
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        i=0
+        until airlock-policy pin /e2e/policy.yaml --upstream http://service:8000/mcp --pins /pins/pins.json; do
+          i=$$((i + 1)); [ $$i -lt 60 ] || exit 1; sleep 1
+        done
+        python -c "import json; p = '/pins/pins.json'; d = json.load(open(p)); d['get_note'] = 'sha256:' + '0' * 64; json.dump(d, open(p, 'w'))"
+    volumes: ["./:/e2e:ro", "pins:/pins"]
+    networks: [e2e]
+    depends_on:
+      service: {condition: service_started}
+
+  airlock-pins:  # airlock-a plus a pins file in which get_note no longer matches (scenario 19)
+    <<: *airlock
+    volumes: ["./:/e2e:ro", "pins:/pins:ro"]
+    depends_on:
+      airlock-db: {condition: service_healthy}
+      service: {condition: service_started}
+      webhook: {condition: service_started}
+      pin-init: {condition: service_completed_successfully}
+    environment:
+      <<: *airlock-env
+      AIRLOCK_PUBLIC_URL: http://airlock-pins:9000
+      AIRLOCK_APPROVAL_MODE: inband
+      AIRLOCK_PINS: /pins/pins.json
 
   runner:
     image: mcp-airlock-e2e:local
@@ -72,6 +111,8 @@ services:
     environment:
       AIRLOCK_A: http://airlock-a:9000/mcp
       AIRLOCK_B: http://airlock-b:9000/mcp
+      AIRLOCK_OOB: http://airlock-oob:9000/mcp
+      AIRLOCK_PINS_URL: http://airlock-pins:9000/mcp
       AIRLOCK_JWT_SECRET: e2e-jwt-secret-0123456789abcdef0123456789
       DATA_DSN: postgresql://app:app@data-db:5432/app
       AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
@@ -79,4 +120,7 @@ services:
     volumes: ["./:/e2e:ro"]
     networks: [e2e]
     profiles: [runner]
-    depends_on: [airlock-a, airlock-b]
+    depends_on: [airlock-a, airlock-b, airlock-oob, airlock-pins]
+
+volumes:
+  pins:

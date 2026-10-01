@@ -21,7 +21,9 @@ FIELDS = ("phase", "call_id", "principal", "method", "tool", "args", "verdict", 
           "tier", "dry_run", "latency_ms", "upstream_status", "trace_id", "detail")
 
 
-_SECRET_INLINE = re.compile(r"(Bearer\s+[A-Za-z0-9._~+/=-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)")
+# The JWT alternative starts only at a token boundary: tried at every "ey" inside one run of identifier characters it
+# rescans the run each time, quadratic on client-chosen text such as a method name in a protocol deny.
+_SECRET_INLINE = re.compile(r"(Bearer\s+[A-Za-z0-9._~+/=-]+|sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|(?<![A-Za-z0-9_-])ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)")
 
 
 def redact(value: Any, key: str = "") -> Any:
@@ -42,10 +44,27 @@ def scrub(text: str) -> str:
     return _SECRET_INLINE.sub(REDACTED, text)
 
 
+def _clean_detail(value: Any, key: str = "") -> Any:
+    """`detail` carries upstream error text: same key and value rules as args, then inline credentials in every string."""
+    if isinstance(value, (dict, list, tuple)):
+        if _SECRET_KEY.search(key):
+            return REDACTED
+        if isinstance(value, dict):
+            return {k: _clean_detail(v, str(k)) for k, v in value.items()}
+        return [_clean_detail(v, key) for v in value]
+    if isinstance(value, (int, float)):  # counts such as est_tokens match the key rule but are not secrets
+        return value
+    if value is not None and not isinstance(value, str):
+        value = str(value)  # what _dumps(default=str) would write later; scrub that text, not the object
+    value = redact(value, key)
+    return scrub(value) if isinstance(value, str) else value
+
+
 def _row(rec: dict[str, Any]) -> dict[str, Any]:
     row = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
     row.update({k: rec.get(k) for k in FIELDS})
     row["args"] = redact(row["args"]) if row["args"] is not None else None
+    row["detail"] = _clean_detail(row["detail"])
     return row
 
 

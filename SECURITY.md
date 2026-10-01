@@ -51,6 +51,9 @@ this section.
 * **Without `AIRLOCK_STORE_DSN` the state is per process.** Two replicas without a shared
   store can each burn their own copy of a confirmation key. Set the DSN if you run more than
   one.
+* **In `inband` approval mode, whoever sends `inputResponses` confirms.** Without a webhook the
+  mode is `inband`, and the client's accept is the approval; making sure only a person sends
+  it is the client's job.
 * **Denial of service by an authenticated principal.** There is no rate limit on prompting; an
   agent that keeps re-sending an `L2` call gets a new prompt each time.
 

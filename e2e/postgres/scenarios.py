@@ -1,9 +1,11 @@
-"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against two airlock replicas in front of
-a Postgres-backed MCP service. Assertions are made on the real databases. Prints PASS/FAIL per check."""
+"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against four airlock replicas (three in-band,
+one oob; one of the in-band ones has a pins file) in front of a Postgres-backed MCP service. Assertions are made on
+the real databases. Prints PASS/FAIL per check."""
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import subprocess
@@ -20,7 +22,8 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp_types import ElicitResult
 
-A, B = os.environ["AIRLOCK_A"], os.environ["AIRLOCK_B"]
+A, B, OOB = os.environ["AIRLOCK_A"], os.environ["AIRLOCK_B"], os.environ["AIRLOCK_OOB"]
+PINS = os.environ["AIRLOCK_PINS_URL"]
 SERVICE = "http://service:8000/mcp"
 V = "2026-07-28"
 ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotocol/clientCapabilities": {}}
@@ -245,6 +248,10 @@ async def s07():
         assert pend["_meta"][M + "status"] == "pending", pend
         page = await h.get(link)
         assert page.status_code == 200 and "<form method=\"post\">" in page.text, page.text
+        # The page shows what is approved: tool, arguments and the dry-run preview, HTML-escaped (both lines hold quotes).
+        shown = [f"Arguments: {json.dumps({'ids': ids})}", "Dry-run preview: would delete 1 row(s): [(40, 'customer-40')]"]
+        assert "delete_rows" in page.text, page.text
+        assert all(html.escape(x) in page.text and x not in page.text for x in shown), page.text
         pend2 = result(await rpc(B, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st}, tok=tok))
         assert pend2["_meta"][M + "status"] == "pending" and present(ids) == 1, pend2
         # The SDK driver polls a state-only input_required a few times, then gives up: record that it does not execute.
@@ -266,7 +273,7 @@ async def s07():
     assert present(ids) == 0 and len(real_calls("delete_rows", "frank")) == 1
     again = result(await rpc(A, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st}, tok=tok))
     assert again["_meta"][M + "rule_id"] == "mrtr.replay", again
-    return f"webhook got link; pending before POST (GET changed nothing; SDK poll on pending: {sdk_pending}); POST on B approved; SDK retry executed once; re-retry mrtr.replay"
+    return f"webhook got link; page shows tool, arguments and preview escaped; pending before POST (GET changed nothing; SDK poll on pending: {sdk_pending}); POST on B approved; SDK retry executed once; re-retry mrtr.replay"
 
 
 @check("08 blast radius per call and per principal window across replicas")
@@ -345,6 +352,40 @@ async def s12():
     return f"{rule}; 0 human prompts; upstream saw one dry run; nothing changed"
 
 
+@check("18 where: argument conditions")
+async def s18():
+    before = q("SELECT count(*) FROM calls WHERE tool = 'drop_table'")[0][0]
+    rows = q("SELECT count(*) FROM customers")[0][0]
+    async with agent(A, token("alice")) as c:  # alice is L2 for drop_table; the where rule still applies first
+        r = await c.call_tool("drop_table", {"name": "customers"})
+        prompts = len(c.prompts)
+    rule = (r.meta or {}).get(M + "rule_id")
+    assert r.is_error and rule == "args.violation" and prompts == 0, (r, prompts)
+    assert q("SELECT count(*) FROM calls WHERE tool = 'drop_table'")[0][0] == before  # nothing reached the service
+    assert q("SELECT to_regclass('customers')")[0][0] == "customers" and q("SELECT count(*) FROM customers")[0][0] == rows
+    deny = aq("SELECT count(*) FROM airlock_audit WHERE tool = 'drop_table' AND rule_id = 'args.violation' AND verdict = 'deny'")[0][0]
+    assert deny >= 1, deny
+    return f"{rule}; 0 human prompts; service saw no drop_table call for it; customers intact ({rows} rows); denial audited"
+
+
+@check("19 pins: a changed description is hidden")
+async def s19():
+    tok = token("alice")
+    pinned = result(await rpc(PINS, "tools/list", tok=tok))
+    plain = result(await rpc(A, "tools/list", tok=tok))  # airlock-a has no pins file
+    pinned_names, plain_names = {t["name"] for t in pinned["tools"]}, {t["name"] for t in plain["tools"]}
+    # pin-init changed the pin of get_note; every other allowlisted tool keeps its real pin
+    assert "get_note" in plain_names and "list_rows" in plain_names, plain_names
+    assert "get_note" not in pinned_names and pinned_names == plain_names - {"get_note"}, (pinned_names, plain_names)
+    assert pinned["_meta"][M + "pin_mismatch"] == 1 and M + "pin_mismatch" not in plain["_meta"], (pinned["_meta"], plain["_meta"])
+    rows = aq("SELECT phase, rec->>'detail' FROM airlock_audit WHERE rule_id = 'catalog.pin_mismatch' AND verdict = 'deny'")
+    assert rows and all(d.startswith("get_note:") for _, d in rows) and {p for p, _ in rows} == {"intent", "outcome"}, rows
+    read = result(await rpc(PINS, "tools/call", {"name": "list_rows", "arguments": {"limit": 1}}, tok=tok))
+    assert not read.get("isError") and read["_meta"][M + "rule_id"] == "tier.L0.read", read
+    return (f"airlock-pins hides get_note (pin_mismatch 1) and lists the other {len(pinned_names)} allowlisted tools; "
+            f"airlock-a still lists get_note; {len(rows)} catalog.pin_mismatch audit records name get_note; list_rows call works")
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -352,13 +393,15 @@ async def s14():
     assert crash.status_code == 502 and body["error"]["code"] == -32603 and "Traceback" not in crash.text, crash.text
     await asyncio.sleep(0.5)
     down_read = await rpc(B, "tools/call", {"name": "list_rows", "arguments": {}}, tok=token("alice"))
-    assert down_read.status_code == 502 and "upstream unreachable" in down_read.json()["error"]["message"], down_read.text
+    down_msg = down_read.json()["error"]["message"]
+    head, _, cls = down_msg.partition(": ")
+    assert down_read.status_code == 502 and head == "upstream unreachable" and cls.isidentifier(), down_read.text
     down_gated = result(await rpc(A, "tools/call", {"name": "delete_rows", "arguments": {"ids": [80]}}, tok=token("alice")))
     assert down_gated["_meta"][M + "rule_id"] == "catalog.unavailable", down_gated
     row = aq("SELECT upstream_status, verdict FROM airlock_audit WHERE tool = 'crash' AND phase = 'outcome'")
     assert row == [(502, "allow")], row
     assert aq("SELECT count(*) FROM airlock_audit WHERE tool = 'crash' AND phase = 'intent'")[0][0] == 1
-    return f"crash: HTTP 502 -32603 '{body['error']['message'][:60]}'; later read 502; L2 call catalog.unavailable; audit outcome upstream_status=502"
+    return f"crash: HTTP 502 -32603 '{body['error']['message']}'; later read 502 '{down_msg}'; L2 call catalog.unavailable; audit outcome upstream_status=502"
 
 
 @check("13 audit in Postgres: intent/outcome pairs, stats CLI, redaction")
@@ -382,10 +425,110 @@ async def s13():
             f"L2.confirmed={stats[('allow', 'tier.L2.confirmed')]}, replay={stats[('deny', 'mrtr.replay')]}); secret redacted")
 
 
+@check("15 oob mode: in-band accept is ignored, only the webhook link approves, retry runs once")
+async def s15():
+    ids, who = [110], "grace"
+    tok = token(who)
+    issued = result(await rpc(OOB, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}}, tok=tok))
+    assert issued["resultType"] == "input_required" and present(ids) == 1, issued
+    key, st = issued["_meta"][M + "idempotency_key"], issued["requestState"]
+    accept = {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st, "inputResponses": ACCEPT}
+    ignored = result(await rpc(OOB, "tools/call", accept, tok=tok))
+    assert ignored["resultType"] == "input_required" and ignored["_meta"][M + "status"] == "pending", ignored
+    assert present(ids) == 1 and not real_calls("delete_rows", who)
+    # The SDK client accepts the elicitation too; the polls on the state-only pending result end in an error.
+    async with agent(OOB, tok) as c:
+        try:
+            await c.call_tool("delete_rows", {"ids": ids})
+            sdk = "returned"
+        except Exception as e:
+            sdk = type(e).__name__
+        accepted = [p for p in c.prompts if "confirm" in p["props"]]
+    assert accepted and present(ids) == 1 and not real_calls("delete_rows", who), (accepted, sdk)
+    ignored_rows = aq("SELECT count(*) FROM airlock_audit WHERE rule_id = 'mrtr.pending' AND principal = %s "
+                      "AND rec->>'detail' LIKE %s", who, "%in-band accept ignored%")[0][0]
+    assert ignored_rows >= 2, ignored_rows
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
+        text = next(m["text"] for m in (await h.get(os.environ["WEBHOOK"])).json() if key in m["text"])
+        link = text.split("Approve: ", 1)[1].strip()
+        assert link.startswith("http://airlock-oob:9000/approve/al2."), text
+        assert (await h.post(link)).status_code == 200
+    retry = {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st}
+    r = result(await rpc(OOB, "tools/call", retry, tok=tok))
+    assert not r.get("isError") and "deleted 1" in r["content"][0]["text"], r
+    assert present(ids) == 0 and len(real_calls("delete_rows", who)) == 1
+    again = result(await rpc(OOB, "tools/call", retry, tok=tok))
+    assert again["isError"] and again["_meta"][M + "rule_id"] == "mrtr.replay", again
+    assert len(real_calls("delete_rows", who)) == 1
+    return (f"in-band accept (raw and SDK, poll: {sdk}) left row 110 in place, {ignored_rows} mrtr.pending audit records "
+            "say it was ignored; POST on the webhook link, then the retry deleted once; second retry mrtr.replay")
+
+
+@check("16 health endpoints: no credentials, no audit rows")
+async def s16():
+    before = aq("SELECT count(*) FROM airlock_audit")[0][0]
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
+        for name, url in (("A", A), ("B", B), ("OOB", OOB)):
+            for path in ("/healthz", "/readyz"):  # /readyz runs SELECT 1 on the replica's real Postgres store
+                r = await h.get(url.removesuffix("/mcp") + path)  # A, B and OOB are the /mcp endpoints
+                assert r.status_code == 200 and r.json() == {"status": "ok"}, (name, path, r.status_code, r.text)
+    after = aq("SELECT count(*) FROM airlock_audit")[0][0]
+    assert after == before, (before, after)
+    return f"/healthz and /readyz on A, B and OOB without credentials: 200 {{status: ok}}; airlock_audit stays at {after} rows"
+
+
+@check("17 requestState carries the approval mode")
+async def s17():
+    who, tok = "heidi", token("heidi")
+
+    async def approve(key: str) -> str:
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
+            text = next(m["text"] for m in (await h.get(os.environ["WEBHOOK"])).json() if key in m["text"])
+            link = text.split("Approve: ", 1)[1].strip()
+            assert (await h.post(link)).status_code == 200
+        return link
+
+    async def prompt(url: str, ids: list[int]) -> tuple[str, str]:
+        issued = result(await rpc(url, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}}, tok=tok))
+        assert issued["resultType"] == "input_required" and present(ids) == 1, issued
+        return issued["_meta"][M + "idempotency_key"], issued["requestState"]
+
+    async def in_band(url: str, ids: list[int], st: str, ran: int) -> None:
+        r = result(await rpc(url, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids}, "requestState": st,
+                                                 "inputResponses": ACCEPT}, tok=tok))
+        assert r["resultType"] == "input_required" and r["_meta"][M + "status"] == "pending", r
+        assert present(ids) == 1 and len(real_calls("delete_rows", who)) == ran
+
+    # Part one: issued by the oob replica, accepted in-band on an inband replica.
+    ids1 = [120]
+    key, st = await prompt(OOB, ids1)
+    await in_band(A, ids1, st, 0)
+    link = await approve(key)
+    assert link.startswith("http://airlock-oob:9000/approve/al2."), link
+    retry = {"name": "delete_rows", "arguments": {"ids": ids1}, "requestState": st}
+    r = result(await rpc(A, "tools/call", retry, tok=tok))
+    assert not r.get("isError") and "deleted 1" in r["content"][0]["text"], r
+    assert present(ids1) == 0 and len(real_calls("delete_rows", who)) == 1
+    again = result(await rpc(B, "tools/call", retry, tok=tok))
+    assert again["isError"] and again["_meta"][M + "rule_id"] == "mrtr.replay", again
+    # Part two: issued by an inband replica, accepted in-band on the oob replica.
+    ids2 = [121]
+    key, st = await prompt(A, ids2)
+    await in_band(OOB, ids2, st, 1)
+    link = await approve(key)
+    assert link.startswith("http://airlock-a:9000/approve/al2."), link
+    r = result(await rpc(B, "tools/call", {"name": "delete_rows", "arguments": {"ids": ids2}, "requestState": st}, tok=tok))
+    assert not r.get("isError") and "deleted 1" in r["content"][0]["text"], r
+    assert present(ids2) == 0 and len(real_calls("delete_rows", who)) == 2
+    return ("oob token accepted in-band on airlock-a stayed pending, row 120 in place; link POST, retry on airlock-a deleted once, "
+            "retry on airlock-b mrtr.replay; airlock-a token accepted in-band on airlock-oob stayed pending, row 121 in place; "
+            "link POST, retry on airlock-b deleted once")
+
+
 async def wait_ready() -> None:
     for _ in range(120):
         try:
-            if [(await rpc(u, "tools/list")).status_code for u in (A, B)] == [401, 401]:
+            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB, PINS)] == [401, 401, 401, 401]:
                 return
         except httpx.HTTPError:
             pass
@@ -396,7 +539,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

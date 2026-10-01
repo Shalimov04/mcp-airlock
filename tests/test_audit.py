@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from mcp_airlock import audit
-from mcp_airlock.audit import REDACTED, AuditLog, MultiAudit, PostgresAuditLog, audit_from_env
+from mcp_airlock.audit import REDACTED, AuditLog, MultiAudit, PostgresAuditLog, audit_from_env, scrub
 from mcp_airlock.audit_cli import main
 
 PG = os.environ.get("AIRLOCK_TEST_PG_DSN")
@@ -124,6 +125,59 @@ def test_audit_from_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AIRLOCK_AUDIT_DSN", "postgresql://x")
     m = audit_from_env(tmp_path / "b.jsonl")
     assert isinstance(m, MultiAudit) and [type(s) for s in m.sinks] == [AuditLog, PostgresAuditLog]
+
+
+# --- detail redaction ------------------------------------------------------------------------------------------
+
+BEARER, SK = "Bearer eyJabc.def-ghi", "sk-0123456789abcdef"
+DETAILS = {
+    "str": (f"upstream tools/list failed (HTTP 401): {BEARER} then {SK}", f"upstream tools/list failed (HTTP 401): {REDACTED} then {REDACTED}"),
+    "dict": ({"postprocess_error": f"ValueError: {BEARER}", "nested": {"note": f"key={SK}", "n": 3}, "password": "hunter2",
+              "creds": {"user": "a"}, "credentials": {"user": "a"}, "items": [f"x {SK}", {"authorization": "y"}], "est_tokens": 50094, "truncated": True},
+             {"postprocess_error": f"ValueError: {REDACTED}", "nested": {"note": f"key={REDACTED}", "n": 3}, "password": REDACTED,
+              "creds": {"user": "a"}, "credentials": REDACTED, "items": [f"x {REDACTED}", {"authorization": REDACTED}], "est_tokens": 50094, "truncated": True}),
+    "list": ([f"a {BEARER}", ["b", SK]], [f"a {REDACTED}", ["b", REDACTED]]),
+    "object": ({"err": ValueError(f"boom {SK}")}, {"err": f"boom {REDACTED}"}),  # lands in the row as text (default=str)
+    "none": (None, None),
+}
+
+
+@pytest.mark.parametrize("name", DETAILS)
+def test_jsonl_detail_is_scrubbed(tmp_path, name):
+    raw, want = DETAILS[name]
+    sink = AuditLog(tmp_path / "a.jsonl")
+    sink.write(phase="outcome", **dict(BASE, detail=raw))
+    sink.close()
+    (row,) = jsonl_rows(tmp_path / "a.jsonl")
+    assert row["detail"] == want
+
+
+@pytest.mark.parametrize("name", DETAILS)
+def test_postgres_detail_is_scrubbed(pg_dsn, name):
+    import psycopg
+    raw, want = DETAILS[name]
+    sink = PostgresAuditLog(pg_dsn)
+    sink.write(phase="outcome", **dict(BASE, detail=raw))
+    sink.close()
+    with psycopg.connect(pg_dsn) as c:
+        (rec,), = c.execute("SELECT rec FROM airlock_audit").fetchall()
+    assert rec["detail"] == want
+
+
+def test_detail_redaction_leaves_other_fields_alone(tmp_path):
+    sink = AuditLog(tmp_path / "a.jsonl")
+    sink.write(phase="outcome", **dict(BASE, detail=f"x {SK}", tool=f"t {SK}"))
+    sink.close()
+    (row,) = jsonl_rows(tmp_path / "a.jsonl")
+    assert row["tool"] == f"t {SK}" and row["detail"] == f"x {REDACTED}"
+
+
+def test_scrub_is_fast_on_identifier_runs():
+    run = "ey" * 100_000  # a method name of this shape reaches scrub through a protocol deny, before the principal check
+    t0 = time.perf_counter()
+    assert scrub(run) == run
+    assert time.perf_counter() - t0 < 0.5
+    assert scrub("id_token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl ok") == f"id_token={REDACTED} ok"
 
 
 # --- CLI -------------------------------------------------------------------------------------------------------

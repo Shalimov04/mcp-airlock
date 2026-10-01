@@ -32,6 +32,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from . import approvals, guard
+from . import pins as tool_pins
 from .audit import audit_from_env, redact, scrub
 from .identity import IdentityConfig, Principal, resolve
 from .policy import Engine, Policy
@@ -46,6 +47,10 @@ PRINCIPAL_REQUIRED = -32011  # airlock-specific JSON-RPC code (implementation ra
 TOKEN_PREFIX = "al1."  # requestState: held by the agent
 APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derived key the agent never sees
 CONFIRM_KEY = "airlock-confirm"
+ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
+PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
+PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
+READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 _tracer = trace.get_tracer("mcp-airlock")
 
 
@@ -85,6 +90,8 @@ class Airlock:
         telegram_chat: str | None = None,
         notify_http: httpx.AsyncClient | None = None,
         public_url: str | None = None,
+        approval_mode: str | None = None,
+        pins: dict[str, str] | None = None,  # {tool: "sha256:<hex>"}, None means off
     ):
         self.engine = Engine(policy, store)
         self.audit = audit
@@ -95,11 +102,21 @@ class Airlock:
         self.confirm_ttl_s = confirm_ttl_s
         self.http = http or httpx.AsyncClient(timeout=60.0)
         self.upstream = upstream
+        self.pins = pins
         self.webhook, self.telegram_chat = webhook, telegram_chat
+        # oob: only the approve link approves. Without a webhook nobody receives a link, so every L2 call would stay pending.
+        self.approval_mode = approval_mode if approval_mode is not None else ("oob" if webhook else "inband")
+        if self.approval_mode not in ("oob", "inband"):
+            raise ValueError(f"unknown approval mode {self.approval_mode!r}: use 'oob' or 'inband'")
+        if self.approval_mode == "oob" and not webhook:
+            raise ValueError("approval mode 'oob' needs AIRLOCK_APPROVAL_WEBHOOK: without it nobody gets an approve link")
         self.notify_http = notify_http or self.http
         self.public_url = (public_url or "").rstrip("/")
         self._catalog: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}  # (version, sub, groups) to (expires_at, tools)
+        self._ping: asyncio.Task | None = None  # the in-flight readiness check, shared by the probes that arrive within one bound
         self.app = Starlette(routes=[
+            Route("/healthz", self.healthz, methods=["GET"]),
+            Route("/readyz", self.readyz, methods=["GET"]),
             Route("/mcp", self.handle, methods=["POST"]),
             Route("/approve/{token}", self.approve_page, methods=["GET"]),
             Route("/approve/{token}", self.approve_submit, methods=["POST"]),
@@ -116,7 +133,8 @@ class Airlock:
 
     def issue_token(self, principal: str, tool: str, args: dict[str, Any]) -> tuple[str, str, float]:
         key, exp = uuid.uuid4().hex, time.time() + self.confirm_ttl_s
-        claims = {**self._binding(principal, tool, args), "k": key, "exp": exp}
+        # The mode is not part of the binding: a replica in another mode accepts the token and applies the stricter one.
+        claims = {**self._binding(principal, tool, args), "k": key, "exp": exp, "m": self.approval_mode}
         body = _b64(json.dumps(claims, separators=(",", ":")).encode())
         return self._sign(body, TOKEN_PREFIX), key, exp
 
@@ -143,7 +161,8 @@ class Airlock:
 
     async def verify_confirmation(self, params: dict[str, Any], principal: str, tool: str, args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Returns (mode, claims): mode is 'none' (no airlock token), 'accepted', 'pending' (token but no answer yet),
-        or 'deny:<rule>'. Never consumes the key on accept; `_call` does that right before forwarding."""
+        'pending:ignored' (pending, and an in-band accept was ignored in oob mode of the token or the replica) or 'deny:<rule>'.
+        Never consumes the key on accept; `_call` does that right before forwarding."""
         state = params.get("requestState")
         if not isinstance(state, str) or not state.startswith(TOKEN_PREFIX):
             return "none", None  # plain call, or an upstream-owned requestState (forwarded untouched)
@@ -156,10 +175,16 @@ class Airlock:
             return "deny:mrtr.mismatch", None
         responses = params.get("inputResponses")
         answer = responses.get(CONFIRM_KEY) if isinstance(responses, dict) else responses
-        if answer is None:  # no answer for our question: approved out-of-band, or still waiting (nothing burned)
-            return ("accepted" if await self.engine.store.is_approved(claims["k"]) else "pending"), claims
         content = answer.get("content") if isinstance(answer, dict) else None
-        if isinstance(answer, dict) and answer.get("action") == "accept" and isinstance(content, dict) and content.get("confirm") is True:
+        in_band = isinstance(answer, dict) and answer.get("action") == "accept" and isinstance(content, dict) and content.get("confirm") is True
+        # The stricter mode wins; a token without m (issued before the upgrade) falls back to this replica's mode.
+        strict = self.approval_mode == "oob" or ("m" in claims and claims["m"] != "inband")
+        if answer is None or (in_band and strict):
+            # No answer for our question (or, in oob mode, one that does not count): approved out-of-band, or still waiting (nothing burned)
+            if await self.engine.store.is_approved(claims["k"]):
+                return "accepted", claims
+            return ("pending" if answer is None else "pending:ignored"), claims
+        if in_band:
             return "accepted", claims
         burned = await self.engine.store.consume_once(claims["k"], claims["exp"])  # decline/cancel/malformed: one answer per prompt
         return ("deny:mrtr.declined" if burned else "deny:mrtr.replay"), None
@@ -211,7 +236,7 @@ class Airlock:
                 return await self._passthrough(body, headers, who, method, base)
             except Exception as e:  # never leak a traceback; try hard to leave an outcome record
                 log.exception("airlock internal error")
-                self._outcome(verdict="error", rule_id="internal.error", detail=repr(e), **base)
+                self._outcome(verdict="error", rule_id="internal.error", detail=_exc_text(e), **base)
                 return _rpc_error(rid, INTERNAL_ERROR, "airlock: internal error")
 
     async def _passthrough(self, body, headers, who: Principal, method, base) -> Response:
@@ -220,6 +245,7 @@ class Airlock:
         status, reply = await self.forward(body, headers, who)
         if method == "tools/list" and isinstance(reply.get("result"), dict):
             self._filter_tools(reply["result"], who)
+            self._vet_tools(reply["result"], base)
         self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
         return JSONResponse(reply, status_code=status)
 
@@ -245,10 +271,11 @@ class Airlock:
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
             return _tool_error(rid, f"airlock: denied ({d.rule_id}): {d.message}", d.rule_id)
-        if d.verdict == "confirm" and mode == "pending":
+        if d.verdict == "confirm" and mode.startswith("pending"):
             # Waiting for the out-of-band approval: same key, no new prompt (a client would re-ask the human), nothing burned.
+            detail = "in-band accept ignored (approval mode oob)" if mode == "pending:ignored" else None
             for phase in ("intent", "outcome"):
-                self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, **base)
+                self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
                 "resultType": "input_required", "requestState": params["requestState"],
                 "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"],
@@ -302,7 +329,7 @@ class Airlock:
                     span.set_attribute("airlock.suspicious", len(findings))
             except Exception as e:
                 log.exception("post-processing failed; returning the upstream result as-is")
-                detail["postprocess_error"] = repr(e)
+                detail["postprocess_error"] = _exc_text(e)
             if d.verdict == "confirm" and status == 200 and not result.get("isError"):
                 reply["result"] = self._input_required(who.sub, tool, args, result)  # preview failed: no gate, just the error
                 await self._notify(reply["result"], who.sub)
@@ -348,7 +375,7 @@ class Airlock:
                                                 "method": "tools/list", "params": params}, list_headers, who)
             result = reply.get("result") if status == 200 else None
             if not isinstance(result, dict):
-                raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {reply.get('error') or 'no result'}")
+                raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {_clip(str(reply.get('error') or 'no result'))}")
             tools.update({t["name"]: t for t in result.get("tools") or [] if isinstance(t, dict) and "name" in t})
             ttl_ms = result.get("ttlMs") if isinstance(result.get("ttlMs"), int) else 0
             cursor = result.get("nextCursor")
@@ -386,7 +413,7 @@ class Airlock:
         try:
             r = await self.http.post(self.upstream, content=json.dumps(dict(body, params=params)), headers=out_headers)
         except httpx.HTTPError as e:
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream unreachable: {e}"}}
+            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream unreachable: {type(e).__name__}"}}
         ctype = r.headers.get("content-type", "")
         if ctype.startswith("text/event-stream"):
             return r.status_code, _last_sse_message(r.text)
@@ -406,6 +433,29 @@ class Airlock:
         visible = [t for t in tools if isinstance(t, dict) and policy.tier(str(t.get("name")), who.sub, who.groups) is not None]
         result.setdefault("_meta", {})[META + "hidden_tools"] = len(tools) - len(visible)
         result["tools"] = visible  # ttlMs / cacheScope pass through untouched
+
+    def _vet_tools(self, result: dict[str, Any], base: dict[str, Any]) -> None:
+        """After the allowlist filter: drop pinned tools whose definition changed, mark suspicious descriptions."""
+        tools = result.get("tools")
+        if not isinstance(tools, list):
+            return
+        meta = result.setdefault("_meta", {})
+        if self.pins:
+            kept: list[dict[str, Any]] = []
+            dropped: list[dict[str, Any]] = []
+            for t in tools:
+                (dropped if tool_pins.changed(self.pins, t) else kept).append(t)
+            if dropped:
+                for t in dropped:  # own call_id: the tools/list call keeps its single intent/outcome pair
+                    self._audit_deny(dict(base, call_id=uuid.uuid4().hex), "catalog.pin_mismatch", None,
+                                     f"{t.get('name')}: description or schema changed since it was pinned")
+                meta[META + "pin_mismatch"] = len(dropped)
+                result["tools"] = tools = kept
+        # one scan per tool: guard.scan dedupes by phrase, and the same phrase in two descriptions must name both tools
+        findings = [{"rule": f["rule"], "tool": t.get("name"), "excerpt": f["excerpt"]} for t in tools
+                    for f in guard.scan({"content": [{"type": "text", "text": t.get("description")}]})]
+        if findings:
+            meta[META + "suspicious"] = findings[:guard.MAX_FINDINGS]  # marked, never removed; one cap for the whole list
 
     def _cap_output(self, tool: str, result: dict[str, Any]) -> dict[str, Any] | None:
         cap = self.engine.policy.output_cap(tool)
@@ -461,9 +511,11 @@ class Airlock:
                               for b in (raw if isinstance(raw, list) else [])]
             text = " ".join(b["text"] for b in preview_blocks if isinstance(b, dict) and isinstance(b.get("text"), str))[:2000]
             preview_line = f"Dry-run preview: {text or '(empty)'}"
+        ask = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
+               "and declining cancels the request." if self.approval_mode == "oob" else "Confirm to execute for real.")
         message = (f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
                    f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
-                   f"Confirm to execute for real. Idempotency key: {key}")
+                   f"{ask} Idempotency key: {key}")
         meta = {**((preview or {}).get("_meta") or {}), META + "idempotency_key": key, META + "verdict": "confirm",
                 META + "rule_id": "tier.L2.confirm"}
         if preview_blocks is not None:
@@ -481,9 +533,38 @@ class Airlock:
     async def _notify(self, result: dict[str, Any], principal: str) -> None:
         if not self.webhook:
             return
-        text = f"mcp-airlock approval request from {principal}\n" + result["inputRequests"][CONFIRM_KEY]["params"]["message"]
+        message = result["inputRequests"][CONFIRM_KEY]["params"]["message"]
+        stored = message.replace("\x00", "")  # Postgres text cannot hold NUL
+        if len(stored) > PROMPT_TEXT_MAX:  # say so on the page: the cut can hide the target argument and the preview
+            stored = stored[:PROMPT_TEXT_MAX - len(PROMPT_CUT_NOTE)] + PROMPT_CUT_NOTE
+        try:  # the approve page shows this text; a failed save only leaves the page without it
+            claims = self.verify_token(result["requestState"])
+            await self.engine.store.save_prompt(claims["k"], stored, claims["exp"])
+        except Exception as e:
+            log.warning("saving the approval prompt text failed: %s", type(e).__name__)
+        text = f"mcp-airlock approval request from {principal}\n" + message
         await approvals.notify(text, self.approve_link(result["requestState"]), webhook=self.webhook,
                                http=self.notify_http, telegram_chat=self.telegram_chat)
+
+    # ---------- probes: no identity, no audit, no span, no upstream ----------
+    async def healthz(self, request: Request) -> Response:
+        return JSONResponse({"status": "ok"})
+
+    async def readyz(self, request: Request) -> Response:
+        ping = self._ping
+        if ping is None or ping.done():
+            # Never cancelled: psycopg answers a cancel on a silent query by waiting for it without a bound.
+            ping = self._ping = asyncio.create_task(self.engine.store.ping())
+            # Retrieved here: a failure after the probe gave up is otherwise logged by asyncio with the exception text.
+            ping.add_done_callback(lambda t: t.cancelled() or t.exception())
+        try:
+            await asyncio.wait_for(asyncio.shield(ping), READY_TIMEOUT_S)
+        except Exception as e:  # the body never carries exception text
+            if self._ping is ping:
+                self._ping = None  # left behind: a ping stuck on a black-holed socket would otherwise pin /readyz at 503
+            log.warning("readiness check failed: %s", type(e).__name__)
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        return JSONResponse({"status": "ok"})
 
     # ---------- out-of-band approval page ----------
     def _approval_claims(self, request: Request) -> dict[str, Any] | None:
@@ -494,10 +575,18 @@ class Airlock:
         if (claims := self._approval_claims(request)) is None:
             return HTMLResponse("Invalid or expired approval link.", status_code=400)
         # GET only renders (link unfurlers and prefetchers do GETs); the POST below approves.
+        try:  # a store outage leaves the page without the text, like a failed save
+            text = await self.engine.store.get_prompt(claims["k"])
+        except Exception as e:
+            log.warning("reading the approval prompt text failed: %s", type(e).__name__)
+            text = None
+        details = (f"<pre>{html.escape(text)}</pre>" if text is not None else
+                   "<p>The details of this request are not available; check the original message before approving.</p>")
         return HTMLResponse(f"""<!doctype html><title>mcp-airlock approval</title>
 <h2>Approve tool call?</h2>
 <p><b>{html.escape(claims['t'])}</b> requested by <b>{html.escape(claims['p'])}</b> in <b>{html.escape(claims['e'])}</b><br>
 idempotency key <code>{html.escape(claims['k'])}</code></p>
+{details}
 <form method="post"><button type="submit">Approve</button></form>""")
 
     async def approve_submit(self, request: Request) -> Response:
@@ -520,6 +609,15 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
 
 def _ms(t0: float) -> int:
     return round((time.perf_counter() - t0) * 1000)
+
+
+def _clip(text: str) -> str:
+    """Upstream or exception text bound for the caller or the audit: scrubbed first, so a cut never splits a credential."""
+    return scrub(text)[:ERROR_TEXT_MAX]
+
+
+def _exc_text(e: Exception) -> str:
+    return f"{type(e).__name__}: {_clip(str(e))}"
 
 
 def _rpc_error(rid: Any, code: int, message: str, data: Any = None, status: int | None = None) -> JSONResponse:
@@ -561,4 +659,5 @@ def build(policy_path: str, upstream: str, audit_path: str, environment: str | N
                    secret=secret.encode() if secret else None,
                    identity=IdentityConfig.from_env(), store=store_from_env(),
                    upstream_headers=upstream_headers, webhook=webhook, telegram_chat=telegram_chat,
-                   public_url=os.environ.get("AIRLOCK_PUBLIC_URL", "http://127.0.0.1:9000"), **kw)
+                   public_url=os.environ.get("AIRLOCK_PUBLIC_URL", "http://127.0.0.1:9000"),
+                   approval_mode=os.environ.get("AIRLOCK_APPROVAL_MODE") or None, **kw)

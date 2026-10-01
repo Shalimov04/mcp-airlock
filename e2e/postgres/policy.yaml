@@ -23,6 +23,8 @@ tools:
   drop_table:
     description: drop a table (irreversible, no preview)
     tiers: {prod: L2}
+    where:
+      - {arg: name, in: [scratch_a, scratch_b]}
     principals:
       "group:juniors": {prod: L1}
   archive_rows:

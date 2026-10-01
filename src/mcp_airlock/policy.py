@@ -1,15 +1,17 @@
 """Flat-YAML policy: default-deny allowlist, per-(tool, environment) risk tier,
-output cap, blast radius. No DSL; if you need conditions, write a second YAML."""
+output cap, blast radius, flat `where` conditions on argument values. No DSL."""
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .store import USAGE_RETENTION_S, MemoryStore
 
@@ -33,6 +35,85 @@ class BlastRadius(BaseModel):
     window_s: int = Field(3600, ge=1, le=USAGE_RETENTION_S)  # the store keeps usage rows for one day
 
 
+class WhereRule(BaseModel):
+    """One condition on one argument value. Exactly one matcher."""
+    model_config = ConfigDict(extra="forbid")
+    arg: str
+    equals: Any = None  # `equals: null` is a real matcher: "given" is what model_fields_set says, not the value
+    in_: list[Any] | None = Field(None, alias="in")  # `in` is a Python keyword
+    not_in: list[Any] | None = None
+    regex: str | None = None  # full match, strings only
+    env: list[str] | None = None  # None = every environment
+    optional: bool = False  # an absent argument passes
+
+    @model_validator(mode="after")
+    def _one_matcher(self) -> WhereRule:
+        given = ["equals" in self.model_fields_set, self.in_ is not None, self.not_in is not None, self.regex is not None]
+        if sum(given) != 1:
+            raise ValueError("exactly one of equals, in, not_in, regex is required")
+        for name, values in (("in", self.in_), ("not_in", self.not_in), ("env", self.env)):
+            if values is not None and not values:
+                raise ValueError(f"{name} must not be empty")  # in/not_in: [] denies every value; env: [] applies nowhere
+        listed = [self.equals] if "equals" in self.model_fields_set else self.in_ if self.in_ is not None else self.not_in
+        if listed is not None and not all(x is None or isinstance(x, (str, int, float, bool)) for x in listed):
+            raise ValueError("equals/in/not_in values must be scalars")  # a list or dict element can never match
+        if self.regex is not None:
+            try:
+                re.compile(self.regex)  # an invalid pattern is a load error, not a runtime one
+            except re.error as e:
+                raise ValueError(f"invalid regex: {e}") from e
+        return self
+
+    def kind(self) -> str:
+        return ("equals" if "equals" in self.model_fields_set else "in" if self.in_ is not None
+                else "not_in" if self.not_in is not None else "regex")
+
+    def holds(self, v: Any) -> bool:
+        """The whole argument value: every element of a list must match (an empty list passes), a scalar must match."""
+        if isinstance(v, (list, tuple)):
+            return all(self.matches(x) for x in v)
+        if isinstance(v, str) and not isinstance(_json(v), str):
+            return False  # the upstream SDK json-decodes it (top level only) into a null, list or dict the policy never saw
+        return self.matches(v)
+
+    def matches(self, v: Any) -> bool:
+        """One scalar value. A null matches only `equals: null`; anything else that is not a str, int, float or bool fails (closed)."""
+        if v is None:
+            return self.kind() == "equals" and self.equals is None
+        if not isinstance(v, (str, int, float, bool)):
+            return False
+        if self.regex is not None:
+            return isinstance(v, str) and re.fullmatch(self.regex, v) is not None
+        if self.kind() == "equals":
+            return _same(v, self.equals)
+        if self.in_ is not None:
+            return any(_same(v, x) for x in self.in_)
+        # not_in is a deny list, and the upstream reads "0" and False as 0 and "yes" as True for an int or bool argument:
+        # a value of a kind the list does not contain fails too, instead of passing as "not listed"
+        return any(_kind(v) == _kind(x) for x in self.not_in) and not any(_same(v, x) for x in self.not_in)
+
+
+def _same(a: Any, b: Any) -> bool:
+    return isinstance(a, bool) == isinstance(b, bool) and a == b  # True is not 1
+
+
+def _kind(x: Any) -> type:
+    return bool if isinstance(x, bool) else float if isinstance(x, (int, float)) else type(x)  # int and float are one kind
+
+
+def _json(s: str) -> Any:
+    """What the upstream SDK would substitute for the string, or the string itself when it leaves it alone."""
+    try:
+        d = json.loads(s)
+    except (ValueError, RecursionError):
+        return s
+    return s if isinstance(d, (str, int, float)) else d  # the SDK keeps a decoded str, int or float (a bool is an int)
+
+
+_WHY = {"equals": "does not equal the required value", "in": "is not in the allowed values",
+        "not_in": "is in the forbidden values", "regex": "does not match the required pattern"}
+
+
 class ToolRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tiers: dict[str, Tier]  # environment -> tier; no entry for the running env = deny
@@ -41,6 +122,7 @@ class ToolRule(BaseModel):
     count_arg: str | None = None  # list-valued argument whose length is the object count
     output: OutputCap | None = None
     blast_radius: BlastRadius | None = None
+    where: list[WhereRule] = Field(default_factory=list)  # all applicable rules must hold
 
 
 class Policy(BaseModel):
@@ -76,6 +158,21 @@ class Policy(BaseModel):
         rule = self.tools.get(tool)
         return rule.blast_radius if rule and rule.blast_radius else self.blast_radius
 
+    def args_violation(self, tool: str, args: dict[str, Any]) -> str | None:
+        """Message for the first failing `where` rule that applies in this environment, None if all hold.
+        Names the argument and the matcher, never the value."""
+        rule = self.tools.get(tool)
+        for w in rule.where if rule else ():
+            if w.env is not None and self.environment not in w.env:
+                continue
+            if w.arg not in args:
+                if w.optional:
+                    continue
+                return f"argument {w.arg!r} is missing, required by the {w.kind()} condition"
+            if not w.holds(args[w.arg]):
+                return f"argument {w.arg!r} {_WHY[w.kind()]}"
+        return None
+
     def count_objects(self, tool: str, args: dict[str, Any]) -> int:
         rule = self.tools.get(tool)
         if rule and rule.count_arg:
@@ -110,6 +207,9 @@ class Engine:
             return Decision("deny", "allowlist.deny", message=f"tool {tool!r} is not allowlisted")
         if tier is None:
             return Decision("deny", "tier.unassigned", message=f"no tier for {tool!r} in environment {p.environment!r}")
+
+        if (violation := p.args_violation(tool, args)) is not None:  # before tier, so nobody is asked to approve it
+            return Decision("deny", "args.violation", tier, message=violation)
 
         n = p.count_objects(tool, args)
         blast = p.blast(tool)

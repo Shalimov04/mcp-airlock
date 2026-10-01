@@ -41,8 +41,9 @@ Code treats an entry with a `url` and no `type` as a misconfigured stdio server:
 ```
 
 `claude mcp get github-airlocked` shows whether it connected. `tools/list` through the
-proxy only returns tools that are in the policy, so a tool the agent "cannot see" is a
-policy question, not a connection problem.
+proxy only returns tools that are in the policy and, with a pins file, whose definition
+still matches its pin (audited as `catalog.pin_mismatch`), so a tool the agent "cannot
+see" is a policy question, not a connection problem.
 
 ## Cursor
 
@@ -70,14 +71,18 @@ list.
 * An `L2` tool runs as a dry run first and the result is `input_required`: a description of
   what would happen plus a signed `requestState`. A client that implements the 2026-07-28
   confirmation flow shows that description to you and, when you accept, repeats the call
-  with the state; the proxy then runs it for real, once.
+  with the state; the proxy then runs it for real, once. With an approval webhook the
+  accept alone is not enough by default, see the end of this section.
 
 That last point is the one to check before relying on `L2`. Call an `L2` tool from the
 client and see whether you get asked. If the client ignores `input_required`, the model
 just sees an unusual result and cannot complete the call; in that case keep such tools at
 `L3` with a small blast radius, or at `L1`, until the client catches up. Out-of-band
-approval through Slack or Telegram does not change this: the agent still has to repeat the
-call with `requestState` after the button is pressed.
+approval through Slack or Telegram does not remove the need to repeat the call: the agent
+still has to repeat it with `requestState` after the button is pressed. With a webhook
+configured the proxy runs in `oob` mode by default, so accepting the prompt in the client
+does not approve anything; the client shows the prompt, and the person approves through the
+link. Set `AIRLOCK_APPROVAL_MODE=inband` if you want the client's accept to approve.
 
 ## One proxy per server
 

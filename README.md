@@ -114,11 +114,13 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_GROUPS_CLAIM` | Claim to read groups from. Default `groups`. |
 | `AIRLOCK_TRUST_PRINCIPAL_HEADER` | Set to `1` to accept `X-Airlock-Principal` and `X-Airlock-Groups`. Off by default. Only turn it on behind a gateway that sets those headers itself and strips them from clients. |
 | `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it if you run more than one replica. |
-| `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, blast-radius counters. Without it the state lives in process memory. |
+| `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
+| `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
 | `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
+| `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
 
 ## The policy file
@@ -148,22 +150,45 @@ A tier is resolved in this order: an entry for the exact principal, then the fir
 group in the order the token lists them, then `tiers[environment]`. The `description` is what
 the person approving the call gets to read, so write it for them.
 
-Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
+`where` limits a tool by argument values. Every rule that applies must hold, otherwise the call is
+denied with `args.violation`. The check runs right after the allowlist, before the tier and the
+blast radius, on dry runs and on the confirmed call too, so nobody is asked to approve a call the
+policy forbids.
+
+```yaml
+tools:
+  pods_delete:
+    tiers: { prod: L2 }
+    where:
+      - { arg: namespace, in: [staging, dev] }
+      - { arg: name, regex: "tmp-.*" }
+      - { arg: namespace, not_in: [kube-system], env: [staging, prod] }
+```
+
+Each rule has exactly one matcher: `equals`, `in`, `not_in` or `regex` (full match, strings only).
+`env` limits a rule to those environments, the default is all. An absent argument fails the rule
+unless it has `optional: true`. A list value must match for every element. A string argument that
+parses as JSON `null`, a list or an object is denied by any rule, because the upstream may decode
+it before it validates it. For the same reason `not_in` also denies a value whose type is not among
+the listed values (`3` against `[kube-system]`). A regex runs in the request path on every call, so
+avoid nested repetition.
+
+Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`, `args.violation`,
 `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`, `tier.L2.dry_run`,
 `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
-`catalog.unavailable`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
+`catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
 `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
 `internal.error`.
 
 ## Confirmations in detail
 
 The confirmation token (`requestState`) is an HMAC-signed blob carrying the principal, the
-tool, a hash of the arguments, the environment, the upstream URL, a random idempotency key
-and an expiry (10 minutes). Nothing is stored when it is issued. When it comes back the
-proxy checks the signature, checks that all of those still match the call in front of it,
-re-runs the policy, burns the key, then charges the blast-radius counter. Burning is an
-atomic insert in the store, so two replicas cannot both execute the same confirmation. A
-decline burns the key too.
+tool, a hash of the arguments, the environment, the upstream URL, a random idempotency key,
+an expiry (10 minutes) and the approval mode. Nothing is stored when it is issued. When it
+comes back the proxy checks the signature, checks that all of those still match the call in
+front of it, re-runs the policy, burns the key, then charges the blast-radius counter.
+Burning is an atomic insert in the store, so two replicas cannot both execute the same
+confirmation. A decline burns the key too.
 
 Before the prompt is issued the proxy asks the upstream for `tools/list` and looks at the
 tool's schema. If the tool declares `dry_run`, the dry run is forwarded and its output is
@@ -177,19 +202,35 @@ along with the body.
 
 If an approval webhook is configured, the same prompt goes to Slack or Telegram with a
 link. The link carries a second token signed with a different key, so the agent, which
-only ever sees `requestState`, cannot approve its own call. Opening the link shows a page
-with a button; the `GET` does nothing (link previews and prefetchers would otherwise
-approve things), the `POST` records the approval. The agent finds out by repeating the call
+only ever sees `requestState`, cannot forge it. Opening the link shows a page with a
+button; the `GET` does nothing (link previews and prefetchers would otherwise approve
+things), the `POST` records the approval. The agent finds out by repeating the call
 with `requestState` and no `inputResponses`: it gets `input_required` back with
 `status: pending` until the button is pressed, then the call runs. A human takes minutes; the
 retry loop built into the official Python SDK client gives up after about two seconds of
 polling with `InputRequiredRoundsExceededError`. Catch it and retry later with the same
 `requestState`.
 
+In `oob` mode an in-band `accept` leaves the call `pending` and the audit record says the
+accept was ignored; a decline still burns the key.
+The mode travels in the token: an `oob` token or an `oob` replica ignores the in-band `accept`.
+
+A failed webhook post is logged as the exception class and the HTTP status, never the URL,
+which holds the Telegram bot token or the Slack secret path. In `oob` mode a failed post
+means nobody can approve that prompt: a new call without `requestState` issues a new prompt
+and posts again. httpx itself logs every request URL at `INFO`, so if you configure logging,
+keep the `httpx` logger at `WARNING`.
+
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
 `X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as
-unverified unless it came from a bearer token the proxy could check.
+unverified unless it came from a bearer token the proxy could check. The page shows the
+redacted arguments and the dry-run preview, kept in the store until the prompt expires.
+
+`GET /healthz` answers `{"status":"ok"}` while the process is up. `GET /readyz` answers 200
+`{"status":"ok"}` when the store responds and 503 `{"status":"unavailable"}` after 2 seconds
+or on an error. Neither needs credentials, writes an audit record or calls the upstream;
+`/readyz` checks the store only.
 
 ## Audit
 
@@ -204,7 +245,8 @@ Argument values under keys like `password`, `token`, `api_key`, `authorization` 
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
 `sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
 approvers, including the dry-run preview. `detail` holds
-the output-cap numbers and the injection rules that fired, when any did.
+the output-cap numbers and the injection rules that fired, when any did. Free text in
+`detail` is scrubbed the same way as the arguments.
 
 To read the log:
 
@@ -232,6 +274,32 @@ a handful of patterns (override phrases, urgency, tool-call bait, "don't tell th
 zero-width characters, long base64 runs) and list the matches in
 `_meta["io.mcp-airlock/suspicious"]`. It is regex, it will miss clever things and
 occasionally flag a normal sentence, and it never blocks anything.
+
+## Pinning tool descriptions
+
+An upstream can change a tool's description or schema after you reviewed it, and the model
+reads that text. A pin is the sha256 of a tool's `name`, `description`, `inputSchema`,
+`outputSchema` and `annotations`. Write the pins from the server itself (not from the proxy),
+then give the file to the proxy:
+
+```
+uv run airlock-policy pin policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
+uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
+```
+
+`pin` writes one JSON object, tool name to `sha256:<hex>`, for every allowlisted tool the
+server lists. The pins live in their own file because rewriting the policy YAML would drop its
+comments. `--pins` can also come from `AIRLOCK_PINS`; a pins file that is not valid stops the
+proxy at startup. On `tools/list` a pinned tool whose hash differs is removed from the answer,
+counted in `_meta["io.mcp-airlock/pin_mismatch"]` and audited as `catalog.pin_mismatch`. A tool
+without a pin is left alone. The descriptions of the tools that remain go through the injection
+scan (every pattern but tool-call bait, which a description may legitimately contain), and the
+matches, each with its tool name, are listed in `_meta["io.mcp-airlock/suspicious"]`.
+`airlock-policy diff ... --pins pins.json` reports changed hashes, allowlisted tools without a
+pin and pins for tools that are no longer allowlisted or no longer listed by the server.
+
+A call to a pinned tool is still decided by the policy: the model only learns a description
+from `tools/list`, and gated tools already re-read the schema.
 
 ## Things to know before running it in anger
 
@@ -273,7 +341,7 @@ the official Python SDK client and checking the side effects where they land:
 `e2e/kubernetes` runs the real kubernetes-mcp-server against k3s with the example policy (pods
 really deleted once, declines and replays leave them alone), `e2e/grafana` runs grafana/mcp-grafana
 against Grafana OSS, and `e2e/postgres` runs a small SDK server with an honest dry run against
-Postgres, two proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
+Postgres, four proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
 failure. The GitHub policy has still only been checked against the server's source, since its
 server needs github.com.
 
@@ -288,7 +356,8 @@ src/mcp_airlock/guard.py       injection marking
 src/mcp_airlock/approvals.py   Slack / Telegram notifications
 src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction
 src/mcp_airlock/audit_cli.py   airlock-audit
-src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
+src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
+src/mcp_airlock/pins.py        tool pins: hash, pins file loader
 tests/fake_upstream.py         the fake server the tests and demo run against
 docs/clients.md                connecting Claude Code and Cursor
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image

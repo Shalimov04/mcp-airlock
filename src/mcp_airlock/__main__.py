@@ -11,6 +11,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 
+from . import pins
 from .app import build
 
 
@@ -28,11 +29,16 @@ def main() -> None:
     ap.add_argument("--env", default=None, help="environment name; overrides policy.environment / AIRLOCK_ENV")
     ap.add_argument("--audit", default="audit.jsonl")
     ap.add_argument("--otel-file", default=os.environ.get("AIRLOCK_OTEL_FILE"), help="write spans (JSON) to this file")
+    ap.add_argument("--pins", default=os.environ.get("AIRLOCK_PINS"), help="tool pins file written by `airlock-policy pin`; a pinned tool whose definition changed is hidden from tools/list")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9000)
     a = ap.parse_args()
+    try:
+        tool_pins = pins.load(a.pins) if a.pins else None
+    except ValueError as e:
+        raise SystemExit(f"mcp-airlock: {e}")
     setup_otel(a.otel_file)
-    airlock = build(a.policy, a.upstream, a.audit, a.env)
+    airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins)
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 
 

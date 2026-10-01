@@ -21,12 +21,17 @@ class MemoryStore:
     def __init__(self) -> None:
         self._consumed: dict[str, float] = {}
         self._approved: dict[str, float] = {}
+        self._prompts: dict[str, tuple[float, str]] = {}
         self._usage: dict[tuple[str, str], list[tuple[float, int]]] = defaultdict(list)
 
     def _purge_keys(self) -> None:
         now = time.time()
         self._consumed = {k: e for k, e in self._consumed.items() if e >= now}
         self._approved = {k: e for k, e in self._approved.items() if e >= now}
+        self._prompts = {k: v for k, v in self._prompts.items() if v[0] >= now}
+
+    async def ping(self) -> None:
+        return None
 
     async def consume_once(self, key: str, exp_ts: float) -> bool:
         self._purge_keys()  # no await between check and set, so atomic under asyncio
@@ -44,6 +49,14 @@ class MemoryStore:
 
     async def is_approved(self, key: str) -> bool:
         return self._approved.get(key, 0.0) >= time.time()
+
+    async def save_prompt(self, key: str, text: str, exp_ts: float) -> None:
+        self._purge_keys()
+        self._prompts[key] = (exp_ts, text)
+
+    async def get_prompt(self, key: str) -> str | None:
+        exp_ts, text = self._prompts.get(key, (0.0, ""))
+        return text if exp_ts >= time.time() else None
 
     async def usage_add(self, principal: str, tool: str, n: int, ts: float) -> None:
         cutoff = ts - USAGE_RETENTION_S
@@ -68,6 +81,11 @@ CREATE TABLE IF NOT EXISTS airlock_keys (
     exp_ts double precision NOT NULL,
     consumed boolean NOT NULL DEFAULT false,
     approved boolean NOT NULL DEFAULT false
+);
+CREATE TABLE IF NOT EXISTS airlock_prompts (
+    key text PRIMARY KEY,
+    exp_ts double precision NOT NULL,
+    text text NOT NULL
 );
 CREATE TABLE IF NOT EXISTS airlock_usage (
     principal text NOT NULL,
@@ -95,6 +113,10 @@ class PostgresStore:
                     await c.execute(_DDL)
                 self._ready = True
             yield c
+
+    async def ping(self) -> None:
+        async with self._conn() as c:
+            await c.execute("SELECT 1")
 
     async def consume_once(self, key: str, exp_ts: float) -> bool:
         async with self._conn() as c:
@@ -126,6 +148,21 @@ class PostgresStore:
             cur = await c.execute("SELECT 1 FROM airlock_keys WHERE key = %s AND approved AND exp_ts >= %s",
                                   (key, time.time()))
             return await cur.fetchone() is not None
+
+    async def save_prompt(self, key: str, text: str, exp_ts: float) -> None:
+        async with self._conn() as c:
+            await c.execute("DELETE FROM airlock_prompts WHERE exp_ts < %s", (time.time(),))
+            await c.execute(
+                "INSERT INTO airlock_prompts (key, exp_ts, text) VALUES (%s, %s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET exp_ts = EXCLUDED.exp_ts, text = EXCLUDED.text",
+                (key, exp_ts, text),
+            )
+
+    async def get_prompt(self, key: str) -> str | None:
+        async with self._conn() as c:
+            cur = await c.execute("SELECT text FROM airlock_prompts WHERE key = %s AND exp_ts >= %s", (key, time.time()))
+            row = await cur.fetchone()
+            return row[0] if row else None
 
     async def usage_add(self, principal: str, tool: str, n: int, ts: float) -> None:
         async with self._conn() as c:
