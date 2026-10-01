@@ -386,6 +386,27 @@ async def s19():
             f"airlock-a still lists get_note; {len(rows)} catalog.pin_mismatch audit records name get_note; list_rows call works")
 
 
+@check("20 blast radius counts a JSON-string list")
+async def s20():
+    who = "ivan"  # fresh principal, L2 for delete_rows
+    over, within = "[130,131,132,133,134,135]", "[136,137]"  # six ids as a string, max_per_call is 5
+    async with agent(A, token(who), confirm=False) as c:  # the human declines: nothing may be deleted
+        r = await c.call_tool("delete_rows", {"ids": over})
+        refused_prompts = len(c.prompts)
+        ok = await c.call_tool("delete_rows", {"ids": within})
+        prompts = c.prompts[refused_prompts:]
+    rule = (r.meta or {}).get(M + "rule_id")
+    assert r.is_error and rule == "blast_radius.per_call" and refused_prompts == 0, (r, refused_prompts)
+    after = q("SELECT args FROM calls WHERE tool = 'delete_rows' AND principal = %s ORDER BY id", who)
+    # the refused call got no dry run; the within-limit one got exactly its dry run, with the string decoded into ids
+    assert [(a["ids"], a["dry_run"]) for (a,) in after] == [(json.loads(within), True)], after
+    ok_rule = (ok.meta or {}).get(M + "rule_id")
+    assert ok_rule == "mrtr.declined" and len(prompts) == 1 and "confirm" in prompts[0]["props"], (ok, prompts)
+    assert present(json.loads(over) + json.loads(within)) == 8
+    return (f"{rule} for six ids sent as a string; 0 human prompts; within-limit string got the normal L2 prompt (declined); "
+            f"no real delete_rows call for {who}, rows 130-137 all present")
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -539,7 +560,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

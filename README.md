@@ -320,8 +320,11 @@ The proxy refuses such a call with `mrtr.upstream_input_required` the first time
 asks, at the dry run if the tool has one, otherwise after the human's yes. At `L0`, `L1` and `L3`
 the upstream's question and state pass through untouched. Put such tools there.
 
-Blast radius counts what it can see: the length of the argument you named, or one. A tool
-whose fan-out is not visible in its arguments cannot be measured here.
+Blast radius counts what it can see: the length of the argument you named, or one. A string
+that holds a JSON list or object is counted by its elements, as the upstream reads it. One that
+this proxy cannot decode (nesting depth or integer size beyond its interpreter's limits) is refused
+with `blast_radius.per_call`, since the upstream's interpreter may still read it. A tool whose
+fan-out is not visible in its arguments cannot be measured here.
 
 Output capping works on the serialized result. Over the cap, text blocks are trimmed and
 `structuredContent` and non-text blocks are dropped. The token estimate is `chars / 4`. A result

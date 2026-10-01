@@ -73,7 +73,7 @@ class WhereRule(BaseModel):
         if isinstance(v, (list, tuple)):
             return all(self.matches(x) for x in v)
         if isinstance(v, str) and not isinstance(_json(v), str):
-            return False  # the upstream SDK json-decodes it (top level only) into a null, list or dict the policy never saw
+            return False  # the upstream SDK json-decodes it (top level only) into a null, list or dict the policy never saw, or cannot decode here
         return self.matches(v)
 
     def matches(self, v: Any) -> bool:
@@ -101,12 +101,20 @@ def _kind(x: Any) -> type:
     return bool if isinstance(x, bool) else float if isinstance(x, (int, float)) else type(x)  # int and float are one kind
 
 
+_UNDECODABLE = object()  # json.loads gave up on a limit of this interpreter, which the upstream's may not share
+
+
 def _json(s: str) -> Any:
-    """What the upstream SDK would substitute for the string, or the string itself when it leaves it alone."""
+    """What the upstream SDK would substitute for the string, or the string itself when it leaves it alone.
+    _UNDECODABLE when a list or object failed to decode on nesting depth or integer size: those limits differ per
+    Python version, frame depth and PYTHONINTMAXSTRDIGITS, so the upstream may still read what the policy could not."""
     try:
         d = json.loads(s)
-    except (ValueError, RecursionError):
-        return s
+    except json.JSONDecodeError:
+        return s  # not JSON on any interpreter
+    except (ValueError, RecursionError):  # the integer digit limit raises a plain ValueError
+        # a bare number stays a string upstream whether its decode fails there too or yields an int the SDK keeps
+        return _UNDECODABLE if s.lstrip().startswith(("[", "{")) else s
     return s if isinstance(d, (str, int, float)) else d  # the SDK keeps a decoded str, int or float (a bool is an int)
 
 
@@ -173,10 +181,15 @@ class Policy(BaseModel):
                 return f"argument {w.arg!r} {_WHY[w.kind()]}"
         return None
 
-    def count_objects(self, tool: str, args: dict[str, Any]) -> int:
+    def count_objects(self, tool: str, args: dict[str, Any]) -> int | None:
+        """len of the count_arg value, 1 for anything else; None for a string this interpreter cannot decode."""
         rule = self.tools.get(tool)
         if rule and rule.count_arg:
             v = args.get(rule.count_arg)
+            if isinstance(v, str):
+                v = _json(v)  # count what the upstream SDK will see, not the raw string
+            if v is _UNDECODABLE:
+                return None
             return len(v) if isinstance(v, (list, tuple, set, dict)) else 1
         return 1
 
@@ -213,6 +226,10 @@ class Engine:
 
         n = p.count_objects(tool, args)
         blast = p.blast(tool)
+        if n is None:  # unknown here, maybe a whole list upstream: refuse rather than count 1
+            return Decision("deny", "blast_radius.per_call", tier, message=(
+                f"argument {p.tools[tool].count_arg!r} cannot be decoded here (nesting depth or integer size beyond "
+                "this proxy's limits), so its object count is unknown"))
         if n > blast.max_per_call:
             return Decision("deny", "blast_radius.per_call", tier, objects=n,
                             message=f"{n} objects > max_per_call={blast.max_per_call}")
