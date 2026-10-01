@@ -46,6 +46,8 @@ PRINCIPAL_REQUIRED = -32011  # airlock-specific JSON-RPC code (implementation ra
 TOKEN_PREFIX = "al1."  # requestState: held by the agent
 APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derived key the agent never sees
 CONFIRM_KEY = "airlock-confirm"
+PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
+PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
 _tracer = trace.get_tracer("mcp-airlock")
 
 
@@ -496,7 +498,16 @@ class Airlock:
     async def _notify(self, result: dict[str, Any], principal: str) -> None:
         if not self.webhook:
             return
-        text = f"mcp-airlock approval request from {principal}\n" + result["inputRequests"][CONFIRM_KEY]["params"]["message"]
+        message = result["inputRequests"][CONFIRM_KEY]["params"]["message"]
+        stored = message.replace("\x00", "")  # Postgres text cannot hold NUL
+        if len(stored) > PROMPT_TEXT_MAX:  # say so on the page: the cut can hide the target argument and the preview
+            stored = stored[:PROMPT_TEXT_MAX - len(PROMPT_CUT_NOTE)] + PROMPT_CUT_NOTE
+        try:  # the approve page shows this text; a failed save only leaves the page without it
+            claims = self.verify_token(result["requestState"])
+            await self.engine.store.save_prompt(claims["k"], stored, claims["exp"])
+        except Exception as e:
+            log.warning("saving the approval prompt text failed: %s", type(e).__name__)
+        text = f"mcp-airlock approval request from {principal}\n" + message
         await approvals.notify(text, self.approve_link(result["requestState"]), webhook=self.webhook,
                                http=self.notify_http, telegram_chat=self.telegram_chat)
 
@@ -509,10 +520,18 @@ class Airlock:
         if (claims := self._approval_claims(request)) is None:
             return HTMLResponse("Invalid or expired approval link.", status_code=400)
         # GET only renders (link unfurlers and prefetchers do GETs); the POST below approves.
+        try:  # a store outage leaves the page without the text, like a failed save
+            text = await self.engine.store.get_prompt(claims["k"])
+        except Exception as e:
+            log.warning("reading the approval prompt text failed: %s", type(e).__name__)
+            text = None
+        details = (f"<pre>{html.escape(text)}</pre>" if text is not None else
+                   "<p>The details of this request are not available; check the original message before approving.</p>")
         return HTMLResponse(f"""<!doctype html><title>mcp-airlock approval</title>
 <h2>Approve tool call?</h2>
 <p><b>{html.escape(claims['t'])}</b> requested by <b>{html.escape(claims['p'])}</b> in <b>{html.escape(claims['e'])}</b><br>
 idempotency key <code>{html.escape(claims['k'])}</code></p>
+{details}
 <form method="post"><button type="submit">Approve</button></form>""")
 
     async def approve_submit(self, request: Request) -> Response:

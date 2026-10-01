@@ -20,7 +20,7 @@ async def store(request):
         pytest.skip("AIRLOCK_TEST_PG_DSN not set")
     s = PostgresStore(PG_DSN)
     async with s._conn() as c:  # creates the tables; DB is shared, touch only ours
-        await c.execute("TRUNCATE airlock_keys, airlock_usage")
+        await c.execute("TRUNCATE airlock_keys, airlock_prompts, airlock_usage")
     return s
 
 
@@ -52,6 +52,35 @@ async def test_approve_expired(store):
     assert await store.is_approved(k) is False
 
 
+async def test_prompt_roundtrip_and_overwrite(store):
+    k, exp = key(), time.time() + 60
+    assert await store.get_prompt(k) is None
+    await store.save_prompt(k, "first", exp)
+    assert await store.get_prompt(k) == "first"
+    await store.save_prompt(k, "second", exp)  # same key: the later text wins
+    assert await store.get_prompt(k) == "second"
+    assert await store.get_prompt(key()) is None  # other keys unaffected
+
+
+async def test_prompt_expired_is_not_served(store):
+    k = key()
+    await store.save_prompt(k, "gone", time.time() - 1)
+    assert await store.get_prompt(k) is None
+
+
+async def test_prompt_expired_rows_are_deleted_on_write(store):
+    old, new = key(), key()
+    await store.save_prompt(old, "gone", time.time() - 1)
+    await store.save_prompt(new, "kept", time.time() + 60)
+    assert await store.get_prompt(new) == "kept"
+    if isinstance(store, MemoryStore):
+        assert old not in store._prompts
+    else:
+        async with store._conn() as c:
+            cur = await c.execute("SELECT 1 FROM airlock_prompts WHERE key = %s", (old,))
+            assert await cur.fetchone() is None
+
+
 async def test_usage_sum_honours_since_and_separates_keys(store):
     now = time.time()
     await store.usage_add("alice", "delete", 3, now - 100)
@@ -71,11 +100,13 @@ async def test_memory_store_purges_expired_on_write():
     now = time.time()
     await s.consume_once("old", now - 1)
     await s.approve("old", now - 1)
+    await s.save_prompt("old", "x", now - 1)
     await s.usage_add("a", "t", 1, now - 10 * 86400)
     await s.consume_once("new", now + 60)
     await s.approve("new", now + 60)
+    await s.save_prompt("new", "x", now + 60)
     await s.usage_add("a", "t", 1, now)
-    assert "old" not in s._consumed and "old" not in s._approved
+    assert "old" not in s._consumed and "old" not in s._approved and "old" not in s._prompts
     assert len(s._usage[("a", "t")]) == 1
 
 

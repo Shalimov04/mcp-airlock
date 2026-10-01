@@ -114,7 +114,7 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_GROUPS_CLAIM` | Claim to read groups from. Default `groups`. |
 | `AIRLOCK_TRUST_PRINCIPAL_HEADER` | Set to `1` to accept `X-Airlock-Principal` and `X-Airlock-Groups`. Off by default. Only turn it on behind a gateway that sets those headers itself and strips them from clients. |
 | `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it if you run more than one replica. |
-| `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, blast-radius counters. Without it the state lives in process memory. |
+| `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
@@ -199,7 +199,8 @@ keep the `httpx` logger at `WARNING`.
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
 `X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as
-unverified unless it came from a bearer token the proxy could check.
+unverified unless it came from a bearer token the proxy could check. The page shows the
+redacted arguments and the dry-run preview, kept in the store until the prompt expires.
 
 ## Audit
 

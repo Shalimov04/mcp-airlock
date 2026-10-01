@@ -3,6 +3,7 @@ L2 without dry_run, injection marking, out-of-band approvals. Written before the
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import textwrap
@@ -658,3 +659,124 @@ def test_build_reads_approval_mode_from_env(monkeypatch, tmp_path):
     assert make().approval_mode == "oob"
     monkeypatch.setenv("AIRLOCK_APPROVAL_MODE", "")  # empty means unset: the default applies
     assert make().approval_mode == "oob"
+
+
+# 9. approve page shows what is approved ------------------------------------------------------------------------------
+async def approve_page_text(upstream, audit_path, args: dict, **kw) -> tuple[str, str]:
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted, **kw)
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", args)
+        return posted[0], (await c.get(approve_path(posted))).text
+
+
+@pytest.mark.parametrize("kind", ["memory", pytest.param("postgres", marks=pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set"))])
+async def test_approve_page_shows_arguments_and_preview(upstream, audit_path, kind):
+    store = PostgresStore(PG) if kind == "postgres" else MemoryStore()
+    posted, page = await approve_page_text(upstream, audit_path, {"name": "api"}, store=store)
+    assert "<pre>" in page and "delete_service" in page
+    assert "Arguments: {&quot;name&quot;: &quot;api&quot;}" in page and "Dry-run preview: would delete api" in page
+    assert "not available" not in page and "<form" in page
+    assert html.unescape(page.split("<pre>")[1].split("</pre>")[0]) in posted  # the same text the message carries
+
+
+async def test_approve_page_without_dry_run_says_so(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        await call(c, "restart_service", {"name": "api"}, principal="root")  # L2 in prod, no dry_run argument
+        page = (await c.get(approve_path(posted))).text
+    assert "No dry-run preview" in page and "<form" in page
+
+
+async def test_approve_page_does_not_render_secrets(upstream, audit_path):
+    _, page = await approve_page_text(upstream, audit_path, {"name": "api", "api_token": "sk-verysecretvalue123", "note": "sk-othersecret456"})
+    assert "sk-verysecretvalue123" not in page and "sk-othersecret456" not in page and "[REDACTED]" in page
+
+
+async def test_approve_page_scrubs_secret_in_preview(upstream, audit_path):
+    # The upstream echoes the name into its preview; the argument is redacted and so is the preview text.
+    _, page = await approve_page_text(upstream, audit_path, {"name": "sk-verysecretvalue123"})
+    assert "sk-verysecretvalue123" not in page and "Dry-run preview: would delete [REDACTED]" in page
+
+
+async def test_approve_page_escapes_html_in_arguments(upstream, audit_path):
+    payload = "<script>alert(1)</script><b>x</b>"
+    _, page = await approve_page_text(upstream, audit_path, {"name": payload})
+    assert payload not in page and "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+
+
+async def test_approve_page_text_is_capped(upstream, audit_path):
+    posted, page = await approve_page_text(upstream, audit_path, {"name": "api", "note": "a" * 20000})
+    text = html.unescape(page.split("<pre>")[1].split("</pre>")[0])
+    assert len(text) == 8000 and "not available" not in page
+    assert text.endswith("\n[cut at 8000 characters; the full text is in the original message]")  # the cut is not silent
+    assert "Dry-run preview" in posted and "Dry-run preview" not in text  # what the page lost, the message still has
+
+
+@pytest.mark.parametrize("kind", ["memory", pytest.param("postgres", marks=pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set"))])
+async def test_approve_page_text_survives_nul_in_preview(upstream, audit_path, kind):
+    # The upstream echoes the name into its preview, so the preview carries a NUL that Postgres text cannot hold.
+    store = PostgresStore(PG) if kind == "postgres" else MemoryStore()
+    _, page = await approve_page_text(upstream, audit_path, {"name": "api\x00"}, store=store)
+    assert "Dry-run preview: would delete api" in page and "\x00" not in page and "not available" not in page
+
+
+async def test_approve_page_says_when_text_is_missing(upstream, audit_path, caplog):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+
+    async def boom(key, text, exp_ts):
+        raise RuntimeError("db down at postgresql://user:pw@host/db")
+
+    al.engine.store.save_prompt = boom
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+        assert res["resultType"] == "input_required" and len(posted) == 1  # the prompt and the message still go out
+        page = (await c.get(approve_path(posted))).text
+        assert "<pre>" not in page and "not available" in page and "original message" in page and "<form" in page
+        assert (await c.post(approve_path(posted))).status_code == 200  # approving stays possible
+    assert "RuntimeError" in caplog.text and "pw@host" not in caplog.text
+
+
+async def test_approve_page_renders_when_reading_the_text_fails(upstream, audit_path, caplog):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+
+        async def boom(key):
+            raise RuntimeError("db down at postgresql://user:pw@host/db")
+
+        al.engine.store.get_prompt = boom
+        r = await c.get(approve_path(posted))
+        assert r.status_code == 200 and "<pre>" not in r.text and "not available" in r.text and "<form" in r.text
+    assert "RuntimeError" in caplog.text and "pw@host" not in caplog.text
+
+
+async def test_prompt_text_is_stored_before_the_message_is_posted(upstream, audit_path):
+    stored_at_post: list[dict] = []  # what the store holds at the moment the webhook is hit
+    al = make_airlock(upstream, audit_path, webhook="https://hooks.example/x", public_url="https://a.example",
+                      notify_http=httpx.AsyncClient(transport=httpx.MockTransport(
+                          lambda r: (stored_at_post.append(dict(al.engine.store._prompts)), httpx.Response(200))[1])))
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+    assert len(stored_at_post) == 1 and len(stored_at_post[0]) == 1
+    assert "Arguments: {\"name\": \"api\"}" in next(iter(stored_at_post[0].values()))[1]
+
+
+async def test_prompt_text_is_not_stored_without_webhook(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+    assert al.engine.store._prompts == {}
+
+
+async def test_approve_page_text_expires_with_the_prompt(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+        key = next(iter(al.engine.store._prompts))
+        al.engine.store._prompts[key] = (0.0, "x")  # expired entry is not served
+        assert (await c.get(approve_path(posted))).text.count("not available") == 1
