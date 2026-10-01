@@ -20,6 +20,7 @@ x-env: &airlock-env
   AIRLOCK_STORE_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
   AIRLOCK_AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
   AIRLOCK_APPROVAL_WEBHOOK: http://webhook:8080/hook
+  AIRLOCK_APPROVAL_MODE: inband  # most scenarios approve by accepting in-band; 07 covers the link
 
 networks:
   e2e:

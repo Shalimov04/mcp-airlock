@@ -537,3 +537,124 @@ async def test_upstream_input_required_at_l1_passes_through_with_its_own_state(u
         retry = {"requestState": "upstream-owned", "inputResponses": {"which": {"action": "accept", "content": {}}}}
         await call(c, "set_replicas", {"names": ["api"], "replicas": 2}, extra=retry)
     assert sent[-1]["params"]["requestState"] == "upstream-owned" and sent[-1]["params"]["arguments"]["dry_run"] is True
+
+
+# 8. approval mode ---------------------------------------------------------------------------------------------------
+def real_deletes(upstream) -> list:
+    return [x for x in upstream.CALLS if x["tool"] == "delete_service" and not x["args"]["dry_run"]]
+
+
+async def test_oob_ignores_in_band_accept_until_the_link_is_posted(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)  # webhook set, no mode given: defaults to oob
+    assert al.approval_mode == "oob"
+    async with proxy_client(al) as c:
+        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        n = len(upstream.CALLS)  # the dry run; an ignored retry forwards nothing, not even another dry run
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+        assert res["resultType"] == "input_required" and res["requestState"] == token
+        assert "inputRequests" not in res and res["_meta"][META + "status"] == "pending"
+        assert len(upstream.CALLS) == n
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))  # asking again changes nothing
+        assert res["_meta"][META + "status"] == "pending" and len(upstream.CALLS) == n
+        assert (await c.post(approve_path(posted))).status_code == 200
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))  # the same retry now executes
+        assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+        assert res["_meta"][META + "rule_id"] == "mrtr.replay"
+    assert len(real_deletes(upstream)) == 1
+    pending = [r for r in audit_rows(audit_path) if r["rule_id"] == "mrtr.pending"]
+    assert len(pending) == 4 and all(r["detail"] == "in-band accept ignored (approval mode oob)" for r in pending)
+
+
+async def test_oob_polling_without_an_answer_has_no_ignored_note(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        await call(c, "delete_service", {"name": "api"}, extra={"requestState": token})
+    pending = [r for r in audit_rows(audit_path) if r["rule_id"] == "mrtr.pending"]
+    assert len(pending) == 2 and all(r["detail"] is None for r in pending)
+
+
+@pytest.mark.parametrize("answer", [{"action": "decline"}, {"action": "cancel"}, "yes", {"action": "accept"},
+                                    {"action": "accept", "content": {"confirm": False}}])
+async def test_oob_decline_cancel_and_malformed_answers_still_burn_the_key(upstream, audit_path, answer):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": token, "inputResponses": {CONFIRM_KEY: answer}})
+        assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.declined"
+        assert (await c.post(approve_path(posted))).status_code == 200  # approving afterwards does not revive it
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+        assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.replay"
+    assert real_deletes(upstream) == []
+
+
+async def test_inband_mode_with_webhook_keeps_both_approval_paths(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted, approval_mode="inband")
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+        assert "Confirm to execute for real." in res["inputRequests"][CONFIRM_KEY]["params"]["message"]
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(res["requestState"]))
+        assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+        token = (await call(c, "delete_service", {"name": "db"}))["requestState"]  # the link still approves as well
+        res = await call(c, "delete_service", {"name": "db"}, extra={"requestState": token})
+        assert res["resultType"] == "input_required" and res["_meta"][META + "status"] == "pending"
+        assert (await c.post(approve_path(posted))).status_code == 200
+        res = await call(c, "delete_service", {"name": "db"}, extra={"requestState": token})
+        assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
+    assert len(real_deletes(upstream)) == 2 and len(posted) == 2
+
+
+async def test_oob_prompt_says_the_client_cannot_approve(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+    msg = res["inputRequests"][CONFIRM_KEY]["params"]["message"]
+    assert "confirming in the client does not approve" in msg and "Confirm to execute" not in msg
+    assert res["requestState"] and CONFIRM_KEY in res["inputRequests"]  # shape unchanged
+
+
+async def test_default_without_webhook_is_inband(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    assert al.approval_mode == "inband"
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(res["requestState"]))
+    assert res["isError"] is False and len(real_deletes(upstream)) == 1
+
+
+def test_bad_approval_mode_fails_at_construction(upstream, audit_path):
+    with pytest.raises(ValueError, match="unknown approval mode 'maybe'"):
+        make_airlock(upstream, audit_path, approval_mode="maybe")
+    with pytest.raises(ValueError, match="unknown approval mode ''"):
+        make_airlock(upstream, audit_path, approval_mode="")
+    with pytest.raises(ValueError, match="AIRLOCK_APPROVAL_WEBHOOK"):
+        make_airlock(upstream, audit_path, approval_mode="oob")
+    assert make_airlock(upstream, audit_path, approval_mode="inband").approval_mode == "inband"
+
+
+def test_build_reads_approval_mode_from_env(monkeypatch, tmp_path):
+    from mcp_airlock.app import build
+    for var in ("AIRLOCK_APPROVAL_WEBHOOK", "AIRLOCK_APPROVAL_MODE", "AIRLOCK_STORE_DSN", "AIRLOCK_AUDIT_DSN"):
+        monkeypatch.delenv(var, raising=False)
+
+    def make() -> Airlock:
+        return build(str(ROOT / "policy.example.yaml"), "http://localhost:9001/mcp", str(tmp_path / "audit.jsonl"), "prod")
+
+    assert make().approval_mode == "inband"
+    monkeypatch.setenv("AIRLOCK_APPROVAL_MODE", "oob")
+    with pytest.raises(ValueError, match="AIRLOCK_APPROVAL_WEBHOOK"):
+        make()
+    monkeypatch.setenv("AIRLOCK_APPROVAL_WEBHOOK", "https://hooks.example/x")
+    assert make().approval_mode == "oob"
+    monkeypatch.setenv("AIRLOCK_APPROVAL_MODE", "inband")
+    assert make().approval_mode == "inband"
+    monkeypatch.delenv("AIRLOCK_APPROVAL_MODE")
+    assert make().approval_mode == "oob"
+    monkeypatch.setenv("AIRLOCK_APPROVAL_MODE", "")  # empty means unset: the default applies
+    assert make().approval_mode == "oob"

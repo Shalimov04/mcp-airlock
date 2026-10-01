@@ -85,6 +85,7 @@ class Airlock:
         telegram_chat: str | None = None,
         notify_http: httpx.AsyncClient | None = None,
         public_url: str | None = None,
+        approval_mode: str | None = None,
     ):
         self.engine = Engine(policy, store)
         self.audit = audit
@@ -96,6 +97,12 @@ class Airlock:
         self.http = http or httpx.AsyncClient(timeout=60.0)
         self.upstream = upstream
         self.webhook, self.telegram_chat = webhook, telegram_chat
+        # oob: only the approve link approves. Without a webhook nobody receives a link, so every L2 call would stay pending.
+        self.approval_mode = approval_mode if approval_mode is not None else ("oob" if webhook else "inband")
+        if self.approval_mode not in ("oob", "inband"):
+            raise ValueError(f"unknown approval mode {self.approval_mode!r}: use 'oob' or 'inband'")
+        if self.approval_mode == "oob" and not webhook:
+            raise ValueError("approval mode 'oob' needs AIRLOCK_APPROVAL_WEBHOOK: without it nobody gets an approve link")
         self.notify_http = notify_http or self.http
         self.public_url = (public_url or "").rstrip("/")
         self._catalog: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}  # (version, sub, groups) to (expires_at, tools)
@@ -143,7 +150,8 @@ class Airlock:
 
     async def verify_confirmation(self, params: dict[str, Any], principal: str, tool: str, args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Returns (mode, claims): mode is 'none' (no airlock token), 'accepted', 'pending' (token but no answer yet),
-        or 'deny:<rule>'. Never consumes the key on accept; `_call` does that right before forwarding."""
+        'pending:ignored' (pending, and an in-band accept was ignored in oob mode) or 'deny:<rule>'.
+        Never consumes the key on accept; `_call` does that right before forwarding."""
         state = params.get("requestState")
         if not isinstance(state, str) or not state.startswith(TOKEN_PREFIX):
             return "none", None  # plain call, or an upstream-owned requestState (forwarded untouched)
@@ -156,10 +164,14 @@ class Airlock:
             return "deny:mrtr.mismatch", None
         responses = params.get("inputResponses")
         answer = responses.get(CONFIRM_KEY) if isinstance(responses, dict) else responses
-        if answer is None:  # no answer for our question: approved out-of-band, or still waiting (nothing burned)
-            return ("accepted" if await self.engine.store.is_approved(claims["k"]) else "pending"), claims
         content = answer.get("content") if isinstance(answer, dict) else None
-        if isinstance(answer, dict) and answer.get("action") == "accept" and isinstance(content, dict) and content.get("confirm") is True:
+        in_band = isinstance(answer, dict) and answer.get("action") == "accept" and isinstance(content, dict) and content.get("confirm") is True
+        if answer is None or (in_band and self.approval_mode == "oob"):
+            # No answer for our question (or, in oob mode, one that does not count): approved out-of-band, or still waiting (nothing burned)
+            if await self.engine.store.is_approved(claims["k"]):
+                return "accepted", claims
+            return ("pending" if answer is None else "pending:ignored"), claims
+        if in_band:
             return "accepted", claims
         burned = await self.engine.store.consume_once(claims["k"], claims["exp"])  # decline/cancel/malformed: one answer per prompt
         return ("deny:mrtr.declined" if burned else "deny:mrtr.replay"), None
@@ -245,10 +257,11 @@ class Airlock:
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
             return _tool_error(rid, f"airlock: denied ({d.rule_id}): {d.message}", d.rule_id)
-        if d.verdict == "confirm" and mode == "pending":
+        if d.verdict == "confirm" and mode.startswith("pending"):
             # Waiting for the out-of-band approval: same key, no new prompt (a client would re-ask the human), nothing burned.
+            detail = "in-band accept ignored (approval mode oob)" if mode == "pending:ignored" else None
             for phase in ("intent", "outcome"):
-                self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, **base)
+                self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
                 "resultType": "input_required", "requestState": params["requestState"],
                 "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"],
@@ -461,9 +474,11 @@ class Airlock:
                               for b in (raw if isinstance(raw, list) else [])]
             text = " ".join(b["text"] for b in preview_blocks if isinstance(b, dict) and isinstance(b.get("text"), str))[:2000]
             preview_line = f"Dry-run preview: {text or '(empty)'}"
+        ask = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
+               "and declining cancels the request." if self.approval_mode == "oob" else "Confirm to execute for real.")
         message = (f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
                    f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
-                   f"Confirm to execute for real. Idempotency key: {key}")
+                   f"{ask} Idempotency key: {key}")
         meta = {**((preview or {}).get("_meta") or {}), META + "idempotency_key": key, META + "verdict": "confirm",
                 META + "rule_id": "tier.L2.confirm"}
         if preview_blocks is not None:
@@ -561,4 +576,5 @@ def build(policy_path: str, upstream: str, audit_path: str, environment: str | N
                    secret=secret.encode() if secret else None,
                    identity=IdentityConfig.from_env(), store=store_from_env(),
                    upstream_headers=upstream_headers, webhook=webhook, telegram_chat=telegram_chat,
-                   public_url=os.environ.get("AIRLOCK_PUBLIC_URL", "http://127.0.0.1:9000"), **kw)
+                   public_url=os.environ.get("AIRLOCK_PUBLIC_URL", "http://127.0.0.1:9000"),
+                   approval_mode=os.environ.get("AIRLOCK_APPROVAL_MODE") or None, **kw)

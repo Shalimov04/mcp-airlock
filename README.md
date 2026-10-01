@@ -117,6 +117,7 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, blast-radius counters. Without it the state lives in process memory. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
+| `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
 | `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
@@ -177,18 +178,23 @@ along with the body.
 
 If an approval webhook is configured, the same prompt goes to Slack or Telegram with a
 link. The link carries a second token signed with a different key, so the agent, which
-only ever sees `requestState`, cannot approve its own call. Opening the link shows a page
-with a button; the `GET` does nothing (link previews and prefetchers would otherwise
-approve things), the `POST` records the approval. The agent finds out by repeating the call
+only ever sees `requestState`, cannot forge it. Opening the link shows a page with a
+button; the `GET` does nothing (link previews and prefetchers would otherwise approve
+things), the `POST` records the approval. The agent finds out by repeating the call
 with `requestState` and no `inputResponses`: it gets `input_required` back with
 `status: pending` until the button is pressed, then the call runs. A human takes minutes; the
 retry loop built into the official Python SDK client gives up after about two seconds of
 polling with `InputRequiredRoundsExceededError`. Catch it and retry later with the same
 `requestState`.
 
+In `oob` mode an in-band `accept` leaves the call `pending` and the audit record says the
+accept was ignored; a decline still burns the key.
+
 A failed webhook post is logged as the exception class and the HTTP status, never the URL,
-which holds the Telegram bot token or the Slack secret path. httpx itself logs every request
-URL at `INFO`, so if you configure logging, keep the `httpx` logger at `WARNING`.
+which holds the Telegram bot token or the Slack secret path. In `oob` mode a failed post
+means nobody can approve that prompt: a new call without `requestState` issues a new prompt
+and posts again. httpx itself logs every request URL at `INFO`, so if you configure logging,
+keep the `httpx` logger at `WARNING`.
 
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
