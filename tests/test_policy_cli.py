@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from mcp_airlock import policy_cli
+from mcp_airlock import pins, policy_cli
 
 from . import fake_upstream
 
@@ -148,7 +148,7 @@ def test_main_lint_exit_codes(tmp_path, capsys):
 
 
 def test_main_diff_exit_code(monkeypatch, capsys):
-    async def fake(policy_path, upstream, env=None, principal="airlock-policy", http=None):
+    async def fake(policy_path, upstream, env=None, principal="airlock-policy", http=None, pins=None):
         assert (str(policy_path), upstream, env, principal) == (str(EXAMPLE), "http://x/mcp", "dev", "p")
         return [("ERROR", "missing_upstream", "ghost is not in the upstream catalog")]
 
@@ -232,3 +232,145 @@ async def test_diff_warns_about_a_where_rule_on_an_unknown_argument(upstream, tm
     warns = [m for lvl, c, m in f if c == "where_unknown_arg"]
     assert len(warns) == 1 and "'nmae'" in warns[0] and "delete_service" in warns[0]
     assert codes(f, "ERROR") == []
+
+
+# ---------------------------------------------------------------- pin
+
+async def catalog_of(upstream) -> dict:
+    return await policy_cli._catalog(http_for(upstream), "http://localhost:9001/mcp", "t")
+
+
+async def test_pin_writes_a_hash_for_every_allowlisted_tool_the_upstream_lists(upstream, tmp_path):
+    out = tmp_path / "pins.json"
+    f = await policy_cli.pin(EXAMPLE, "http://localhost:9001/mcp", env="prod", pins=out, http=http_for(upstream))
+    catalog = await catalog_of(upstream)
+    allowlisted = ["list_services", "get_service", "set_replicas", "delete_service", "restart_service", "rotate_key"]
+    assert json.loads(out.read_text()) == {n: pins.tool_hash(catalog[n]) for n in allowlisted}  # rm_rf is not allowlisted
+    text = out.read_text()
+    assert text.endswith("\n") and list(json.loads(text)) == sorted(allowlisted)
+    assert codes(f) == ["ok"] and pins.load(out)
+
+
+async def test_pin_warns_about_an_allowlisted_tool_the_upstream_lacks(upstream, tmp_path):
+    p = write(tmp_path, "  get_service:\n    tiers: {prod: L0}\n  ghost:\n    description: d\n    tiers: {prod: L0}\n")
+    out = tmp_path / "pins.json"
+    f = await policy_cli.pin(p, "http://localhost:9001/mcp", pins=out, http=http_for(upstream))
+    assert [(l, c) for l, c, _ in f if c != "ok"] == [("WARN", "missing_upstream")]
+    assert "ghost" in next(m for _, c, m in f if c == "missing_upstream")
+    assert list(json.loads(out.read_text())) == ["get_service"]
+
+
+async def test_pin_reports_an_unwritable_pins_file(upstream, tmp_path):
+    f = await policy_cli.pin(EXAMPLE, "http://localhost:9001/mcp", pins=tmp_path / "no" / "dir" / "pins.json", http=http_for(upstream))
+    assert codes(f, "ERROR") == ["pins_file"]
+
+
+async def test_pin_writes_nothing_when_the_upstream_is_down(tmp_path):
+    def refuse(request):  # an empty pins file would let the proxy start with no pin at all
+        raise httpx.ConnectError("refused")
+
+    out = tmp_path / "pins.json"
+    with pytest.raises(httpx.ConnectError):
+        await policy_cli.pin(EXAMPLE, "http://x/mcp", pins=out, http=httpx.AsyncClient(transport=httpx.MockTransport(refuse)))
+    assert not out.exists()
+
+
+def test_main_pin_exit_codes(monkeypatch, capsys):
+    async def ok(policy_path, upstream, env=None, principal="airlock-policy", pins="pins.json", http=None):
+        assert (str(policy_path), upstream, env, principal, pins) == (str(EXAMPLE), "http://x/mcp", "dev", "p", "out.json")
+        return [("WARN", "missing_upstream", "ghost"), ("INFO", "ok", "pinned 0 tool(s)")]
+
+    monkeypatch.setattr(policy_cli, "pin", ok)
+    args = ["pin", str(EXAMPLE), "--upstream", "http://x/mcp", "--env", "dev", "--principal", "p", "--pins", "out.json"]
+    assert policy_cli.main(args) == 0  # a warning is not a failure
+    assert "WARN missing_upstream: ghost" in capsys.readouterr().out
+
+    async def down(*a, **kw):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(policy_cli, "pin", down)
+    assert policy_cli.main(["pin", str(EXAMPLE), "--upstream", "http://x/mcp", "--pins", "p.json"]) == 1
+    assert "ERROR upstream" in capsys.readouterr().out
+
+
+def test_main_pin_defaults_to_pins_json(monkeypatch):
+    seen = {}
+
+    async def fake(policy_path, upstream, env=None, principal="airlock-policy", pins="pins.json", http=None):
+        seen["pins"] = pins
+        return []
+
+    monkeypatch.setattr(policy_cli, "pin", fake)
+    policy_cli.main(["pin", str(EXAMPLE), "--upstream", "http://x/mcp"])
+    assert seen["pins"] == "pins.json"
+
+
+# ---------------------------------------------------------------- diff --pins
+
+async def pinned_file(upstream, tmp_path) -> Path:
+    out = tmp_path / "pins.json"
+    await policy_cli.pin(EXAMPLE, "http://localhost:9001/mcp", env="prod", pins=out, http=http_for(upstream))
+    return out
+
+
+async def test_diff_with_matching_pins_reports_nothing_extra(upstream, tmp_path):
+    f = await policy_cli.diff(EXAMPLE, "http://localhost:9001/mcp", env="prod", http=http_for(upstream),
+                              pins=await pinned_file(upstream, tmp_path))
+    assert not {"pin_mismatch", "no_pin", "stale_pin", "pins_file"} & set(codes(f))
+    assert codes(f, "ERROR") == []
+
+
+async def test_diff_reports_a_changed_hash_a_missing_pin_and_a_stale_pin(upstream, tmp_path):
+    path = await pinned_file(upstream, tmp_path)
+    data = json.loads(path.read_text())
+    data["get_service"] = "sha256:" + "0" * 64  # the upstream now answers with something else
+    del data["rotate_key"]
+    data["rm_rf"] = data["list_services"]  # in the catalog, not in the policy
+    data["ghost"] = data["list_services"]  # in neither
+    path.write_text(json.dumps(data))
+    f = await policy_cli.diff(EXAMPLE, "http://localhost:9001/mcp", env="prod", http=http_for(upstream), pins=path)
+    by = {(l, c, m.split()[0]) for l, c, m in f if c in ("pin_mismatch", "no_pin", "stale_pin")}
+    assert by == {("ERROR", "pin_mismatch", "get_service:"), ("WARN", "no_pin", "rotate_key"),
+                  ("WARN", "stale_pin", "ghost"), ("WARN", "stale_pin", "rm_rf")}
+    assert codes(f, "ERROR") == ["pin_mismatch"]
+
+
+async def test_diff_reports_a_pin_for_a_tool_the_upstream_lacks_as_stale_not_missing(upstream, tmp_path):
+    p = write(tmp_path, "  get_service:\n    tiers: {prod: L0}\n  ghost:\n    description: d\n    tiers: {prod: L0}\n")
+    path = tmp_path / "pins.json"
+    path.write_text(json.dumps({"ghost": "sha256:" + "0" * 64}))  # pinned before the server dropped it
+    f = await policy_cli.diff(p, "http://localhost:9001/mcp", http=http_for(upstream), pins=path)
+    assert [m.split()[0] for _, c, m in f if c == "no_pin"] == ["get_service"]  # ghost already is a missing_upstream error
+    assert [(l, c, m.split()[0]) for l, c, m in f if c in ("missing_upstream", "stale_pin")] == [
+        ("ERROR", "missing_upstream", "ghost"), ("WARN", "stale_pin", "ghost")]
+
+
+async def test_diff_with_a_bad_pins_file_is_one_error(upstream, tmp_path):
+    bad = tmp_path / "pins.json"
+    bad.write_text("[1]")
+    f = await policy_cli.diff(EXAMPLE, "http://localhost:9001/mcp", env="prod", http=http_for(upstream), pins=bad)
+    assert [(l, c) for l, c, _ in f] == [("ERROR", "pins_file")] and str(bad) in f[0][2]
+
+
+async def test_diff_with_an_empty_pins_file_warns_about_every_allowlisted_tool(upstream, tmp_path):
+    empty = tmp_path / "pins.json"
+    empty.write_text("{}")  # a file that pins nothing is still a pins file, not the same as no --pins
+    f = await policy_cli.diff(EXAMPLE, "http://localhost:9001/mcp", env="prod", http=http_for(upstream), pins=empty)
+    assert sorted(m.split()[0] for _, c, m in f if c == "no_pin") == sorted(
+        ["list_services", "get_service", "set_replicas", "delete_service", "restart_service", "rotate_key"])
+    assert not {"pin_mismatch", "stale_pin", "pins_file"} & set(codes(f)) and codes(f, "ERROR") == []
+
+
+async def test_diff_without_pins_says_nothing_about_pins(upstream):
+    f = await policy_cli.diff(EXAMPLE, "http://localhost:9001/mcp", env="prod", http=http_for(upstream))
+    assert not {"pin_mismatch", "no_pin", "stale_pin", "pins_file"} & set(codes(f))
+
+
+def test_main_diff_passes_pins_and_a_mismatch_fails(monkeypatch, capsys):
+    async def fake(policy_path, upstream, env=None, principal="airlock-policy", http=None, pins=None):
+        assert pins == "p.json"
+        return [("ERROR", "pin_mismatch", "get_service: description or schema changed since it was pinned")]
+
+    monkeypatch.setattr(policy_cli, "diff", fake)
+    assert policy_cli.main(["diff", str(EXAMPLE), "--upstream", "http://x/mcp", "--pins", "p.json"]) == 1
+    assert "ERROR pin_mismatch: get_service" in capsys.readouterr().out

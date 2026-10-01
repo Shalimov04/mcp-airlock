@@ -1,13 +1,15 @@
-"""airlock-policy: lint a policy file offline, or diff it against a live upstream's tools/list.
+"""airlock-policy: lint a policy file offline, diff it against a live upstream's tools/list, or pin the upstream's tools.
 
     airlock-policy lint policy.yaml [--env staging --env prod]
-    airlock-policy diff policy.yaml --upstream http://host/mcp [--env prod] [--principal me]
+    airlock-policy diff policy.yaml --upstream http://host/mcp [--env prod] [--principal me] [--pins pins.json]
+    airlock-policy pin policy.yaml --upstream http://host/mcp [--env prod] [--principal me] [--pins pins.json]
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from . import pins as tool_pins
 from .app import _last_sse_message
 from .policy import Policy
 
@@ -72,8 +75,14 @@ async def _catalog(http: httpx.AsyncClient, upstream: str, principal: str) -> di
 
 
 async def diff(policy_path: str | Path, upstream: str, env: str | None = None, principal: str = "airlock-policy",
-               http: httpx.AsyncClient | None = None) -> list[Finding]:
+               http: httpx.AsyncClient | None = None, pins: str | Path | None = None) -> list[Finding]:
     p = Policy.load(policy_path, env)
+    pinned: dict[str, str] | None = None
+    if pins is not None:
+        try:
+            pinned = tool_pins.load(pins)
+        except ValueError as e:
+            return [("ERROR", "pins_file", str(e))]
     client = http or httpx.AsyncClient(timeout=10, trust_env=False)
     try:
         catalog = await _catalog(client, upstream, principal)
@@ -94,8 +103,36 @@ async def diff(policy_path: str | Path, upstream: str, env: str | None = None, p
                 out.append(("WARN", "where_unknown_arg", f"{name} has a where rule on {w.arg!r}, which is not in its inputSchema"))
     for name in catalog.keys() - p.tools.keys():
         out.append(("WARN", "not_allowlisted", f"{name} is in the upstream catalog but not in the policy (denied)"))
+    if pinned is not None:
+        for name in (n for n in p.tools if n in catalog):
+            if name not in pinned:
+                out.append(("WARN", "no_pin", f"{name} is allowlisted but has no pin"))
+            elif tool_pins.changed(pinned, catalog[name]):
+                out.append(("ERROR", "pin_mismatch", f"{name}: description or schema changed since it was pinned"))
+        for name in sorted(pinned.keys() - (p.tools.keys() & catalog.keys())):
+            out.append(("WARN", "stale_pin", f"{name} is pinned, but the policy does not allowlist it or the upstream does not list it"))
     out.append(("INFO", "ok", f"{len(p.tools.keys() & catalog.keys())} tool(s) allowlisted and present upstream, "
                               f"{len(catalog)} in catalog, env {p.environment!r}"))
+    return out
+
+
+async def pin(policy_path: str | Path, upstream: str, env: str | None = None, principal: str = "airlock-policy",
+              pins: str | Path = "pins.json", http: httpx.AsyncClient | None = None) -> list[Finding]:
+    p = Policy.load(policy_path, env)
+    client = http or httpx.AsyncClient(timeout=10, trust_env=False)
+    try:
+        catalog = await _catalog(client, upstream, principal)
+    finally:
+        if http is None:
+            await client.aclose()
+    out: list[Finding] = [("WARN", "missing_upstream", f"{name} is allowlisted but not in the upstream catalog: no pin written")
+                          for name in p.tools if name not in catalog]
+    pinned = {name: tool_pins.tool_hash(catalog[name]) for name in p.tools if name in catalog}
+    try:
+        Path(pins).write_text(json.dumps(pinned, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as e:
+        return [*out, ("ERROR", "pins_file", str(e))]
+    out.append(("INFO", "ok", f"pinned {len(pinned)} tool(s) to {pins}"))
     return out
 
 
@@ -110,12 +147,20 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--upstream", required=True, help="MCP endpoint, e.g. http://127.0.0.1:9001/mcp. Point it at the server, not the proxy: the proxy hides tools the policy does not list")
     d.add_argument("--env", help="environment column to check (default: the policy's own)")
     d.add_argument("--principal", default="airlock-policy", help="X-Airlock-Principal to send")
+    d.add_argument("--pins", help="pins file from `airlock-policy pin`: report changed, missing and stale pins")
+    n = sub.add_parser("pin", help="write a sha256 pin for every allowlisted tool the upstream lists")
+    n.add_argument("policy")
+    n.add_argument("--upstream", required=True, help="MCP endpoint of the server itself, not the proxy")
+    n.add_argument("--env", help="environment column to read (default: the policy's own)")
+    n.add_argument("--principal", default="airlock-policy", help="X-Airlock-Principal to send")
+    n.add_argument("--pins", default="pins.json", help="file to write (default: pins.json)")
     a = ap.parse_args(argv)
     if a.cmd == "lint":
         findings = lint(a.policy, a.env)
     else:
         try:
-            findings = asyncio.run(diff(a.policy, a.upstream, a.env, a.principal))
+            findings = asyncio.run(diff(a.policy, a.upstream, a.env, a.principal, pins=a.pins) if a.cmd == "diff"
+                                   else pin(a.policy, a.upstream, a.env, a.principal, a.pins))
         except (httpx.HTTPError, RuntimeError, ValidationError, ValueError) as e:  # ValueError: not JSON
             findings = [("ERROR", "upstream", str(e))]
     for level, code, msg in findings:

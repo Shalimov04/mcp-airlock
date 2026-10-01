@@ -116,6 +116,7 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 | `AIRLOCK_APPROVAL_MODE` | `oob` или `inband`. При `oob` одобряет только ссылка; `accept` в `inputResponses` считается отсутствием ответа. При `inband` одобряет `accept` клиента; `accept` с токеном `oob` там тоже игнорируется. По умолчанию `oob`, если задан webhook, иначе `inband`. `oob` без webhook отклоняется при запуске. |
 | `AIRLOCK_TELEGRAM_CHAT` | Chat id для Telegram. |
 | `AIRLOCK_PUBLIC_URL` | Базовый URL для ссылок одобрения. По умолчанию `http://127.0.0.1:9000`. |
+| `AIRLOCK_PINS` | Путь к файлу пинов тулов, то же, что `--pins`. Без него ничего не пинится. См. [Пины описаний тулов](#пины-описаний-тулов). |
 | `AIRLOCK_UPSTREAM_AUTH` | Значение заголовка `Authorization` для upstream. Это учётка самого прокси; личность вызывающего едет в `_meta`. |
 
 ## Файл политики
@@ -172,7 +173,7 @@ tools:
 Идентификаторы правил, которые встретятся в `_meta` и в аудите: `allowlist.deny`,
 `tier.unassigned`, `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
 `tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`,
-`dry_run.unsupported`, `catalog.unavailable`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`,
+`dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`,
 `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`,
 `mrtr.upstream_input_required`, `internal.error`.
 
@@ -273,6 +274,32 @@ base64) и перечисляет совпадения в `_meta["io.mcp-airlock
 они пропустят хитрое и иногда пометят обычное предложение, и они никогда ничего не
 блокируют.
 
+## Пины описаний тулов
+
+Upstream может поменять описание или схему тула уже после того, как вы их проверили, а модель
+читает этот текст. Пин: sha256 от `name`, `description`, `inputSchema`, `outputSchema` и
+`annotations` тула. Пины пишутся с самого сервера (не с прокси), затем файл отдаётся прокси:
+
+```
+uv run airlock-policy pin policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
+uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
+```
+
+`pin` пишет один JSON-объект, имя тула в `sha256:<hex>`, для каждого тула из allowlist,
+который отдаёт сервер. Пины лежат в отдельном файле, потому что при перезаписи YAML политики
+пропали бы комментарии. `--pins` можно задать и через `AIRLOCK_PINS`; невалидный файл пинов
+останавливает прокси при запуске. В `tools/list` запиненный тул с другим хешем убирается из
+ответа, считается в `_meta["io.mcp-airlock/pin_mismatch"]` и попадает в аудит как
+`catalog.pin_mismatch`. Тул без пина не трогается. Описания оставшихся тулов проходят проверку
+на инъекции (все паттерны, кроме приманок на вызов тулов: описание может законно упоминать
+другой тул), а совпадения, каждое с именем тула, перечисляются в
+`_meta["io.mcp-airlock/suspicious"]`. `airlock-policy diff ... --pins pins.json` показывает
+изменившиеся хеши, тулы из allowlist без пина и пины тулов, которых больше нет в allowlist или
+на сервере.
+
+Вызов запиненного тула по-прежнему решается политикой: модель узнаёт описание только из
+`tools/list`, а тулы с подтверждением и так перечитывают схему.
+
 ## Что стоит знать перед боевым запуском
 
 Stateless только сторона MCP, сторона governance — нет. Использованные ключи, одобрения и
@@ -314,7 +341,7 @@ Blast radius считает то, что видит: длину названно
 официальным Python SDK-клиентом и проверяет последствия там, где они происходят: `e2e/kubernetes`
 запускает настоящий kubernetes-mcp-server на k3s с примером политики (под удаляется ровно один
 раз, отказ и повтор его не трогают), `e2e/grafana` запускает grafana/mcp-grafana с Grafana OSS,
-`e2e/postgres` запускает небольшой SDK-сервер с честным dry run на Postgres, три реплики прокси и
+`e2e/postgres` запускает небольшой SDK-сервер с честным dry run на Postgres, четыре реплики прокси и
 webhook для одобрения. У каждого есть `run.sh`, который завершается с ненулевым кодом при любом
 провале. Политика для GitHub по-прежнему сверена только с исходниками: её серверу нужен github.com.
 
@@ -329,7 +356,8 @@ src/mcp_airlock/guard.py       разметка инъекций
 src/mcp_airlock/approvals.py   уведомления в Slack / Telegram
 src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция секретов
 src/mcp_airlock/audit_cli.py   airlock-audit
-src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
+src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
+src/mcp_airlock/pins.py        пины тулов: хеш, загрузка файла пинов
 tests/fake_upstream.py         фейковый сервер для тестов и демо
 docs/clients.md                подключение Claude Code и Cursor (по-английски)
 Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock

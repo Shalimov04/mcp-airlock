@@ -41,8 +41,9 @@ Code treats an entry with a `url` and no `type` as a misconfigured stdio server:
 ```
 
 `claude mcp get github-airlocked` shows whether it connected. `tools/list` through the
-proxy only returns tools that are in the policy, so a tool the agent "cannot see" is a
-policy question, not a connection problem.
+proxy only returns tools that are in the policy and, with a pins file, whose definition
+still matches its pin (audited as `catalog.pin_mismatch`), so a tool the agent "cannot
+see" is a policy question, not a connection problem.
 
 ## Cursor
 

@@ -1,5 +1,6 @@
-"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against three airlock replicas (two in-band,
-one oob) in front of a Postgres-backed MCP service. Assertions are made on the real databases. Prints PASS/FAIL per check."""
+"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against four airlock replicas (three in-band,
+one oob; one of the in-band ones has a pins file) in front of a Postgres-backed MCP service. Assertions are made on
+the real databases. Prints PASS/FAIL per check."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp_types import ElicitResult
 
 A, B, OOB = os.environ["AIRLOCK_A"], os.environ["AIRLOCK_B"], os.environ["AIRLOCK_OOB"]
+PINS = os.environ["AIRLOCK_PINS_URL"]
 SERVICE = "http://service:8000/mcp"
 V = "2026-07-28"
 ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotocol/clientCapabilities": {}}
@@ -366,6 +368,24 @@ async def s18():
     return f"{rule}; 0 human prompts; service saw no drop_table call for it; customers intact ({rows} rows); denial audited"
 
 
+@check("19 pins: a changed description is hidden")
+async def s19():
+    tok = token("alice")
+    pinned = result(await rpc(PINS, "tools/list", tok=tok))
+    plain = result(await rpc(A, "tools/list", tok=tok))  # airlock-a has no pins file
+    pinned_names, plain_names = {t["name"] for t in pinned["tools"]}, {t["name"] for t in plain["tools"]}
+    # pin-init changed the pin of get_note; every other allowlisted tool keeps its real pin
+    assert "get_note" in plain_names and "list_rows" in plain_names, plain_names
+    assert "get_note" not in pinned_names and pinned_names == plain_names - {"get_note"}, (pinned_names, plain_names)
+    assert pinned["_meta"][M + "pin_mismatch"] == 1 and M + "pin_mismatch" not in plain["_meta"], (pinned["_meta"], plain["_meta"])
+    rows = aq("SELECT phase, rec->>'detail' FROM airlock_audit WHERE rule_id = 'catalog.pin_mismatch' AND verdict = 'deny'")
+    assert rows and all(d.startswith("get_note:") for _, d in rows) and {p for p, _ in rows} == {"intent", "outcome"}, rows
+    read = result(await rpc(PINS, "tools/call", {"name": "list_rows", "arguments": {"limit": 1}}, tok=tok))
+    assert not read.get("isError") and read["_meta"][M + "rule_id"] == "tier.L0.read", read
+    return (f"airlock-pins hides get_note (pin_mismatch 1) and lists the other {len(pinned_names)} allowlisted tools; "
+            f"airlock-a still lists get_note; {len(rows)} catalog.pin_mismatch audit records name get_note; list_rows call works")
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -508,7 +528,7 @@ async def s17():
 async def wait_ready() -> None:
     for _ in range(120):
         try:
-            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB)] == [401, 401, 401]:
+            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB, PINS)] == [401, 401, 401, 401]:
                 return
         except httpx.HTTPError:
             pass
@@ -519,7 +539,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

@@ -120,6 +120,7 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
 | `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
+| `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
 
 ## The policy file
@@ -175,7 +176,7 @@ avoid nested repetition.
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`, `args.violation`,
 `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`, `tier.L2.dry_run`,
 `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
-`catalog.unavailable`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
+`catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
 `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
 `internal.error`.
 
@@ -274,6 +275,32 @@ zero-width characters, long base64 runs) and list the matches in
 `_meta["io.mcp-airlock/suspicious"]`. It is regex, it will miss clever things and
 occasionally flag a normal sentence, and it never blocks anything.
 
+## Pinning tool descriptions
+
+An upstream can change a tool's description or schema after you reviewed it, and the model
+reads that text. A pin is the sha256 of a tool's `name`, `description`, `inputSchema`,
+`outputSchema` and `annotations`. Write the pins from the server itself (not from the proxy),
+then give the file to the proxy:
+
+```
+uv run airlock-policy pin policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
+uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
+```
+
+`pin` writes one JSON object, tool name to `sha256:<hex>`, for every allowlisted tool the
+server lists. The pins live in their own file because rewriting the policy YAML would drop its
+comments. `--pins` can also come from `AIRLOCK_PINS`; a pins file that is not valid stops the
+proxy at startup. On `tools/list` a pinned tool whose hash differs is removed from the answer,
+counted in `_meta["io.mcp-airlock/pin_mismatch"]` and audited as `catalog.pin_mismatch`. A tool
+without a pin is left alone. The descriptions of the tools that remain go through the injection
+scan (every pattern but tool-call bait, which a description may legitimately contain), and the
+matches, each with its tool name, are listed in `_meta["io.mcp-airlock/suspicious"]`.
+`airlock-policy diff ... --pins pins.json` reports changed hashes, allowlisted tools without a
+pin and pins for tools that are no longer allowlisted or no longer listed by the server.
+
+A call to a pinned tool is still decided by the policy: the model only learns a description
+from `tools/list`, and gated tools already re-read the schema.
+
 ## Things to know before running it in anger
 
 The MCP side is stateless, the governance side is not. Used confirmation keys, approvals
@@ -314,7 +341,7 @@ the official Python SDK client and checking the side effects where they land:
 `e2e/kubernetes` runs the real kubernetes-mcp-server against k3s with the example policy (pods
 really deleted once, declines and replays leave them alone), `e2e/grafana` runs grafana/mcp-grafana
 against Grafana OSS, and `e2e/postgres` runs a small SDK server with an honest dry run against
-Postgres, three proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
+Postgres, four proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
 failure. The GitHub policy has still only been checked against the server's source, since its
 server needs github.com.
 
@@ -329,7 +356,8 @@ src/mcp_airlock/guard.py       injection marking
 src/mcp_airlock/approvals.py   Slack / Telegram notifications
 src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction
 src/mcp_airlock/audit_cli.py   airlock-audit
-src/mcp_airlock/policy_cli.py  airlock-policy lint / diff
+src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
+src/mcp_airlock/pins.py        tool pins: hash, pins file loader
 tests/fake_upstream.py         the fake server the tests and demo run against
 docs/clients.md                connecting Claude Code and Cursor
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image

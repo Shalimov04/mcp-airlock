@@ -32,6 +32,7 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from . import approvals, guard
+from . import pins as tool_pins
 from .audit import audit_from_env, redact, scrub
 from .identity import IdentityConfig, Principal, resolve
 from .policy import Engine, Policy
@@ -90,6 +91,7 @@ class Airlock:
         notify_http: httpx.AsyncClient | None = None,
         public_url: str | None = None,
         approval_mode: str | None = None,
+        pins: dict[str, str] | None = None,  # {tool: "sha256:<hex>"}, None means off
     ):
         self.engine = Engine(policy, store)
         self.audit = audit
@@ -100,6 +102,7 @@ class Airlock:
         self.confirm_ttl_s = confirm_ttl_s
         self.http = http or httpx.AsyncClient(timeout=60.0)
         self.upstream = upstream
+        self.pins = pins
         self.webhook, self.telegram_chat = webhook, telegram_chat
         # oob: only the approve link approves. Without a webhook nobody receives a link, so every L2 call would stay pending.
         self.approval_mode = approval_mode if approval_mode is not None else ("oob" if webhook else "inband")
@@ -242,6 +245,7 @@ class Airlock:
         status, reply = await self.forward(body, headers, who)
         if method == "tools/list" and isinstance(reply.get("result"), dict):
             self._filter_tools(reply["result"], who)
+            self._vet_tools(reply["result"], base)
         self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
         return JSONResponse(reply, status_code=status)
 
@@ -429,6 +433,29 @@ class Airlock:
         visible = [t for t in tools if isinstance(t, dict) and policy.tier(str(t.get("name")), who.sub, who.groups) is not None]
         result.setdefault("_meta", {})[META + "hidden_tools"] = len(tools) - len(visible)
         result["tools"] = visible  # ttlMs / cacheScope pass through untouched
+
+    def _vet_tools(self, result: dict[str, Any], base: dict[str, Any]) -> None:
+        """After the allowlist filter: drop pinned tools whose definition changed, mark suspicious descriptions."""
+        tools = result.get("tools")
+        if not isinstance(tools, list):
+            return
+        meta = result.setdefault("_meta", {})
+        if self.pins:
+            kept: list[dict[str, Any]] = []
+            dropped: list[dict[str, Any]] = []
+            for t in tools:
+                (dropped if tool_pins.changed(self.pins, t) else kept).append(t)
+            if dropped:
+                for t in dropped:  # own call_id: the tools/list call keeps its single intent/outcome pair
+                    self._audit_deny(dict(base, call_id=uuid.uuid4().hex), "catalog.pin_mismatch", None,
+                                     f"{t.get('name')}: description or schema changed since it was pinned")
+                meta[META + "pin_mismatch"] = len(dropped)
+                result["tools"] = tools = kept
+        # one scan per tool: guard.scan dedupes by phrase, and the same phrase in two descriptions must name both tools
+        findings = [{"rule": f["rule"], "tool": t.get("name"), "excerpt": f["excerpt"]} for t in tools
+                    for f in guard.scan({"content": [{"type": "text", "text": t.get("description")}]})]
+        if findings:
+            meta[META + "suspicious"] = findings[:guard.MAX_FINDINGS]  # marked, never removed; one cap for the whole list
 
     def _cap_output(self, tool: str, result: dict[str, Any]) -> dict[str, Any] | None:
         cap = self.engine.policy.output_cap(tool)
