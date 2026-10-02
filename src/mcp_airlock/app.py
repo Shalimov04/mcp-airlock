@@ -11,9 +11,12 @@ import json
 import logging
 import os
 import secrets
+import signal
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import httpx
@@ -55,6 +58,21 @@ READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
 DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
 _tracer = trace.get_tracer("mcp-airlock")
+
+
+@dataclass(frozen=True)
+class ReloadSource:
+    """Where a reload reads from: the policy file, and the pins file when one is configured."""
+    policy_path: str
+    pins_path: str | None = None
+
+
+@dataclass(frozen=True)
+class ReloadResult:
+    ok: bool
+    tools_before: int
+    tools_after: int
+    error: str | None = None
 
 
 class CatalogUnavailable(Exception):
@@ -105,8 +123,10 @@ class Airlock:
         pins: dict[str, str] | None = None,  # {tool: "sha256:<hex>"}, None means off
         max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
         max_upstream_bytes: int = DEFAULT_MAX_UPSTREAM_BYTES,
+        reload_source: ReloadSource | None = None,  # None: reload() has nothing to read
     ):
         self.engine = Engine(policy, store)
+        self.reload_source = reload_source
         self.audit = audit
         self.secret = secret or secrets.token_bytes(32)  # random per process: restart voids pending confirmations
         self.approve_secret = hmac.new(self.secret, b"approve", hashlib.sha256).digest()
@@ -139,14 +159,45 @@ class Airlock:
 
     @asynccontextmanager
     async def _lifespan(self, app: Starlette) -> AsyncIterator[None]:
+        loop, hup = asyncio.get_running_loop(), getattr(signal, "SIGHUP", None)  # no SIGHUP on Windows
+        if hup is not None:
+            try:
+                loop.add_signal_handler(hup, self.reload)
+            except RuntimeError:  # a loop without signal support (NotImplementedError is one), or not in the main thread
+                hup = None
         try:
             yield
         finally:
+            if hup is not None:
+                loop.remove_signal_handler(hup)
             try:
                 if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
                     await self.http.aclose()
             finally:
                 self.audit.close()
+
+    def reload(self) -> ReloadResult:
+        """Load the policy file and the pins file, then swap both in together. Nothing changes unless both load.
+        A request holds the engine and pins it started with, so a swap only reaches the next one. The store carries
+        over: usage windows and confirmation keys outlive a reload. Approval mode, secrets and upstream are not reloaded."""
+        before = len(self.engine.policy.tools)
+        src = self.reload_source
+        if src is None:
+            return ReloadResult(False, before, before, "nothing to reload: no policy file is known")
+        try:
+            # The running environment name, so a changed `environment:` in the file cannot void pending confirmations.
+            policy = Policy.load(src.policy_path, self.engine.policy.environment)
+            pins = tool_pins.load(src.pins_path) if src.pins_path else self.pins
+        except Exception as e:  # a bad file must never take the process down
+            error = " ".join(str(e).split())
+            print(f"mcp-airlock: policy reload failed, keeping the current policy: {error}", file=sys.stderr)
+            log.error("policy reload failed, keeping the current policy: %s", error)
+            return ReloadResult(False, before, before, error)
+        self.engine, self.pins = Engine(policy, self.engine.store), pins  # no await in between: one swap
+        after = len(policy.tools)
+        print(f"mcp-airlock: policy reloaded: {after} tools (was {before})", file=sys.stderr)
+        log.info("policy reloaded: %d tools (was %d)", after, before)
+        return ReloadResult(True, before, after)
 
     # ---------- MRTR confirmation tokens (stateless, HMAC-signed) ----------
     def _binding(self, principal: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -217,6 +268,7 @@ class Airlock:
 
     # ---------- request handling ----------
     async def handle(self, request: Request) -> Response:
+        engine, pins = self.engine, self.pins  # one policy and one pins mapping for the whole request, whatever a reload does
         headers = {k.lower(): v for k, v in request.headers.items()}
         raw = await self._read_body(request)  # before identity: resolving may fetch keys over the network
         if raw is None:
@@ -260,8 +312,8 @@ class Airlock:
             span.set_attribute("enduser.id", who.sub)
             try:
                 if method == "tools/call":
-                    return await self._call(rid, body, params, headers, who, tool, args, base, span)
-                return await self._passthrough(body, headers, who, method, base)
+                    return await self._call(rid, body, params, headers, who, tool, args, base, span, engine)
+                return await self._passthrough(body, headers, who, method, base, engine.policy, pins)
             except Exception as e:  # never leak a traceback; try hard to leave an outcome record
                 log.exception("airlock internal error")
                 self._outcome(verdict="error", rule_id="internal.error", detail=_exc_text(e), **base)
@@ -293,7 +345,7 @@ class Airlock:
         self._audit_deny(base, "request.too_large", None, f"limit {self.max_request_bytes} bytes")
         return _rpc_error(None, INVALID_REQUEST, "Request body too large", status=413)
 
-    async def _passthrough(self, body, headers, who: Principal, method, base) -> Response:
+    async def _passthrough(self, body, headers, who: Principal, method, base, policy: Policy, pins: dict[str, str] | None) -> Response:
         self.audit.write(phase="intent", verdict="allow", rule_id="passthrough", **base)  # a raise here fails closed
         t0 = time.perf_counter()
         try:
@@ -303,13 +355,13 @@ class Airlock:
                           detail=f"limit {e.limit} bytes", **base)
             return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: the upstream response exceeded {e.limit} bytes", status=502)
         if method == "tools/list" and isinstance(reply.get("result"), dict):
-            self._filter_tools(reply["result"], who)
-            self._vet_tools(reply["result"], base)
+            self._filter_tools(reply["result"], who, policy)
+            self._vet_tools(reply["result"], base, pins)
         self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
         return JSONResponse(reply, status_code=status)
 
-    async def _call(self, rid, body, params, headers, who: Principal, tool, args, base, span) -> Response:
-        policy = self.engine.policy
+    async def _call(self, rid, body, params, headers, who: Principal, tool, args, base, span, engine: Engine) -> Response:
+        policy = engine.policy
         mode, claims = await self.verify_confirmation(params, who.sub, tool, args)
         if mode.startswith("deny:"):
             rule = mode[5:]
@@ -324,7 +376,7 @@ class Airlock:
             except CatalogUnavailable as e:
                 self._audit_deny(base, "catalog.unavailable", tier, str(e))
                 return _tool_error(rid, f"airlock: denied (catalog.unavailable): {e}", "catalog.unavailable")
-        d = await self.engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups,
+        d = await engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups,
                                        dry_run_supported=dry_run_prop is not None)
         span.set_attributes({"airlock.verdict": d.verdict, "airlock.rule_id": d.rule_id, "airlock.tier": d.tier or ""})
         if d.verdict == "deny":
@@ -343,7 +395,7 @@ class Airlock:
             if not await self.engine.store.consume_once(claims["k"], claims["exp"]):
                 self._audit_deny(base, "mrtr.replay", d.tier, "idempotency key already used")
                 return _tool_error(rid, "airlock: denied (mrtr.replay)", "mrtr.replay")
-        d = await self.engine.reserve(who.sub, tool, d)  # atomic window charge; a replay never gets this far
+        d = await engine.reserve(who.sub, tool, d)  # atomic window charge; a replay never gets this far
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
             return _tool_error(rid, f"airlock: denied ({d.rule_id}): {d.message}", d.rule_id)
@@ -351,7 +403,7 @@ class Airlock:
         if d.verdict == "confirm" and not d.preview:
             # Tool has no dry_run: nothing safe to forward. Prompt the human without a preview.
             self.audit.write(phase="intent", verdict="confirm", rule_id=d.rule_id, tier=d.tier, dry_run=None, **base)
-            result = self._input_required(who.sub, tool, args, None)
+            result = self._input_required(who.sub, tool, args, None, policy)
             await self._notify(result, who.sub)
             self._outcome(verdict="confirm", rule_id=d.rule_id, tier=d.tier, dry_run=None, upstream_status=None, latency_ms=0, **base)
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": result})
@@ -388,7 +440,7 @@ class Airlock:
         if isinstance(result, dict):
             result.setdefault("_meta", {}).update({META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run})
             try:  # the upstream already acted: a malformed result must reach the caller, not become a 500
-                if truncated := self._cap_output(tool, result):  # after the _meta additions so the cap covers the final size
+                if truncated := self._cap_output(tool, result, policy):  # after the _meta additions so the cap covers the final size
                     detail.update(truncated)
                 if findings := guard.scan(result, policy.tools):
                     result["_meta"][META + "suspicious"] = findings  # marked, never blocked: the client decides how to render
@@ -398,7 +450,7 @@ class Airlock:
                 log.exception("post-processing failed; returning the upstream result as-is")
                 detail["postprocess_error"] = _exc_text(e)
             if d.verdict == "confirm" and status == 200 and not result.get("isError"):
-                reply["result"] = self._input_required(who.sub, tool, args, result)  # preview failed: no gate, just the error
+                reply["result"] = self._input_required(who.sub, tool, args, result, policy)  # preview failed: no gate, just the error
                 await self._notify(reply["result"], who.sub)
         self._outcome(verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
                       upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
@@ -507,26 +559,25 @@ class Airlock:
             return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": "upstream returned a non-object"}}
         return r.status_code, reply
 
-    def _filter_tools(self, result: dict[str, Any], who: Principal) -> None:
+    def _filter_tools(self, result: dict[str, Any], who: Principal, policy: Policy) -> None:
         tools = result.get("tools")
         if not isinstance(tools, list):
             return
-        policy = self.engine.policy
         visible = [t for t in tools if isinstance(t, dict) and policy.tier(str(t.get("name")), who.sub, who.groups) is not None]
         result.setdefault("_meta", {})[META + "hidden_tools"] = len(tools) - len(visible)
         result["tools"] = visible  # ttlMs / cacheScope pass through untouched
 
-    def _vet_tools(self, result: dict[str, Any], base: dict[str, Any]) -> None:
+    def _vet_tools(self, result: dict[str, Any], base: dict[str, Any], pins: dict[str, str] | None) -> None:
         """After the allowlist filter: drop pinned tools whose definition changed, mark suspicious descriptions."""
         tools = result.get("tools")
         if not isinstance(tools, list):
             return
         meta = result.setdefault("_meta", {})
-        if self.pins:
+        if pins:
             kept: list[dict[str, Any]] = []
             dropped: list[dict[str, Any]] = []
             for t in tools:
-                (dropped if tool_pins.changed(self.pins, t) else kept).append(t)
+                (dropped if tool_pins.changed(pins, t) else kept).append(t)
             if dropped:
                 for t in dropped:  # own call_id: the tools/list call keeps its single intent/outcome pair
                     self._audit_deny(dict(base, call_id=uuid.uuid4().hex), "catalog.pin_mismatch", None,
@@ -539,8 +590,8 @@ class Airlock:
         if findings:
             meta[META + "suspicious"] = findings[:guard.MAX_FINDINGS]  # marked, never removed; one cap for the whole list
 
-    def _cap_output(self, tool: str, result: dict[str, Any]) -> dict[str, Any] | None:
-        cap = self.engine.policy.output_cap(tool)
+    def _cap_output(self, tool: str, result: dict[str, Any], policy: Policy) -> dict[str, Any] | None:
+        cap = policy.output_cap(tool)
         size = len(json.dumps(result, ensure_ascii=False, default=str))
         if size <= cap.max_chars:
             return None
@@ -579,10 +630,11 @@ class Airlock:
             kept[-1]["text"] = body[:-over] + note
         return info
 
-    def _input_required(self, principal: str, tool: str, args: dict[str, Any], preview: dict[str, Any] | None) -> dict[str, Any]:
+    def _input_required(self, principal: str, tool: str, args: dict[str, Any], preview: dict[str, Any] | None,
+                        policy: Policy) -> dict[str, Any]:
         token, key, _ = self.issue_token(principal, tool, args)
-        rule = self.engine.policy.tools[tool]
-        env = self.engine.policy.environment
+        rule = policy.tools[tool]
+        env = policy.environment
         shown = redact({k: v for k, v in args.items() if k != "dry_run"})  # this text reaches humans, Slack, logs
         if preview is None:
             preview_line = "No dry-run preview: this tool has no dry_run argument, nothing was executed."
@@ -743,7 +795,8 @@ def _env_limit(name: str, default: int) -> int:
     return n
 
 
-def build(policy_path: str, upstream: str, audit_path: str, environment: str | None = None, **kw: Any) -> Airlock:
+def build(policy_path: str, upstream: str, audit_path: str, environment: str | None = None, pins_path: str | None = None,
+          **kw: Any) -> Airlock:
     policy = Policy.load(policy_path, environment or os.environ.get("AIRLOCK_ENV"))
     max_request = _env_limit("AIRLOCK_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES)  # before the audit file and store open
     max_upstream = _env_limit("AIRLOCK_MAX_UPSTREAM_BYTES", DEFAULT_MAX_UPSTREAM_BYTES)
@@ -758,4 +811,5 @@ def build(policy_path: str, upstream: str, audit_path: str, environment: str | N
                    upstream_headers=upstream_headers, webhook=webhook, telegram_chat=telegram_chat,
                    public_url=os.environ.get("AIRLOCK_PUBLIC_URL", "http://127.0.0.1:9000"),
                    approval_mode=os.environ.get("AIRLOCK_APPROVAL_MODE") or None,
-                   max_request_bytes=max_request, max_upstream_bytes=max_upstream, **kw)
+                   max_request_bytes=max_request, max_upstream_bytes=max_upstream,
+                   reload_source=ReloadSource(policy_path, pins_path), **kw)

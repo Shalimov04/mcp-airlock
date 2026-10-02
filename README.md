@@ -193,6 +193,11 @@ Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unas
 `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
 `request.too_large`, `upstream.too_large`, `internal.error`.
 
+`SIGHUP` reloads the policy file and, if one is configured, the pins file, as one pair. A file
+that does not load keeps the current policy and pins, and the error is logged. The environment
+name, approval mode, secrets, store and upstream are not reloaded. Windows has no `SIGHUP`;
+restart the process there.
+
 ## Confirmations in detail
 
 The confirmation token (`requestState`) is an HMAC-signed blob carrying the principal, the
@@ -360,7 +365,7 @@ the official Python SDK client and checking the side effects where they land:
 `e2e/kubernetes` runs the real kubernetes-mcp-server against k3s with the example policy (pods
 really deleted once, declines and replays leave them alone), `e2e/grafana` runs grafana/mcp-grafana
 against Grafana OSS, and `e2e/postgres` runs a small SDK server with an honest dry run against
-Postgres, four proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
+Postgres, five proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
 failure. The GitHub policy has still only been checked against the server's source, since its
 server needs github.com.
 

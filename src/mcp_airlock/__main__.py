@@ -50,7 +50,7 @@ def main() -> None:
     if a.strict and warnings:
         raise SystemExit(2)
     setup_otel(a.otel_file)
-    airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins)
+    airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins)
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 
 

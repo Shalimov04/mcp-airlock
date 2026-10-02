@@ -1,6 +1,6 @@
-"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against four airlock replicas (three in-band,
-one oob; one of the in-band ones has a pins file) in front of a Postgres-backed MCP service. Assertions are made on
-the real databases. Prints PASS/FAIL per check."""
+"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against five airlock replicas (four in-band,
+one oob; one of the in-band ones has a pins file and one reloads its policy on SIGHUP) in front of a Postgres-backed
+MCP service. Assertions are made on the real databases. Prints PASS/FAIL per check."""
 
 from __future__ import annotations
 
@@ -18,12 +18,14 @@ import httpx
 import httpx2
 import jwt
 import psycopg
+import yaml
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp_types import ElicitResult
 
 A, B, OOB = os.environ["AIRLOCK_A"], os.environ["AIRLOCK_B"], os.environ["AIRLOCK_OOB"]
 PINS = os.environ["AIRLOCK_PINS_URL"]
+RELOAD = os.environ["AIRLOCK_RELOAD_URL"]
 SERVICE = "http://service:8000/mcp"
 V = "2026-07-28"
 ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotocol/clientCapabilities": {}}
@@ -465,6 +467,51 @@ async def s22():
     return f"exit 2 after {took:.1f}s, stderr names AIRLOCK_JWT_SECRET, AIRLOCK_STORE_DSN and AIRLOCK_APPROVAL_WEBHOOK, nothing listens on :{port}, no audit file"
 
 
+@check("23 policy reload on SIGHUP")
+async def s23():
+    tok = token("hana")  # fresh principal
+    original = open("/e2e/policy.yaml").read()
+    without = yaml.safe_load(original)
+    del without["tools"]["list_rows"]
+
+    async def verdicts() -> tuple[str | None, str | None]:
+        rows = result(await rpc(RELOAD, "tools/call", {"name": "list_rows", "arguments": {"limit": 1}}, tok=tok))
+        note = result(await rpc(RELOAD, "tools/call", {"name": "get_note", "arguments": {"id": 1}}, tok=tok))
+        assert not note.get("isError"), note  # untouched by every step below
+        return (rows["_meta"][M + "rule_id"] if rows.get("isError") else None), note["_meta"][M + "rule_id"]
+
+    async def reload_with(text: str) -> None:
+        open("/reload/policy.yaml", "w").write(text)
+        open("/reload/hup", "w").close()
+        for _ in range(50):  # the wrapper deletes the file right before it sends the signal
+            if not os.path.exists("/reload/hup"):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError("the signal wrapper never picked up /reload/hup")
+
+    async def until_list_rows(denied: bool) -> float:
+        t0 = time.time()
+        while time.time() - t0 < 5:
+            if ((await verdicts())[0] == "allowlist.deny") == denied:
+                return time.time() - t0
+            await asyncio.sleep(0.1)
+        raise AssertionError(f"list_rows did not become {'denied' if denied else 'allowed'} within 5s of SIGHUP")
+
+    assert await verdicts() == (None, "tier.L0.read")
+    await reload_with(yaml.safe_dump(without))
+    took = await until_list_rows(True)
+    assert (await verdicts())[1] == "tier.L0.read"
+    await reload_with("tools: [unclosed\n  - : not yaml")
+    await asyncio.sleep(0.5)  # a bad file changes nothing, so there is no change to poll for: give the signal time to land
+    assert await verdicts() == ("allowlist.deny", "tier.L0.read")
+    await reload_with(original)
+    back = await until_list_rows(False)
+    assert await verdicts() == (None, "tier.L0.read")
+    return (f"SIGHUP made list_rows allowlist.deny after {took:.1f}s with get_note still L0; an invalid YAML file kept that policy; "
+            f"the original file restored list_rows after {back:.1f}s")
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -607,7 +654,7 @@ async def s17():
 async def wait_ready() -> None:
     for _ in range(120):
         try:
-            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB, PINS)] == [401, 401, 401, 401]:
+            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB, PINS, RELOAD)] == [401] * 5:
                 return
         except httpx.HTTPError:
             pass
@@ -618,7 +665,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s22, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s22, s23, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

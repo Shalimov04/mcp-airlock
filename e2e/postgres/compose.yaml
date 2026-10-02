@@ -106,22 +106,47 @@ services:
       AIRLOCK_PINS: /pins/pins.json
       AIRLOCK_MAX_UPSTREAM_BYTES: "200000"  # far below the 8 MiB default, so scenario 21 can overflow it with one note
 
+  airlock-reload:  # airlock-a with its policy copied to a volume the runner can rewrite; a wrapper turns /reload/hup into SIGHUP (scenario 23)
+    <<: *airlock
+    user: root
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        [ -f /reload/policy.yaml ] || cp /e2e/policy.yaml /reload/policy.yaml
+        mcp-airlock --host 0.0.0.0 --policy /reload/policy.yaml --upstream http://service:8000/mcp --env prod \
+          --audit /data/audit.jsonl --otel-file /data/spans.jsonl --strict &
+        pid=$$!
+        trap 'kill $$pid' TERM INT
+        while kill -0 $$pid 2>/dev/null; do
+          if [ -f /reload/hup ]; then rm -f /reload/hup; kill -HUP $$pid; fi
+          sleep 0.2
+        done
+        wait $$pid
+    volumes: ["./:/e2e:ro", "reload:/reload"]
+    environment:
+      <<: *airlock-env
+      AIRLOCK_PUBLIC_URL: http://airlock-reload:9000
+      AIRLOCK_APPROVAL_MODE: inband
+
   runner:
     image: mcp-airlock-e2e:local
+    user: root
     entrypoint: ["python", "-u", "/e2e/scenarios.py"]
     environment:
       AIRLOCK_A: http://airlock-a:9000/mcp
       AIRLOCK_B: http://airlock-b:9000/mcp
       AIRLOCK_OOB: http://airlock-oob:9000/mcp
       AIRLOCK_PINS_URL: http://airlock-pins:9000/mcp
+      AIRLOCK_RELOAD_URL: http://airlock-reload:9000/mcp
       AIRLOCK_JWT_SECRET: e2e-jwt-secret-0123456789abcdef0123456789
       DATA_DSN: postgresql://app:app@data-db:5432/app
       AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
       WEBHOOK: http://webhook:8080/
-    volumes: ["./:/e2e:ro"]
+    volumes: ["./:/e2e:ro", "reload:/reload"]
     networks: [e2e]
     profiles: [runner]
-    depends_on: [airlock-a, airlock-b, airlock-oob, airlock-pins]
+    depends_on: [airlock-a, airlock-b, airlock-oob, airlock-pins, airlock-reload]
 
 volumes:
   pins:
+  reload:

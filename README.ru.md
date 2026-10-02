@@ -190,6 +190,11 @@ tools:
 `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`,
 `mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`, `internal.error`.
 
+`SIGHUP` перечитывает файл политики и, если он задан, файл пинов, как одну пару. Файл, который
+не загрузился, оставляет текущие политику и пины, а ошибка пишется в лог. Имя окружения, режим
+одобрения, секреты, хранилище и upstream не перечитываются. В Windows нет `SIGHUP`, там нужен
+перезапуск процесса.
+
 ## Подтверждения подробнее
 
 Токен подтверждения (`requestState`) — это подписанный HMAC блоб с principal, именем тула,
@@ -359,7 +364,7 @@ run), с правилом `upstream.too_large`.
 официальным Python SDK-клиентом и проверяет последствия там, где они происходят: `e2e/kubernetes`
 запускает настоящий kubernetes-mcp-server на k3s с примером политики (под удаляется ровно один
 раз, отказ и повтор его не трогают), `e2e/grafana` запускает grafana/mcp-grafana с Grafana OSS,
-`e2e/postgres` запускает небольшой SDK-сервер с честным dry run на Postgres, четыре реплики прокси и
+`e2e/postgres` запускает небольшой SDK-сервер с честным dry run на Postgres, пять реплик прокси и
 webhook для одобрения. У каждого есть `run.sh`, который завершается с ненулевым кодом при любом
 провале. Политика для GitHub по-прежнему сверена только с исходниками: её серверу нужен github.com.
 
