@@ -222,7 +222,7 @@ async def s05():
     assert present(ids) == 0 and len(real_calls("delete_rows", "carol")) == 1
     n = aq("SELECT count(*) FROM airlock_audit WHERE principal = 'carol' AND rule_id = 'tier.L2.confirmed' AND phase = 'outcome'")[0][0]
     assert n == 1, n
-    return f"1 executed, 9 mrtr.replay; service saw 1 real DELETE; audit has 1 tier.L2.confirmed outcome"
+    return "1 executed, 9 mrtr.replay; service saw 1 real DELETE; audit has 1 tier.L2.confirmed outcome"
 
 
 @check("06 accepted requestState with other args or other principal: mrtr.mismatch")

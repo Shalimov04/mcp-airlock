@@ -16,7 +16,7 @@ RULES: dict[str, re.Pattern[str]] = {name: re.compile(p, _F) for name, p in {
                        r"|\bsystem\s+override\b|\bnew\s+instructions:|\byou\s+are\s+now\b",
     "urgent_action": rf"{_URGE}.{{0,80}}?{_ACT}|{_ACT}.{{0,80}}?{_URGE}",
     "secrecy": r"\b(?:do\s+not\s+tell|don['’]?t\s+tell|hide\s+this\s+from)\s+the\s+(?:user|operator)\b",
-    "hidden_text": r"[​-‏⁠﻿]",
+    "hidden_text": r"[\u200b-\u200f\u2060\ufeff]",
 }.items()}
 _B64 = re.compile(r"[A-Za-z0-9+/]{80,}={0,2}")
 MAX_FINDINGS = 20

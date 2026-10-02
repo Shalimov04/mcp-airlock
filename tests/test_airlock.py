@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from mcp_airlock.app import CONFIRM_KEY, META, PRINCIPAL_REQUIRED
 
@@ -252,7 +251,7 @@ async def test_jwt_principal(upstream, audit_path):
     al = make_airlock(upstream, audit_path, jwt_secret="s3cret-s3cret-s3cret-s3cret-32b!", trust_principal_header=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=al.app), base_url="http://localhost:9000") as c:
         tok = pyjwt.encode({"sub": "svc-bot", "exp": 4102444800}, "s3cret-s3cret-s3cret-s3cret-32b!", algorithm="HS256")
-        res = await call(c, "get_service", {"name": "api"}, principal=None, headers={"authorization": f"Bearer {tok}"})
+        await call(c, "get_service", {"name": "api"}, principal=None, headers={"authorization": f"Bearer {tok}"})
         assert upstream.CALLS[-1]["meta"][META + "principal"] == "svc-bot"
         bad = pyjwt.encode({"sub": "root", "exp": 4102444800}, "wrong-wrong-wrong-wrong-wrong-32b!", algorithm="HS256")
         r = await rpc(c, "tools/list", principal=None, headers={"authorization": f"Bearer {bad}"})

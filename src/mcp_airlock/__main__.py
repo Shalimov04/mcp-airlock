@@ -32,7 +32,7 @@ def _int_min(low: int) -> Callable[[str], int]:
         try:
             n = int(text)
         except ValueError:
-            raise argparse.ArgumentTypeError(f"not an integer: {text!r}")
+            raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
         if n < low:
             raise argparse.ArgumentTypeError(f"must be at least {low}")
         return n
@@ -56,7 +56,7 @@ def main() -> None:
     try:
         tool_pins = pins.load(a.pins) if a.pins else None
     except ValueError as e:
-        raise SystemExit(f"mcp-airlock: {e}")
+        raise SystemExit(f"mcp-airlock: {e}") from None
     warnings = startup_warnings(
         IdentityConfig.from_env(), secret=os.environ.get("AIRLOCK_SECRET"),
         store_dsn=os.environ.get("AIRLOCK_STORE_DSN"), webhook=approvals.config_from_env()[0],
@@ -69,7 +69,7 @@ def main() -> None:
         try:
             psycopg_module()
         except RuntimeError as e:
-            raise SystemExit(f"mcp-airlock: {e}")
+            raise SystemExit(f"mcp-airlock: {e}") from None
     setup_otel(a.otel_file)
     airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
                     audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep)

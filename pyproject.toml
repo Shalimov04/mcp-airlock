@@ -41,7 +41,7 @@ Repository = "https://github.com/Shalimov04/mcp-airlock"
 Issues = "https://github.com/Shalimov04/mcp-airlock/issues"
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "psycopg[binary]>=3.2"]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "psycopg[binary]>=3.2", "ruff==0.16.10"]
 
 [project.scripts]
 mcp-airlock = "mcp_airlock.__main__:main"
@@ -52,6 +52,12 @@ airlock-policy = "mcp_airlock.policy_cli:main"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E9", "F", "B"]
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]
