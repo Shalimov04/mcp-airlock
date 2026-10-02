@@ -16,6 +16,7 @@ from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProces
 from . import approvals, pins
 from .app import build
 from .identity import IdentityConfig
+from .pg import psycopg_module
 from .startup import startup_warnings
 
 
@@ -64,6 +65,11 @@ def main() -> None:
         print(f"mcp-airlock: warning: {w}", file=sys.stderr)
     if a.strict and warnings:
         raise SystemExit(2)
+    if os.environ.get("AIRLOCK_STORE_DSN") or os.environ.get("AIRLOCK_AUDIT_DSN"):
+        try:
+            psycopg_module()
+        except RuntimeError as e:
+            raise SystemExit(f"mcp-airlock: {e}")
     setup_otel(a.otel_file)
     airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
                     audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep)

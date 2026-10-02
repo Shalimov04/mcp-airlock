@@ -51,6 +51,10 @@ The released version, no clone needed:
 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
 ```
 
+Postgres support (`AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit --dsn`) is an extra:
+`uvx --from 'mcp-airlock[postgres]' mcp-airlock ...` or `pip install 'mcp-airlock[postgres]'`. Without
+it a DSN makes the proxy exit at startup with that hint. The container image includes it.
+
 The same as a container. The image listens on `0.0.0.0:9000`, runs as a non-root user and
 writes `audit.jsonl` into `/data`:
 

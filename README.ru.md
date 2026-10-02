@@ -47,6 +47,10 @@ MCP SDK. Весь прокси — одно Starlette-приложение и н
 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
 ```
 
+Поддержка Postgres (`AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit --dsn`) ставится как extra:
+`uvx --from 'mcp-airlock[postgres]' mcp-airlock ...` или `pip install 'mcp-airlock[postgres]'`. Без него
+DSN останавливает прокси при старте с этой подсказкой. В образ контейнера extra входит.
+
 То же самое контейнером. Образ слушает `0.0.0.0:9000`, работает не от root и пишет
 `audit.jsonl` в `/data`:
 

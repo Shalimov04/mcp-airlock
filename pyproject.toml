@@ -23,10 +23,9 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.28.1",
-    "mcp>=2.2.0",
+    "mcp>=2.2.0,<3",
     "opentelemetry-api>=1.44.0",
     "opentelemetry-sdk>=1.44.0",
-    "psycopg[binary]>=3.2",
     "pydantic>=2.13.5",
     "pyjwt>=2.10",
     "pyyaml>=6.0.3",
@@ -34,12 +33,15 @@ dependencies = [
     "uvicorn>=0.52.4",
 ]
 
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2"]
+
 [project.urls]
 Repository = "https://github.com/Shalimov04/mcp-airlock"
 Issues = "https://github.com/Shalimov04/mcp-airlock/issues"
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0"]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "psycopg[binary]>=3.2"]
 
 [project.scripts]
 mcp-airlock = "mcp_airlock.__main__:main"
