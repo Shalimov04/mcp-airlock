@@ -125,6 +125,17 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. Must be a positive integer. |
 | `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. Must be a positive integer. |
 
+At startup the proxy prints a warning to stderr for each of these:
+
+- no identity is configured (no JWT secret, no JWKS URL, no trusted header): every call gets 401
+- `AIRLOCK_JWKS_URL` without `AIRLOCK_JWT_AUDIENCE`
+- `AIRLOCK_JWT_SECRET` shorter than 32 bytes
+- `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without `Authorization` is trusted on the header alone
+- `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
+- `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the approve link
+
+With `--strict` any warning stops the start with exit code 2.
+
 ## The policy file
 
 ```yaml
@@ -366,6 +377,7 @@ src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction
 src/mcp_airlock/audit_cli.py   airlock-audit
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        tool pins: hash, pins file loader
+src/mcp_airlock/startup.py      startup warnings and --strict
 tests/fake_upstream.py         the fake server the tests and demo run against
 docs/clients.md                connecting Claude Code and Cursor
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image

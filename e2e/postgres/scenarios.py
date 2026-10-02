@@ -440,6 +440,31 @@ async def s21():
             f"airlock-a returned it capped by the output cap ({info['chars']} chars cut to {info['max_chars']})")
 
 
+@check("22 startup warnings: --strict refuses a weak configuration")
+async def s22():
+    env = {"PATH": os.environ["PATH"], "AIRLOCK_JWT_SECRET": "short",
+           "AIRLOCK_STORE_DSN": "postgresql://airlock:airlock@airlock-db:5432/airlock",
+           "AIRLOCK_APPROVAL_WEBHOOK": "http://webhook:8080/hook"}  # no AIRLOCK_SECRET, no AIRLOCK_PUBLIC_URL
+    port = "9100"
+    t0 = time.time()
+    out = subprocess.run(["mcp-airlock", "--policy", "/e2e/policy.yaml", "--upstream", SERVICE, "--env", "prod",
+                          "--audit", "/tmp/s22-audit.jsonl", "--port", port, "--strict"],
+                         env=env, capture_output=True, text=True, timeout=20)
+    took = time.time() - t0
+    assert out.returncode == 2 and took < 10, (out.returncode, took, out.stderr[-300:])
+    for var in ("AIRLOCK_JWT_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK"):
+        assert any(ln.startswith("mcp-airlock: warning: ") and var in ln for ln in out.stderr.splitlines()), out.stderr
+    assert not os.path.exists("/tmp/s22-audit.jsonl")  # refused before the audit file was opened
+    # exit 2 within the timeout is the proof that it did not start; the probe only confirms the exit left no listener behind
+    try:
+        await rpc(f"http://127.0.0.1:{port}/mcp", "tools/list")
+        listening = True
+    except httpx.HTTPError:
+        listening = False
+    assert not listening
+    return f"exit 2 after {took:.1f}s, stderr names AIRLOCK_JWT_SECRET, AIRLOCK_STORE_DSN and AIRLOCK_APPROVAL_WEBHOOK, nothing listens on :{port}, no audit file"
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -593,7 +618,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s22, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

@@ -121,6 +121,17 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 | `AIRLOCK_MAX_REQUEST_BYTES` | Максимальный размер тела запроса в байтах. По умолчанию `1048576` (1 МиБ). Тело больше отклоняется с HTTP 413. Должно быть целым положительным числом. |
 | `AIRLOCK_MAX_UPSTREAM_BYTES` | Максимальный размер читаемого ответа upstream в байтах. По умолчанию `8388608` (8 МиБ). На лимите прокси перестаёт читать и отбрасывает ответ. Прокси просит у upstream несжатый ответ, а сжатый отклоняет с HTTP 502. Должно быть целым положительным числом. |
 
+При запуске прокси пишет в stderr предупреждение по каждому из пунктов:
+
+- не настроена идентификация (нет JWT-секрета, JWKS URL и доверенного заголовка): каждый вызов получает 401
+- `AIRLOCK_JWKS_URL` без `AIRLOCK_JWT_AUDIENCE`
+- `AIRLOCK_JWT_SECRET` короче 32 байт
+- `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` вместе с настройками JWT: запрос без `Authorization` принимается по одному заголовку
+- `AIRLOCK_STORE_DSN` без `AIRLOCK_SECRET`: реплики подписывают разными ключами
+- `AIRLOCK_APPROVAL_WEBHOOK` при `AIRLOCK_PUBLIC_URL` по умолчанию: ссылку одобрения никто другой не откроет
+
+С `--strict` любое предупреждение прерывает запуск с кодом 2.
+
 ## Файл политики
 
 ```yaml
@@ -365,6 +376,7 @@ src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция
 src/mcp_airlock/audit_cli.py   airlock-audit
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        пины тулов: хеш, загрузка файла пинов
+src/mcp_airlock/startup.py      предупреждения при запуске и --strict
 tests/fake_upstream.py         фейковый сервер для тестов и демо
 docs/clients.md                подключение Claude Code и Cursor (по-английски)
 Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock

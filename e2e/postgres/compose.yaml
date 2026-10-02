@@ -6,7 +6,7 @@ name: airlock-e2e-pg
 x-airlock: &airlock
   image: mcp-airlock-e2e:local
   command: ["--policy", "/e2e/policy.yaml", "--upstream", "http://service:8000/mcp", "--env", "prod",
-            "--audit", "/data/audit.jsonl", "--otel-file", "/data/spans.jsonl"]
+            "--audit", "/data/audit.jsonl", "--otel-file", "/data/spans.jsonl", "--strict"]
   volumes: ["./:/e2e:ro"]
   networks: [e2e]
   depends_on:
