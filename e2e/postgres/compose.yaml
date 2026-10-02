@@ -70,6 +70,11 @@ services:
 
   airlock-oob:  # no AIRLOCK_APPROVAL_MODE: with a webhook the default is oob (scenario 15)
     <<: *airlock
+    user: root  # the audit volume is created root-owned
+    command: ["--policy", "/e2e/policy.yaml", "--upstream", "http://service:8000/mcp", "--env", "prod",
+              "--audit", "/audit/oob.jsonl", "--audit-max-bytes", "30000", "--audit-keep", "50",  # small limit so scenario 24 sees rotations
+              "--otel-file", "/data/spans.jsonl", "--strict"]
+    volumes: ["./:/e2e:ro", "audit:/audit"]
     environment:
       <<: *airlock-env
       AIRLOCK_PUBLIC_URL: http://airlock-oob:9000
@@ -142,7 +147,7 @@ services:
       DATA_DSN: postgresql://app:app@data-db:5432/app
       AUDIT_DSN: postgresql://airlock:airlock@airlock-db:5432/airlock
       WEBHOOK: http://webhook:8080/
-    volumes: ["./:/e2e:ro", "reload:/reload"]
+    volumes: ["./:/e2e:ro", "reload:/reload", "audit:/audit:ro"]
     networks: [e2e]
     profiles: [runner]
     depends_on: [airlock-a, airlock-b, airlock-oob, airlock-pins, airlock-reload]
@@ -150,3 +155,4 @@ services:
 volumes:
   pins:
   reload:
+  audit:

@@ -253,9 +253,13 @@ accept проигнорирован; `decline` по-прежнему сжига�
 Две JSON-строки на вызов с общим `call_id`:
 
 ```json
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"0000…","hash":"a3f1c0de…"}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"a3f1c0de…","hash":"9b27e4d1…"}
 ```
+
+`prev` равен `hash` предыдущей записи (у первой записи, попавшей в пустой файл аудита, это 64
+нуля), `hash` это sha256 канонического JSON записи без поля `hash` (ключи отсортированы, без
+пробелов, UTF-8, не-ASCII не экранируется). Postgres-приёмник кладёт те же два значения в `rec`.
 
 Значения аргументов под ключами вроде `password`, `token`, `api_key`, `authorization`
 заменяются на `[REDACTED]` (вместе со вложенными структурами), как и значения, похожие на
@@ -273,6 +277,34 @@ uv run airlock-audit query --stats
 ```
 
 Те же команды работают с Postgres через `--dsn` или `AIRLOCK_AUDIT_DSN`.
+
+Файл растёт без ограничения, пока не задан `--audit-max-bytes N`. Когда запись вывела бы его
+за `N` байт, `audit.jsonl` переименовывается в `audit.jsonl.1`, `.1` в `.2` и так далее, а
+хранится `--audit-keep` ротированных файлов (по умолчанию 5, минимум 1; самый старый
+удаляется). Цепочка хешей продолжается в новом файле. Запись больше `N` всё равно
+записывается. По умолчанию ротация выключена. Если уменьшить `--audit-keep`, существующие
+файлы `.N` выше нового предела удаляются при следующей ротации.
+
+Проверка цепочки:
+
+```
+uv run airlock-audit verify
+uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
+```
+
+Без аргументов читаются `audit.jsonl` и его ротированные файлы; заданные файлы должны идти от
+старого к новому. `verify` только читает файлы и никогда в них не пишет. При успехе печатается `OK: 812 records in 3 files, chain from <first prev> to <last hash>`
+и код выхода 0. На первом разрыве печатается `BREAK: audit.jsonl.1:57: hash mismatch` и код
+выхода 1. Причина: `hash mismatch` (строку изменили), `prev mismatch` (строку удалили или
+переставили), `not JSON` или `missing hash`. Строки, записанные до появления цепочки,
+пропускаются и считаются как `unchained records skipped`. Первая запись самого старого файла
+проверяется только по собственному хешу.
+
+Изменённая, удалённая или переставленная строка обнаруживается. Обрезанный хвост не
+обнаруживается, как и самая новая запись самого нового файла (её можно изменить и
+пересчитать хеш: после неё нет ничего, что бы это проверило) и файл, целиком переписанный с
+согласованной цепочкой: последний хеш нигде вне хоста не закрепляется, поэтому их защищает
+только внешнее закрепление.
 
 На каждый запрос создаётся один спан OpenTelemetry с именем `execute_tool <tool>`,
 атрибутами `gen_ai.*`, principal и вердиктом. Входящий `traceparent` (заголовок или
@@ -377,8 +409,8 @@ src/mcp_airlock/store.py       хранилища ключей, одобрени
 src/mcp_airlock/identity.py    principal из JWT / JWKS / заголовка
 src/mcp_airlock/guard.py       разметка инъекций
 src/mcp_airlock/approvals.py   уведомления в Slack / Telegram
-src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция секретов
-src/mcp_airlock/audit_cli.py   airlock-audit
+src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция секретов, ротация, цепочка хешей
+src/mcp_airlock/audit_cli.py   airlock-audit query / verify
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        пины тулов: хеш, загрузка файла пинов
 src/mcp_airlock/startup.py      предупреждения при запуске и --strict

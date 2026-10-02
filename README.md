@@ -255,9 +255,14 @@ or on an error. Neither needs credentials, writes an audit record or calls the u
 Two JSON lines per call, with a shared `call_id`:
 
 ```json
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"0000…","hash":"a3f1c0de…"}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"a3f1c0de…","hash":"9b27e4d1…"}
 ```
+
+`prev` is the `hash` of the previous record (64 zeros for the first record written into an
+empty audit file) and `hash` is the sha256 of the record's canonical JSON without `hash`
+(keys sorted, no spaces, UTF-8, non-ASCII not escaped). The Postgres sink stores the same two
+values in `rec`.
 
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
@@ -275,6 +280,33 @@ uv run airlock-audit query --stats
 ```
 
 The same commands work against Postgres with `--dsn` or `AIRLOCK_AUDIT_DSN`.
+
+The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
+it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and
+`--audit-keep` rotated files are kept (default 5, at least 1; the oldest is deleted). The
+hash chain continues into the new file. A record bigger than `N` is still written. Rotation
+is off by default. Lowering `--audit-keep` deletes the existing `.N` files above the new
+limit at the next rotation.
+
+To check the chain:
+
+```
+uv run airlock-audit verify
+uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
+```
+
+With no files it reads `audit.jsonl` and its rotated files; given files must be oldest first.
+`verify` only reads the files, it never writes to them. On success it prints `OK: 812 records in 3 files, chain from <first prev> to <last hash>` and
+exits 0. At the first break it prints `BREAK: audit.jsonl.1:57: hash mismatch` and exits 1.
+The reason is `hash mismatch` (a line was edited), `prev mismatch` (a line was deleted or
+moved), `not JSON` or `missing hash`. Lines from before the chain existed are skipped and
+counted as `unchained records skipped`. The first record of the oldest file is checked only
+against its own hash.
+
+An edited, deleted or reordered line is caught. A truncated tail is not, and neither is the
+newest record of the newest file (it can be edited and re-hashed with nothing after it to
+check) or a file rewritten from start to end with a consistent chain: the last hash is not
+anchored anywhere outside the host, so these are only protected by anchoring it externally.
 
 Each request also produces one OpenTelemetry span named `execute_tool <tool>` with the
 `gen_ai.*` attributes, the principal and the verdict. An incoming `traceparent` (header or
@@ -378,8 +410,8 @@ src/mcp_airlock/store.py       memory and Postgres stores for keys, approvals, c
 src/mcp_airlock/identity.py    JWT / JWKS / header principal resolution
 src/mcp_airlock/guard.py       injection marking
 src/mcp_airlock/approvals.py   Slack / Telegram notifications
-src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction
-src/mcp_airlock/audit_cli.py   airlock-audit
+src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction, rotation, hash chain
+src/mcp_airlock/audit_cli.py   airlock-audit query / verify
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        tool pins: hash, pins file loader
 src/mcp_airlock/startup.py      startup warnings and --strict

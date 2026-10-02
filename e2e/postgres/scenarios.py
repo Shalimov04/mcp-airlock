@@ -5,10 +5,14 @@ MCP service. Assertions are made on the real databases. Prints PASS/FAIL per che
 from __future__ import annotations
 
 import asyncio
+import glob
 import html
 import json
 import os
+import re
+import shutil
 import subprocess
+import tempfile
 import time
 import traceback
 from contextlib import asynccontextmanager
@@ -512,6 +516,74 @@ async def s23():
             f"the original file restored list_rows after {back:.1f}s")
 
 
+@check("24 audit rotation and hash chain")
+async def s24():
+    live = "/audit/oob.jsonl"
+
+    def files() -> list[str]:  # oldest first
+        rotated = sorted(glob.glob(live + ".*"), key=lambda p: int(p.rsplit(".", 1)[1]), reverse=True)
+        return rotated + [live]
+
+    def verify(paths: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(["airlock-audit", "verify", *paths], capture_output=True, text=True, timeout=30)
+
+    sent = 0
+    while (len(files()) < 3 or sent < 120) and sent < 1000:  # a call without a principal is a 401 that writes a deny pair
+        for _ in range(20):
+            r = await rpc(OOB, "tools/call", {"name": "rotation_probe", "arguments": {}})
+            assert r.status_code == 401, r.text
+        sent += 20
+    paths = files()
+    assert len(paths) >= 3, (sent, paths)
+    ok = verify(paths)
+    m = re.fullmatch(r"OK: (\d+) records in (\d+) files, chain from ([0-9a-f]{64}) to ([0-9a-f]{64})", ok.stdout.strip())
+    assert ok.returncode == 0 and m and int(m[2]) == len(paths) > 1, (ok.returncode, ok.stdout, ok.stderr)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        def copy() -> list[str]:
+            return [shutil.copy(p, os.path.join(tmp, os.path.basename(p))) for p in paths]
+
+        def rewrite(copied: list[str], edit) -> tuple[str, int]:
+            middle = copied[len(copied) // 2]
+            with open(middle, encoding="utf-8") as f:
+                lines = f.read().rstrip("\n").split("\n")  # not splitlines(): verify splits on newlines only
+            at = edit(lines)
+            with open(middle, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            return middle, at
+
+        def flip(lines: list[str]) -> int:
+            i = next(j for j, ln in enumerate(lines) if j >= 2 and "principal.missing" in ln)  # well inside the file
+            lines[i] = lines[i].replace("principal.missing", "principal.missinh", 1)
+            return i + 1
+
+        def drop(lines: list[str]) -> int:
+            i = 2
+            del lines[i]
+            return i + 1  # the record after the deleted one now sits on this line
+
+        copied = copy()
+        middle, at = rewrite(copied, flip)
+        edited = verify(copied)
+        assert edited.returncode == 1 and edited.stdout.strip() == f"BREAK: {middle}:{at}: hash mismatch", (edited.stdout, edited.stderr)
+        copied = copy()
+        middle, at = rewrite(copied, drop)
+        deleted = verify(copied)
+        assert deleted.returncode == 1 and deleted.stdout.strip() == f"BREAK: {middle}:{at}: prev mismatch", (deleted.stdout, deleted.stderr)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    pick = paths[len(paths) // 2]
+    with open(pick, encoding="utf-8") as f:
+        line = next(json.loads(ln) for ln in f if '"principal.missing"' in ln and '"outcome"' in ln)
+    pg = aq("SELECT rec->>'hash', rec->>'prev' FROM airlock_audit WHERE call_id = %s AND phase = 'outcome'", line["call_id"])
+    assert pg == [(line["hash"], line["prev"])], (pg, line["hash"], line["prev"])
+    return (f"{sent} calls without a principal, {len(paths) - 1} rotated files + live; verify: {ok.stdout.strip()[:60]}...; "
+            f"edited char: BREAK at {os.path.basename(middle)}:hash mismatch; deleted line: prev mismatch; "
+            f"call {line['call_id'][:8]} has the same hash and prev in airlock_audit and in {os.path.basename(pick)}")
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -665,7 +737,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s22, s23, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

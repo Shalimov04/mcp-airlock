@@ -796,7 +796,7 @@ def _env_limit(name: str, default: int) -> int:
 
 
 def build(policy_path: str, upstream: str, audit_path: str, environment: str | None = None, pins_path: str | None = None,
-          **kw: Any) -> Airlock:
+          audit_max_bytes: int | None = None, audit_keep: int = 5, **kw: Any) -> Airlock:
     policy = Policy.load(policy_path, environment or os.environ.get("AIRLOCK_ENV"))
     max_request = _env_limit("AIRLOCK_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES)  # before the audit file and store open
     max_upstream = _env_limit("AIRLOCK_MAX_UPSTREAM_BYTES", DEFAULT_MAX_UPSTREAM_BYTES)
@@ -805,7 +805,7 @@ def build(policy_path: str, upstream: str, audit_path: str, environment: str | N
     if auth := os.environ.get("AIRLOCK_UPSTREAM_AUTH"):
         upstream_headers["authorization"] = auth
     webhook, telegram_chat = approvals.config_from_env()
-    return Airlock(policy, upstream, audit_from_env(audit_path),
+    return Airlock(policy, upstream, audit_from_env(audit_path, audit_max_bytes, audit_keep),
                    secret=secret.encode() if secret else None,
                    identity=IdentityConfig.from_env(), store=store_from_env(),
                    upstream_headers=upstream_headers, webhook=webhook, telegram_chat=telegram_chat,
