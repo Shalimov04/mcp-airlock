@@ -51,6 +51,10 @@ The released version, no clone needed:
 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
 ```
 
+Postgres support (`AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit --dsn`) is an extra:
+`uvx --from 'mcp-airlock[postgres]' mcp-airlock ...` or `pip install 'mcp-airlock[postgres]'`. Without
+it a DSN makes the proxy exit at startup with that hint. The container image includes it.
+
 The same as a container. The image listens on `0.0.0.0:9000`, runs as a non-root user and
 writes `audit.jsonl` into `/data`:
 
@@ -400,6 +404,8 @@ against Grafana OSS, and `e2e/postgres` runs a small SDK server with an honest d
 Postgres, five proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
 failure. The GitHub policy has still only been checked against the server's source, since its
 server needs github.com.
+
+The postgres and grafana stacks also run nightly and on demand in the `e2e` workflow.
 
 ## Layout
 

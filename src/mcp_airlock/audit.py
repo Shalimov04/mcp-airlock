@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .pg import psycopg_module
+
 log = logging.getLogger("mcp_airlock.audit")
 
 _SECRET_KEY = re.compile(r"(password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key)", re.I)
@@ -194,14 +196,14 @@ class PostgresAuditLog:
                f"VALUES (%s::timestamptz, {', '.join('%s' for _ in _COLS)}, %s::jsonb)")
 
     def __init__(self, dsn: str):
+        psycopg_module()  # fail at startup, not on the first record
         self.dsn = dsn
         self._conn = None
         self._lock = threading.Lock()
         self._last: str | None = None  # read from the newest row at the first connect, only when this sink has to chain
 
     def _connect(self):
-        import psycopg  # deferred: JSONL-only deployments never import it
-        conn = psycopg.connect(self.dsn, autocommit=True)
+        conn = psycopg_module().connect(self.dsn, autocommit=True)
         conn.execute(self.DDL)
         return conn
 
@@ -220,7 +222,7 @@ class PostgresAuditLog:
         self.write_row(_row(rec))
 
     def write_row(self, row: dict[str, Any]) -> None:
-        import psycopg
+        psycopg = psycopg_module()
         with self._lock:  # ponytail: one sync connection blocks the loop ~1ms per record; async pool when it shows in latency
             try:
                 self._insert(row)

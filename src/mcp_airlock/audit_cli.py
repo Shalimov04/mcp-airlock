@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .audit import GENESIS, row_hash
+from .pg import psycopg_module
 
 FILTERS = ("principal", "tool", "verdict", "rule_id", "phase")
 _REL = re.compile(r"^(\d+)([mhd])$")
@@ -37,7 +38,7 @@ def query_jsonl(path: str, where: dict, since: datetime | None, limit: int | Non
 
 
 def query_pg(dsn: str, where: dict, since: datetime | None, limit: int | None) -> list[dict]:
-    import psycopg
+    psycopg = psycopg_module()
     conds, params = [f"{k} = %s" for k in where], list(where.values())  # keys come from FILTERS, values are bound
     if since is not None:
         conds.append("ts >= %s"), params.append(since)

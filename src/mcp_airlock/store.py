@@ -9,7 +9,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-import psycopg
+from .pg import psycopg_module
 
 # ponytail: usage rows older than a day are garbage; raise if a policy ever uses window_s > 86400.
 USAGE_RETENTION_S = 86400
@@ -100,13 +100,14 @@ _DDL_LOCK = 0x41524C4B  # 'ARLK': serialises first-use DDL across replicas
 
 class PostgresStore:
     def __init__(self, dsn: str) -> None:
+        psycopg_module()  # fail at startup, not on the first request
         self.dsn = dsn
         self._ready = False
 
     @asynccontextmanager
     async def _conn(self):
         # ponytail: one connection per call, no pool; add psycopg_pool when p99 latency says so.
-        async with await psycopg.AsyncConnection.connect(self.dsn, autocommit=True) as c:
+        async with await psycopg_module().AsyncConnection.connect(self.dsn, autocommit=True) as c:
             if not self._ready:
                 async with c.transaction():
                     await c.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK,))

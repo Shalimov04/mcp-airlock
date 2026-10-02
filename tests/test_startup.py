@@ -113,7 +113,7 @@ def test_several_problems_give_several_warnings_in_a_fixed_order():
     ws = startup_warnings(WEAK_ID, **WEAK)
     keys = ["AIRLOCK_JWT_AUDIENCE", "AIRLOCK_JWT_SECRET", "AIRLOCK_TRUST_PRINCIPAL_HEADER", "AIRLOCK_STORE_DSN",
             "AIRLOCK_APPROVAL_WEBHOOK"]
-    assert len(ws) == len(keys) and all(k in w for k, w in zip(keys, ws)), ws
+    assert len(ws) == len(keys) and all(k in w for k, w in zip(keys, ws, strict=True)), ws
     assert startup_warnings(IdentityConfig(), **WEAK)[0].startswith("no identity")  # first when present
 
 
@@ -159,7 +159,7 @@ def test_strict_on_a_weak_configuration_exits_2_before_anything_starts(monkeypat
     assert e.value.code == 2 and seen == {"built": False, "ran": False, "otel": False}
     lines = warning_lines(capsys)
     assert len(lines) == 3 and all(ln.startswith("mcp-airlock: warning: ") for ln in lines), lines
-    for key, ln in zip(["AIRLOCK_JWT_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK"], lines):
+    for key, ln in zip(["AIRLOCK_JWT_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK"], lines, strict=True):
         assert key in ln
 
 

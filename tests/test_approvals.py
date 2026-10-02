@@ -1,7 +1,6 @@
 import logging
 
 import httpx
-import pytest
 
 from mcp_airlock import approvals
 

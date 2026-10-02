@@ -116,7 +116,7 @@ def seed() -> None:
             "involvedObject": {"kind": "Pod", "name": "chatty", "namespace": NS}, "count": 1,
             "firstTimestamp": now, "lastTimestamp": now, "message": f"synthetic event {i} " + "padding " * 20})
     for name in ("victim-1", "victim-2", "exec-target", "poisoned", "chatty"):
-        assert wait_for(lambda: pod_phase(name), "Running") == "Running", f"seed pod {name} not Running"
+        assert wait_for(lambda n=name: pod_phase(n), "Running") == "Running", f"seed pod {name} not Running"
 
 
 # ---------------------------------------------------------------- MCP side
