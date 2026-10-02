@@ -122,6 +122,19 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
+| `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. Must be a positive integer. |
+| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. Must be a positive integer. |
+
+At startup the proxy prints a warning to stderr for each of these:
+
+- no identity is configured (no JWT secret, no JWKS URL, no trusted header): every call gets 401
+- `AIRLOCK_JWKS_URL` without `AIRLOCK_JWT_AUDIENCE`
+- `AIRLOCK_JWT_SECRET` shorter than 32 bytes
+- `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without `Authorization` is trusted on the header alone
+- `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
+- `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the approve link
+
+With `--strict` any warning stops the start with exit code 2.
 
 ## The policy file
 
@@ -178,7 +191,12 @@ Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unas
 `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
 `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
 `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
-`internal.error`.
+`request.too_large`, `upstream.too_large`, `internal.error`.
+
+`SIGHUP` reloads the policy file and, if one is configured, the pins file, as one pair. A file
+that does not load keeps the current policy and pins, and the error is logged. The environment
+name, approval mode, secrets, store and upstream are not reloaded. Windows has no `SIGHUP`;
+restart the process there.
 
 ## Confirmations in detail
 
@@ -237,9 +255,14 @@ or on an error. Neither needs credentials, writes an audit record or calls the u
 Two JSON lines per call, with a shared `call_id`:
 
 ```json
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"0000…","hash":"a3f1c0de…"}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"a3f1c0de…","hash":"9b27e4d1…"}
 ```
+
+`prev` is the `hash` of the previous record (64 zeros for the first record written into an
+empty audit file) and `hash` is the sha256 of the record's canonical JSON without `hash`
+(keys sorted, no spaces, UTF-8, non-ASCII not escaped). The Postgres sink stores the same two
+values in `rec`.
 
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
@@ -257,6 +280,33 @@ uv run airlock-audit query --stats
 ```
 
 The same commands work against Postgres with `--dsn` or `AIRLOCK_AUDIT_DSN`.
+
+The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
+it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and
+`--audit-keep` rotated files are kept (default 5, at least 1; the oldest is deleted). The
+hash chain continues into the new file. A record bigger than `N` is still written. Rotation
+is off by default. Lowering `--audit-keep` deletes the existing `.N` files above the new
+limit at the next rotation.
+
+To check the chain:
+
+```
+uv run airlock-audit verify
+uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
+```
+
+With no files it reads `audit.jsonl` and its rotated files; given files must be oldest first.
+`verify` only reads the files, it never writes to them. On success it prints `OK: 812 records in 3 files, chain from <first prev> to <last hash>` and
+exits 0. At the first break it prints `BREAK: audit.jsonl.1:57: hash mismatch` and exits 1.
+The reason is `hash mismatch` (a line was edited), `prev mismatch` (a line was deleted or
+moved), `not JSON` or `missing hash`. Lines from before the chain existed are skipped and
+counted as `unchained records skipped`. The first record of the oldest file is checked only
+against its own hash.
+
+An edited, deleted or reordered line is caught. A truncated tail is not, and neither is the
+newest record of the newest file (it can be edited and re-hashed with nothing after it to
+check) or a file rewritten from start to end with a consistent chain: the last hash is not
+anchored anywhere outside the host, so these are only protected by anchoring it externally.
 
 Each request also produces one OpenTelemetry span named `execute_tool <tool>` with the
 `gen_ai.*` attributes, the principal and the verdict. An incoming `traceparent` (header or
@@ -320,14 +370,20 @@ The proxy refuses such a call with `mrtr.upstream_input_required` the first time
 asks, at the dry run if the tool has one, otherwise after the human's yes. At `L0`, `L1` and `L3`
 the upstream's question and state pass through untouched. Put such tools there.
 
-Blast radius counts what it can see: the length of the argument you named, or one. A tool
-whose fan-out is not visible in its arguments cannot be measured here.
+Blast radius counts what it can see: the length of the argument you named, or one. A string
+that holds a JSON list or object is counted by its elements, as the upstream reads it. One that
+this proxy cannot decode (nesting depth or integer size beyond its interpreter's limits) is refused
+with `blast_radius.per_call`, since the upstream's interpreter may still read it. A tool whose
+fan-out is not visible in its arguments cannot be measured here.
 
 Output capping works on the serialized result. Over the cap, text blocks are trimmed and
 `structuredContent` and non-text blocks are dropped. The token estimate is `chars / 4`. A result
 that had `structuredContent` comes back with `isError: true`, because it no longer matches the
 tool's `outputSchema` and SDK clients refuse non-error results that don't. The text says the
 call itself ran, so an agent does not repeat a write because its output was too long.
+An upstream answer over `AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it
+comes back as an error that says the call ran (or that only its dry run did), with rule
+`upstream.too_large`.
 
 Upstream responses arriving as SSE are reduced to the final message; progress
 notifications are dropped. Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
@@ -341,7 +397,7 @@ the official Python SDK client and checking the side effects where they land:
 `e2e/kubernetes` runs the real kubernetes-mcp-server against k3s with the example policy (pods
 really deleted once, declines and replays leave them alone), `e2e/grafana` runs grafana/mcp-grafana
 against Grafana OSS, and `e2e/postgres` runs a small SDK server with an honest dry run against
-Postgres, four proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
+Postgres, five proxy replicas and a webhook approver. Each has a `run.sh` that exits non-zero on any
 failure. The GitHub policy has still only been checked against the server's source, since its
 server needs github.com.
 
@@ -354,10 +410,11 @@ src/mcp_airlock/store.py       memory and Postgres stores for keys, approvals, c
 src/mcp_airlock/identity.py    JWT / JWKS / header principal resolution
 src/mcp_airlock/guard.py       injection marking
 src/mcp_airlock/approvals.py   Slack / Telegram notifications
-src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction
-src/mcp_airlock/audit_cli.py   airlock-audit
+src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction, rotation, hash chain
+src/mcp_airlock/audit_cli.py   airlock-audit query / verify
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        tool pins: hash, pins file loader
+src/mcp_airlock/startup.py      startup warnings and --strict
 tests/fake_upstream.py         the fake server the tests and demo run against
 docs/clients.md                connecting Claude Code and Cursor
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image

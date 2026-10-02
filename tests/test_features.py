@@ -19,7 +19,7 @@ from mcp_airlock.audit import AuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
 from mcp_airlock.store import MemoryStore, PostgresStore
 
-from .conftest import ROOT, SPANS, audit_rows, call, make_airlock, rpc
+from .conftest import ROOT, SPANS, audit_rows, call, make_airlock, patch_post, rpc
 
 PG = os.environ.get("AIRLOCK_TEST_PG_DSN")
 
@@ -51,7 +51,7 @@ def spy(airlock: Airlock, ttl_ms: int | None = None) -> list[dict]:
             return httpx.Response(200, json=data)
         return r
 
-    airlock.http.post = post
+    patch_post(airlock, post)
     return sent
 
 
@@ -387,7 +387,7 @@ async def test_catalog_failure_fails_closed(upstream, audit_path):
             return httpx.Response(500, text="boom")
         return await orig(url, content=content, headers=headers)
 
-    al.http.post = post
+    patch_post(al, post)
     async with proxy_client(al) as c:
         res = await call(c, "delete_service", {"name": "api"})
         assert res["isError"] and res["_meta"][META + "rule_id"] == "catalog.unavailable"
@@ -406,7 +406,7 @@ async def test_catalog_error_text_is_scrubbed_for_caller_and_audit(upstream, aud
             return httpx.Response(401, json={"jsonrpc": "2.0", "id": 1, "error": {"message": f"bad {leak} " + "x" * 400}})
         return await orig(url, content=content, headers=headers)
 
-    al.http.post = post
+    patch_post(al, post)
     async with proxy_client(al) as c:
         res = await call(c, "delete_service", {"name": "api"})
     text = res["content"][0]["text"]
@@ -423,7 +423,7 @@ async def test_forward_failure_names_the_class_only(upstream, audit_path):
     async def post(url, *, content, headers):
         raise httpx.ConnectError("illegal header value b'Bearer tok-SECRET123'")
 
-    al.http.post = post
+    patch_post(al, post)
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
     status, reply = await al.forward(body, {}, Principal("alice"))
     assert status == 502 and reply["error"]["message"] == "upstream unreachable: ConnectError"
@@ -435,7 +435,7 @@ async def test_upstream_unreachable_secret_reaches_neither_caller_nor_audit(upst
     async def post(url, *, content, headers):
         raise httpx.ConnectError("illegal header value b'Bearer tok-SECRET123'")
 
-    al.http.post = post
+    patch_post(al, post)
     async with proxy_client(al) as c:
         res = await call(c, "delete_service", {"name": "api"})
     assert res["_meta"][META + "rule_id"] == "catalog.unavailable"
@@ -473,7 +473,7 @@ async def test_malformed_upstream_content_does_not_lose_the_result(upstream, aud
                 "resultType": "complete", "content": [{"type": "text", "text": 42}, None, "x", {"type": "text"}]}})
         return r
 
-    al.http.post = post
+    patch_post(al, post)
     async with proxy_client(al) as c:
         r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "big"}})  # cap path too (5000)
         assert r.status_code == 200 and r.json()["result"]["content"][0]["text"] == 42
@@ -489,7 +489,7 @@ async def test_accept_header_is_always_dual_upstream(upstream, audit_path):
         seen.append(headers)
         return await orig(url, content=content, headers=headers)
 
-    al.http.post = post
+    patch_post(al, post)
     async with proxy_client(al) as c:
         await call(c, "get_service", {"name": "api"}, headers={"accept": "application/json"})
     assert seen[-1]["accept"] == "application/json, text/event-stream"
@@ -571,7 +571,7 @@ def upstream_asks_back(al: Airlock, tool: str) -> list[dict]:
                 "inputRequests": {"which": {"method": "elicitation/create", "params": {"message": "which one?"}}}}})
         return await orig(url, content=content, headers=headers)
 
-    al.http.post = post
+    patch_post(al, post)
     return sent
 
 

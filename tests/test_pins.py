@@ -11,7 +11,7 @@ from mcp_airlock import __main__ as cli
 from mcp_airlock import guard, pins
 from mcp_airlock.app import META
 
-from .conftest import audit_rows, call, make_airlock, rpc
+from .conftest import audit_rows, call, make_airlock, patch_post, rpc
 from .fake_upstream import INJECTION
 
 TOOL = {"name": "t", "description": "d", "inputSchema": {"type": "object", "properties": {"a": {"type": "string"}}},
@@ -121,6 +121,13 @@ def test_startup_passes_the_loaded_pins_to_build(monkeypatch, tmp_path):
     assert run_main(monkeypatch, [])["pins"] is None  # off unless asked for
 
 
+def test_startup_gives_build_the_pins_path_for_reloads(monkeypatch, tmp_path):
+    path = write_pins(tmp_path, {"t": ZEROS})
+    assert run_main(monkeypatch, ["--pins", path])["pins_path"] == path
+    assert run_main(monkeypatch, [], {"AIRLOCK_PINS": path})["pins_path"] == path
+    assert run_main(monkeypatch, [])["pins_path"] is None
+
+
 # ---------------------------------------------------------------- tools/list through the proxy
 
 def rewrite_list(airlock, edit) -> None:
@@ -135,7 +142,7 @@ def rewrite_list(airlock, edit) -> None:
             return httpx.Response(200, json=data)
         return r
 
-    airlock.http.post = post
+    patch_post(airlock, post)
 
 
 def by_name(tools, name) -> dict:

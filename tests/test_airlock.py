@@ -7,7 +7,7 @@ import pytest
 
 from mcp_airlock.app import CONFIRM_KEY, META, PRINCIPAL_REQUIRED
 
-from .conftest import audit_rows, call, make_airlock, rpc
+from .conftest import audit_rows, call, make_airlock, patch_post, rpc
 
 
 def spy_forwarded(airlock) -> list[dict]:
@@ -20,7 +20,7 @@ def spy_forwarded(airlock) -> list[dict]:
         sent.append(json.loads(content))
         return await orig(url, content=content, headers=headers)
 
-    airlock.http.post = post
+    patch_post(airlock, post)
     return sent
 
 
@@ -242,7 +242,7 @@ async def test_mcp_param_headers_are_forwarded(client, upstream, airlock):
         sent_headers.append(headers)
         return await orig(url, content=content, headers=headers)
 
-    airlock.http.post = post
+    patch_post(airlock, post)
     await call(client, "get_service", {"name": "api"}, headers={"Mcp-Param-Region": "eu", "x-random": "no"})
     assert sent_headers[-1]["mcp-param-region"] == "eu" and "x-random" not in sent_headers[-1]
 

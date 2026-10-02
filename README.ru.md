@@ -118,6 +118,19 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 | `AIRLOCK_PUBLIC_URL` | Базовый URL для ссылок одобрения. По умолчанию `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Путь к файлу пинов тулов, то же, что `--pins`. Без него ничего не пинится. См. [Пины описаний тулов](#пины-описаний-тулов). |
 | `AIRLOCK_UPSTREAM_AUTH` | Значение заголовка `Authorization` для upstream. Это учётка самого прокси; личность вызывающего едет в `_meta`. |
+| `AIRLOCK_MAX_REQUEST_BYTES` | Максимальный размер тела запроса в байтах. По умолчанию `1048576` (1 МиБ). Тело больше отклоняется с HTTP 413. Должно быть целым положительным числом. |
+| `AIRLOCK_MAX_UPSTREAM_BYTES` | Максимальный размер читаемого ответа upstream в байтах. По умолчанию `8388608` (8 МиБ). На лимите прокси перестаёт читать и отбрасывает ответ. Прокси просит у upstream несжатый ответ, а сжатый отклоняет с HTTP 502. Должно быть целым положительным числом. |
+
+При запуске прокси пишет в stderr предупреждение по каждому из пунктов:
+
+- не настроена идентификация (нет JWT-секрета, JWKS URL и доверенного заголовка): каждый вызов получает 401
+- `AIRLOCK_JWKS_URL` без `AIRLOCK_JWT_AUDIENCE`
+- `AIRLOCK_JWT_SECRET` короче 32 байт
+- `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` вместе с настройками JWT: запрос без `Authorization` принимается по одному заголовку
+- `AIRLOCK_STORE_DSN` без `AIRLOCK_SECRET`: реплики подписывают разными ключами
+- `AIRLOCK_APPROVAL_WEBHOOK` при `AIRLOCK_PUBLIC_URL` по умолчанию: ссылку одобрения никто другой не откроет
+
+С `--strict` любое предупреждение прерывает запуск с кодом 2.
 
 ## Файл политики
 
@@ -175,7 +188,12 @@ tools:
 `tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`,
 `dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`,
 `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`,
-`mrtr.upstream_input_required`, `internal.error`.
+`mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`, `internal.error`.
+
+`SIGHUP` перечитывает файл политики и, если он задан, файл пинов, как одну пару. Файл, который
+не загрузился, оставляет текущие политику и пины, а ошибка пишется в лог. Имя окружения, режим
+одобрения, секреты, хранилище и upstream не перечитываются. В Windows нет `SIGHUP`, там нужен
+перезапуск процесса.
 
 ## Подтверждения подробнее
 
@@ -235,9 +253,13 @@ accept проигнорирован; `decline` по-прежнему сжига�
 Две JSON-строки на вызов с общим `call_id`:
 
 ```json
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"0000…","hash":"a3f1c0de…"}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"a3f1c0de…","hash":"9b27e4d1…"}
 ```
+
+`prev` равен `hash` предыдущей записи (у первой записи, попавшей в пустой файл аудита, это 64
+нуля), `hash` это sha256 канонического JSON записи без поля `hash` (ключи отсортированы, без
+пробелов, UTF-8, не-ASCII не экранируется). Postgres-приёмник кладёт те же два значения в `rec`.
 
 Значения аргументов под ключами вроде `password`, `token`, `api_key`, `authorization`
 заменяются на `[REDACTED]` (вместе со вложенными структурами), как и значения, похожие на
@@ -255,6 +277,34 @@ uv run airlock-audit query --stats
 ```
 
 Те же команды работают с Postgres через `--dsn` или `AIRLOCK_AUDIT_DSN`.
+
+Файл растёт без ограничения, пока не задан `--audit-max-bytes N`. Когда запись вывела бы его
+за `N` байт, `audit.jsonl` переименовывается в `audit.jsonl.1`, `.1` в `.2` и так далее, а
+хранится `--audit-keep` ротированных файлов (по умолчанию 5, минимум 1; самый старый
+удаляется). Цепочка хешей продолжается в новом файле. Запись больше `N` всё равно
+записывается. По умолчанию ротация выключена. Если уменьшить `--audit-keep`, существующие
+файлы `.N` выше нового предела удаляются при следующей ротации.
+
+Проверка цепочки:
+
+```
+uv run airlock-audit verify
+uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
+```
+
+Без аргументов читаются `audit.jsonl` и его ротированные файлы; заданные файлы должны идти от
+старого к новому. `verify` только читает файлы и никогда в них не пишет. При успехе печатается `OK: 812 records in 3 files, chain from <first prev> to <last hash>`
+и код выхода 0. На первом разрыве печатается `BREAK: audit.jsonl.1:57: hash mismatch` и код
+выхода 1. Причина: `hash mismatch` (строку изменили), `prev mismatch` (строку удалили или
+переставили), `not JSON` или `missing hash`. Строки, записанные до появления цепочки,
+пропускаются и считаются как `unchained records skipped`. Первая запись самого старого файла
+проверяется только по собственному хешу.
+
+Изменённая, удалённая или переставленная строка обнаруживается. Обрезанный хвост не
+обнаруживается, как и самая новая запись самого нового файла (её можно изменить и
+пересчитать хеш: после неё нет ничего, что бы это проверило) и файл, целиком переписанный с
+согласованной цепочкой: последний хеш нигде вне хоста не закрепляется, поэтому их защищает
+только внешнее закрепление.
 
 На каждый запрос создаётся один спан OpenTelemetry с именем `execute_tool <tool>`,
 атрибутами `gen_ai.*`, principal и вердиктом. Входящий `traceparent` (заголовок или
@@ -320,15 +370,20 @@ elicitation-канал ревизии 2026-07-28), не работает за г
 если он у тула есть, иначе после «да» человека. На `L0`, `L1` и `L3` вопрос и состояние upstream
 проходят как есть. Такие тулы ставьте туда.
 
-Blast radius считает то, что видит: длину названного аргумента или единицу. Тул, чей
-разлёт не виден в аргументах, здесь не измерить.
+Blast radius считает то, что видит: длину названного аргумента или единицу. Строка
+с JSON-списком или объектом считается по числу элементов, как её читает upstream. Такая
+строка, которую прокси не может раскодировать (глубина вложенности или размер числа за пределами
+его интерпретатора), отклоняется с `blast_radius.per_call`: интерпретатор upstream может её
+прочитать. Тул, чей разлёт не виден в аргументах, здесь не измерить.
 
 Обрезка вывода работает по сериализованному результату. Сверх потолка текстовые блоки
 укорачиваются, `structuredContent` и нетекстовые блоки выбрасываются. Оценка токенов —
 `chars / 4`. Если в результате был `structuredContent`, он возвращается с `isError: true`: без
 него результат не соответствует `outputSchema` тула, а SDK-клиенты такие успешные результаты
 отвергают. В тексте сказано, что сам вызов выполнен, чтобы агент не повторял запись из-за
-длинного вывода.
+длинного вывода. Ответ upstream больше `AIRLOCK_MAX_UPSTREAM_BYTES` для вызова тула сообщается
+так же: он приходит как ошибка с пометкой, что вызов выполнен (или что выполнен только его dry
+run), с правилом `upstream.too_large`.
 
 Ответы upstream в виде SSE сводятся к последнему сообщению; уведомления о прогрессе
 теряются. Legacy HTTP+SSE, Roots, Sampling и Logging не поддерживаются.
@@ -341,7 +396,7 @@ Blast radius считает то, что видит: длину названно
 официальным Python SDK-клиентом и проверяет последствия там, где они происходят: `e2e/kubernetes`
 запускает настоящий kubernetes-mcp-server на k3s с примером политики (под удаляется ровно один
 раз, отказ и повтор его не трогают), `e2e/grafana` запускает grafana/mcp-grafana с Grafana OSS,
-`e2e/postgres` запускает небольшой SDK-сервер с честным dry run на Postgres, четыре реплики прокси и
+`e2e/postgres` запускает небольшой SDK-сервер с честным dry run на Postgres, пять реплик прокси и
 webhook для одобрения. У каждого есть `run.sh`, который завершается с ненулевым кодом при любом
 провале. Политика для GitHub по-прежнему сверена только с исходниками: её серверу нужен github.com.
 
@@ -354,10 +409,11 @@ src/mcp_airlock/store.py       хранилища ключей, одобрени
 src/mcp_airlock/identity.py    principal из JWT / JWKS / заголовка
 src/mcp_airlock/guard.py       разметка инъекций
 src/mcp_airlock/approvals.py   уведомления в Slack / Telegram
-src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция секретов
-src/mcp_airlock/audit_cli.py   airlock-audit
+src/mcp_airlock/audit.py       аудит в JSONL и Postgres, редакция секретов, ротация, цепочка хешей
+src/mcp_airlock/audit_cli.py   airlock-audit query / verify
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        пины тулов: хеш, загрузка файла пинов
+src/mcp_airlock/startup.py      предупреждения при запуске и --strict
 tests/fake_upstream.py         фейковый сервер для тестов и демо
 docs/clients.md                подключение Claude Code и Cursor (по-английски)
 Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock

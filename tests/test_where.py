@@ -146,18 +146,20 @@ async def test_a_string_that_decodes_to_null_list_or_dict_fails_every_matcher(ma
     assert await violates([{"arg": "a", **matcher}], {"a": value})
 
 
-@pytest.mark.parametrize("value", ["123", "1.5", "true", "false", '"quoted"'])
+@pytest.mark.parametrize("value", ["123", "1.5", "true", "false", '"quoted"', pytest.param("1" * 5000, id="over the digit limit")])
 async def test_a_string_that_decodes_to_a_number_bool_or_string_is_left_alone(value):
-    # the SDK decodes these too but keeps the string: only a null, list or dict is substituted
+    # the SDK decodes these too but keeps the string: only a null, list or dict is substituted. A number the digit limit
+    # refuses here is a string upstream as well, whether its decode fails there too or yields an int
     assert not await violates([{"arg": "a", "not_in": ["prod-db"]}], {"a": value})
     assert not await violates([{"arg": "a", "regex": ".+"}], {"a": value})
     assert not await violates([{"arg": "a", "equals": value}], {"a": value})
 
 
-async def test_a_string_nested_too_deep_to_decode_is_a_decision_not_an_exception():
-    # json.loads raises RecursionError, not ValueError, on this one: the helper must leave the string alone, not blow up
-    d = await decide(policy([{"arg": "a", "in": ["x"]}]), {"a": "[" * 100000})
-    assert (d.verdict, d.rule_id) == ("deny", "args.violation") and "allowed" in d.message
+async def test_a_string_nested_too_deep_to_decode_here_fails_closed():
+    # json.loads raises RecursionError at a depth another interpreter may still decode into a list: the raw string
+    # would pass not_in, so the rule fails instead of matching what the upstream will not see (and does not blow up)
+    d = await decide(policy([{"arg": "a", "not_in": ["x"]}]), {"a": "[" * 100000 + "]" * 100000})
+    assert (d.verdict, d.rule_id) == ("deny", "args.violation") and "forbidden" in d.message
 
 
 # ---------------------------------------------------------------- env and ordering

@@ -1,14 +1,18 @@
-"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against four airlock replicas (three in-band,
-one oob; one of the in-band ones has a pins file) in front of a Postgres-backed MCP service. Assertions are made on
-the real databases. Prints PASS/FAIL per check."""
+"""E2E scenarios: the official MCP SDK client (the agent) and raw httpx against five airlock replicas (four in-band,
+one oob; one of the in-band ones has a pins file and one reloads its policy on SIGHUP) in front of a Postgres-backed
+MCP service. Assertions are made on the real databases. Prints PASS/FAIL per check."""
 
 from __future__ import annotations
 
 import asyncio
+import glob
 import html
 import json
 import os
+import re
+import shutil
 import subprocess
+import tempfile
 import time
 import traceback
 from contextlib import asynccontextmanager
@@ -18,12 +22,14 @@ import httpx
 import httpx2
 import jwt
 import psycopg
+import yaml
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp_types import ElicitResult
 
 A, B, OOB = os.environ["AIRLOCK_A"], os.environ["AIRLOCK_B"], os.environ["AIRLOCK_OOB"]
 PINS = os.environ["AIRLOCK_PINS_URL"]
+RELOAD = os.environ["AIRLOCK_RELOAD_URL"]
 SERVICE = "http://service:8000/mcp"
 V = "2026-07-28"
 ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotocol/clientCapabilities": {}}
@@ -386,6 +392,198 @@ async def s19():
             f"airlock-a still lists get_note; {len(rows)} catalog.pin_mismatch audit records name get_note; list_rows call works")
 
 
+@check("20 blast radius counts a JSON-string list")
+async def s20():
+    who = "ivan"  # fresh principal, L2 for delete_rows
+    over, within = "[130,131,132,133,134,135]", "[136,137]"  # six ids as a string, max_per_call is 5
+    async with agent(A, token(who), confirm=False) as c:  # the human declines: nothing may be deleted
+        r = await c.call_tool("delete_rows", {"ids": over})
+        refused_prompts = len(c.prompts)
+        ok = await c.call_tool("delete_rows", {"ids": within})
+        prompts = c.prompts[refused_prompts:]
+    rule = (r.meta or {}).get(M + "rule_id")
+    assert r.is_error and rule == "blast_radius.per_call" and refused_prompts == 0, (r, refused_prompts)
+    after = q("SELECT args FROM calls WHERE tool = 'delete_rows' AND principal = %s ORDER BY id", who)
+    # the refused call got no dry run; the within-limit one got exactly its dry run, with the string decoded into ids
+    assert [(a["ids"], a["dry_run"]) for (a,) in after] == [(json.loads(within), True)], after
+    ok_rule = (ok.meta or {}).get(M + "rule_id")
+    assert ok_rule == "mrtr.declined" and len(prompts) == 1 and "confirm" in prompts[0]["props"], (ok, prompts)
+    assert present(json.loads(over) + json.loads(within)) == 8
+    return (f"{rule} for six ids sent as a string; 0 human prompts; within-limit string got the normal L2 prompt (declined); "
+            f"no real delete_rows call for {who}, rows 130-137 all present")
+
+
+@check("21 size limits")
+async def s21():
+    who, tok = "olga", token("olga")  # fresh principal, fresh row 150
+    calls_before = q("SELECT count(*) FROM calls")[0][0]
+    refused_before = aq("SELECT count(*) FROM airlock_audit WHERE rule_id = 'request.too_large'")[0][0]
+    huge = await rpc(A, "tools/call", {"name": "update_note", "arguments": {"id": 150, "text": "z" * (3 << 19)}}, tok=tok)  # 1.5 MiB
+    err = huge.json()
+    assert huge.status_code == 413 and err["id"] is None and err["error"]["code"] == -32600, (huge.status_code, huge.text[:200])
+    assert q("SELECT count(*) FROM calls")[0][0] == calls_before and q("SELECT note FROM customers WHERE id = 150")[0][0] == ""
+    refused = aq("SELECT phase, principal, rec::text FROM airlock_audit WHERE rule_id = 'request.too_large' ORDER BY ts")
+    assert len(refused) == refused_before + 2 and {p for p, _, _ in refused[refused_before:]} == {"intent", "outcome"}, refused
+    assert all(pr is None and "zzzz" not in rec for _, pr, rec in refused), refused
+    # A 300000 char note: 200000 byte limit on airlock-pins, default 8 MiB on airlock-a.
+    wrote = result(await rpc(A, "tools/call", {"name": "update_note", "arguments": {"id": 150, "text": "y" * 300_000}}, tok=tok))
+    assert not wrote.get("isError") and q("SELECT length(note) FROM customers WHERE id = 150")[0][0] == 300_000, wrote
+    read = {"name": "get_note", "arguments": {"id": 150}}
+    cut = result(await rpc(PINS, "tools/call", read, tok=tok))
+    text = cut["content"][0]["text"]
+    assert cut["isError"] and cut["_meta"][M + "rule_id"] == "upstream.too_large", cut
+    assert "upstream response exceeded 200000 bytes" in text and "the call itself ran" in text and "yyyy" not in text, text
+    assert len(q("SELECT 1 FROM calls WHERE tool = 'get_note' AND principal = %s", who)) == 1  # the call did reach the service
+    out = aq("SELECT verdict, upstream_status FROM airlock_audit WHERE rule_id = 'upstream.too_large' AND principal = %s "
+             "AND phase = 'outcome'", who)
+    assert out == [("error", 200)], out
+    full = result(await rpc(A, "tools/call", read, tok=tok))
+    info = full["_meta"][M + "output"]
+    assert full["_meta"][M + "rule_id"] == "tier.L0.read" and info["truncated"] and info["chars"] > 300_000, full["_meta"]
+    assert full["content"][0]["text"].startswith("yyyy")
+    return (f"1.5 MiB request: HTTP 413, 2 request.too_large audit records (no principal, no body), service saw nothing; "
+            f"300000 char note: airlock-pins isError upstream.too_large ('the call itself ran', audit outcome upstream_status 200), "
+            f"airlock-a returned it capped by the output cap ({info['chars']} chars cut to {info['max_chars']})")
+
+
+@check("22 startup warnings: --strict refuses a weak configuration")
+async def s22():
+    env = {"PATH": os.environ["PATH"], "AIRLOCK_JWT_SECRET": "short",
+           "AIRLOCK_STORE_DSN": "postgresql://airlock:airlock@airlock-db:5432/airlock",
+           "AIRLOCK_APPROVAL_WEBHOOK": "http://webhook:8080/hook"}  # no AIRLOCK_SECRET, no AIRLOCK_PUBLIC_URL
+    port = "9100"
+    t0 = time.time()
+    out = subprocess.run(["mcp-airlock", "--policy", "/e2e/policy.yaml", "--upstream", SERVICE, "--env", "prod",
+                          "--audit", "/tmp/s22-audit.jsonl", "--port", port, "--strict"],
+                         env=env, capture_output=True, text=True, timeout=20)
+    took = time.time() - t0
+    assert out.returncode == 2 and took < 10, (out.returncode, took, out.stderr[-300:])
+    for var in ("AIRLOCK_JWT_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK"):
+        assert any(ln.startswith("mcp-airlock: warning: ") and var in ln for ln in out.stderr.splitlines()), out.stderr
+    assert not os.path.exists("/tmp/s22-audit.jsonl")  # refused before the audit file was opened
+    # exit 2 within the timeout is the proof that it did not start; the probe only confirms the exit left no listener behind
+    try:
+        await rpc(f"http://127.0.0.1:{port}/mcp", "tools/list")
+        listening = True
+    except httpx.HTTPError:
+        listening = False
+    assert not listening
+    return f"exit 2 after {took:.1f}s, stderr names AIRLOCK_JWT_SECRET, AIRLOCK_STORE_DSN and AIRLOCK_APPROVAL_WEBHOOK, nothing listens on :{port}, no audit file"
+
+
+@check("23 policy reload on SIGHUP")
+async def s23():
+    tok = token("hana")  # fresh principal
+    original = open("/e2e/policy.yaml").read()
+    without = yaml.safe_load(original)
+    del without["tools"]["list_rows"]
+
+    async def verdicts() -> tuple[str | None, str | None]:
+        rows = result(await rpc(RELOAD, "tools/call", {"name": "list_rows", "arguments": {"limit": 1}}, tok=tok))
+        note = result(await rpc(RELOAD, "tools/call", {"name": "get_note", "arguments": {"id": 1}}, tok=tok))
+        assert not note.get("isError"), note  # untouched by every step below
+        return (rows["_meta"][M + "rule_id"] if rows.get("isError") else None), note["_meta"][M + "rule_id"]
+
+    async def reload_with(text: str) -> None:
+        open("/reload/policy.yaml", "w").write(text)
+        open("/reload/hup", "w").close()
+        for _ in range(50):  # the wrapper deletes the file right before it sends the signal
+            if not os.path.exists("/reload/hup"):
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError("the signal wrapper never picked up /reload/hup")
+
+    async def until_list_rows(denied: bool) -> float:
+        t0 = time.time()
+        while time.time() - t0 < 5:
+            if ((await verdicts())[0] == "allowlist.deny") == denied:
+                return time.time() - t0
+            await asyncio.sleep(0.1)
+        raise AssertionError(f"list_rows did not become {'denied' if denied else 'allowed'} within 5s of SIGHUP")
+
+    assert await verdicts() == (None, "tier.L0.read")
+    await reload_with(yaml.safe_dump(without))
+    took = await until_list_rows(True)
+    assert (await verdicts())[1] == "tier.L0.read"
+    await reload_with("tools: [unclosed\n  - : not yaml")
+    await asyncio.sleep(0.5)  # a bad file changes nothing, so there is no change to poll for: give the signal time to land
+    assert await verdicts() == ("allowlist.deny", "tier.L0.read")
+    await reload_with(original)
+    back = await until_list_rows(False)
+    assert await verdicts() == (None, "tier.L0.read")
+    return (f"SIGHUP made list_rows allowlist.deny after {took:.1f}s with get_note still L0; an invalid YAML file kept that policy; "
+            f"the original file restored list_rows after {back:.1f}s")
+
+
+@check("24 audit rotation and hash chain")
+async def s24():
+    live = "/audit/oob.jsonl"
+
+    def files() -> list[str]:  # oldest first
+        rotated = sorted(glob.glob(live + ".*"), key=lambda p: int(p.rsplit(".", 1)[1]), reverse=True)
+        return rotated + [live]
+
+    def verify(paths: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(["airlock-audit", "verify", *paths], capture_output=True, text=True, timeout=30)
+
+    sent = 0
+    while (len(files()) < 3 or sent < 120) and sent < 1000:  # a call without a principal is a 401 that writes a deny pair
+        for _ in range(20):
+            r = await rpc(OOB, "tools/call", {"name": "rotation_probe", "arguments": {}})
+            assert r.status_code == 401, r.text
+        sent += 20
+    paths = files()
+    assert len(paths) >= 3, (sent, paths)
+    ok = verify(paths)
+    m = re.fullmatch(r"OK: (\d+) records in (\d+) files, chain from ([0-9a-f]{64}) to ([0-9a-f]{64})", ok.stdout.strip())
+    assert ok.returncode == 0 and m and int(m[2]) == len(paths) > 1, (ok.returncode, ok.stdout, ok.stderr)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        def copy() -> list[str]:
+            return [shutil.copy(p, os.path.join(tmp, os.path.basename(p))) for p in paths]
+
+        def rewrite(copied: list[str], edit) -> tuple[str, int]:
+            middle = copied[len(copied) // 2]
+            with open(middle, encoding="utf-8") as f:
+                lines = f.read().rstrip("\n").split("\n")  # not splitlines(): verify splits on newlines only
+            at = edit(lines)
+            with open(middle, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            return middle, at
+
+        def flip(lines: list[str]) -> int:
+            i = next(j for j, ln in enumerate(lines) if j >= 2 and "principal.missing" in ln)  # well inside the file
+            lines[i] = lines[i].replace("principal.missing", "principal.missinh", 1)
+            return i + 1
+
+        def drop(lines: list[str]) -> int:
+            i = 2
+            del lines[i]
+            return i + 1  # the record after the deleted one now sits on this line
+
+        copied = copy()
+        middle, at = rewrite(copied, flip)
+        edited = verify(copied)
+        assert edited.returncode == 1 and edited.stdout.strip() == f"BREAK: {middle}:{at}: hash mismatch", (edited.stdout, edited.stderr)
+        copied = copy()
+        middle, at = rewrite(copied, drop)
+        deleted = verify(copied)
+        assert deleted.returncode == 1 and deleted.stdout.strip() == f"BREAK: {middle}:{at}: prev mismatch", (deleted.stdout, deleted.stderr)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    pick = paths[len(paths) // 2]
+    with open(pick, encoding="utf-8") as f:
+        line = next(json.loads(ln) for ln in f if '"principal.missing"' in ln and '"outcome"' in ln)
+    pg = aq("SELECT rec->>'hash', rec->>'prev' FROM airlock_audit WHERE call_id = %s AND phase = 'outcome'", line["call_id"])
+    assert pg == [(line["hash"], line["prev"])], (pg, line["hash"], line["prev"])
+    return (f"{sent} calls without a principal, {len(paths) - 1} rotated files + live; verify: {ok.stdout.strip()[:60]}...; "
+            f"edited char: BREAK at {os.path.basename(middle)}:hash mismatch; deleted line: prev mismatch; "
+            f"call {line['call_id'][:8]} has the same hash and prev in airlock_audit and in {os.path.basename(pick)}")
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -528,7 +726,7 @@ async def s17():
 async def wait_ready() -> None:
     for _ in range(120):
         try:
-            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB, PINS)] == [401, 401, 401, 401]:
+            if [(await rpc(u, "tools/list")).status_code for u in (A, B, OOB, PINS, RELOAD)] == [401] * 5:
                 return
         except httpx.HTTPError:
             pass
@@ -539,7 +737,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s22, s23, s24, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")
