@@ -405,6 +405,8 @@ Postgres, five proxy replicas and a webhook approver. Each has a `run.sh` that e
 failure. The GitHub policy has still only been checked against the server's source, since its
 server needs github.com.
 
+The postgres and grafana stacks also run nightly and on demand in the `e2e` workflow.
+
 ## Layout
 
 ```
