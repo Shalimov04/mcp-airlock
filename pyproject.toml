@@ -34,6 +34,9 @@ dependencies = [
     "uvicorn>=0.52.4",
 ]
 
+[project.optional-dependencies]
+otlp = ["opentelemetry-exporter-otlp-proto-http>=1.44.0"]
+
 [project.urls]
 Repository = "https://github.com/Shalimov04/mcp-airlock"
 Issues = "https://github.com/Shalimov04/mcp-airlock/issues"
