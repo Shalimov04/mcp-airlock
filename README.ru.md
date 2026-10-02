@@ -118,6 +118,8 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 | `AIRLOCK_PUBLIC_URL` | Базовый URL для ссылок одобрения. По умолчанию `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Путь к файлу пинов тулов, то же, что `--pins`. Без него ничего не пинится. См. [Пины описаний тулов](#пины-описаний-тулов). |
 | `AIRLOCK_UPSTREAM_AUTH` | Значение заголовка `Authorization` для upstream. Это учётка самого прокси; личность вызывающего едет в `_meta`. |
+| `AIRLOCK_MAX_REQUEST_BYTES` | Максимальный размер тела запроса в байтах. По умолчанию `1048576` (1 МиБ). Тело больше отклоняется с HTTP 413. Должно быть целым положительным числом. |
+| `AIRLOCK_MAX_UPSTREAM_BYTES` | Максимальный размер читаемого ответа upstream в байтах. По умолчанию `8388608` (8 МиБ). На лимите прокси перестаёт читать и отбрасывает ответ. Прокси просит у upstream несжатый ответ, а сжатый отклоняет с HTTP 502. Должно быть целым положительным числом. |
 
 ## Файл политики
 
@@ -175,7 +177,7 @@ tools:
 `tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`,
 `dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`,
 `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`,
-`mrtr.upstream_input_required`, `internal.error`.
+`mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`, `internal.error`.
 
 ## Подтверждения подробнее
 
@@ -331,7 +333,9 @@ Blast radius считает то, что видит: длину названно
 `chars / 4`. Если в результате был `structuredContent`, он возвращается с `isError: true`: без
 него результат не соответствует `outputSchema` тула, а SDK-клиенты такие успешные результаты
 отвергают. В тексте сказано, что сам вызов выполнен, чтобы агент не повторял запись из-за
-длинного вывода.
+длинного вывода. Ответ upstream больше `AIRLOCK_MAX_UPSTREAM_BYTES` для вызова тула сообщается
+так же: он приходит как ошибка с пометкой, что вызов выполнен (или что выполнен только его dry
+run), с правилом `upstream.too_large`.
 
 Ответы upstream в виде SSE сводятся к последнему сообщению; уведомления о прогрессе
 теряются. Legacy HTTP+SSE, Roots, Sampling и Logging не поддерживаются.

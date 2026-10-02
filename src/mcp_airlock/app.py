@@ -13,7 +13,8 @@ import os
 import secrets
 import time
 import uuid
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 import httpx
 from mcp.shared.inbound import (
@@ -51,11 +52,21 @@ ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller mes
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
 READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
+DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
+DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
 _tracer = trace.get_tracer("mcp-airlock")
 
 
 class CatalogUnavailable(Exception):
     """The upstream did not give us a usable tools/list; we cannot tell whether a tool has dry_run."""
+
+
+class UpstreamTooLarge(Exception):
+    """The upstream answer passed max_upstream_bytes and was dropped; `status` is what the upstream sent."""
+
+    def __init__(self, status: int, limit: int):
+        super().__init__(f"upstream response exceeded {limit} bytes")
+        self.status, self.limit = status, limit
 
 
 def _b64(b: bytes) -> str:
@@ -92,6 +103,8 @@ class Airlock:
         public_url: str | None = None,
         approval_mode: str | None = None,
         pins: dict[str, str] | None = None,  # {tool: "sha256:<hex>"}, None means off
+        max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
+        max_upstream_bytes: int = DEFAULT_MAX_UPSTREAM_BYTES,
     ):
         self.engine = Engine(policy, store)
         self.audit = audit
@@ -101,6 +114,8 @@ class Airlock:
         self.upstream_headers = upstream_headers or {}
         self.confirm_ttl_s = confirm_ttl_s
         self.http = http or httpx.AsyncClient(timeout=60.0)
+        self._owns_http = http is None  # only a client we created is ours to close
+        self.max_request_bytes, self.max_upstream_bytes = max_request_bytes, max_upstream_bytes
         self.upstream = upstream
         self.pins = pins
         self.webhook, self.telegram_chat = webhook, telegram_chat
@@ -114,13 +129,24 @@ class Airlock:
         self.public_url = (public_url or "").rstrip("/")
         self._catalog: dict[tuple, tuple[float, dict[str, dict[str, Any]]]] = {}  # (version, sub, groups) to (expires_at, tools)
         self._ping: asyncio.Task | None = None  # the in-flight readiness check, shared by the probes that arrive within one bound
-        self.app = Starlette(routes=[
+        self.app = Starlette(lifespan=self._lifespan, routes=[
             Route("/healthz", self.healthz, methods=["GET"]),
             Route("/readyz", self.readyz, methods=["GET"]),
             Route("/mcp", self.handle, methods=["POST"]),
             Route("/approve/{token}", self.approve_page, methods=["GET"]),
             Route("/approve/{token}", self.approve_submit, methods=["POST"]),
         ])
+
+    @asynccontextmanager
+    async def _lifespan(self, app: Starlette) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            try:
+                if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
+                    await self.http.aclose()
+            finally:
+                self.audit.close()
 
     # ---------- MRTR confirmation tokens (stateless, HMAC-signed) ----------
     def _binding(self, principal: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -192,11 +218,13 @@ class Airlock:
     # ---------- request handling ----------
     async def handle(self, request: Request) -> Response:
         headers = {k.lower(): v for k, v in request.headers.items()}
-        # JWKS verification may fetch keys over the network (blocking urllib): keep it off the event loop.
-        who = await asyncio.to_thread(resolve, headers, self.identity) if self.identity.jwks_url else resolve(headers, self.identity)
+        raw = await self._read_body(request)  # before identity: resolving may fetch keys over the network
+        if raw is None:
+            return self._request_too_large()
+        who = await self._resolve(headers)
         sub = who.sub if who else None
         try:
-            body = json.loads(await request.body())
+            body = json.loads(raw)
         except ValueError:
             return self._reject(None, PARSE_ERROR, "Parse error", sub, None, None)
         if not isinstance(body, dict) or "id" not in body or not isinstance(body.get("method"), str):
@@ -239,10 +267,41 @@ class Airlock:
                 self._outcome(verdict="error", rule_id="internal.error", detail=_exc_text(e), **base)
                 return _rpc_error(rid, INTERNAL_ERROR, "airlock: internal error")
 
+    async def _resolve(self, headers: dict[str, str]) -> Principal | None:
+        # JWKS verification may fetch keys over the network (blocking urllib): keep it off the event loop.
+        return await asyncio.to_thread(resolve, headers, self.identity) if self.identity.jwks_url else resolve(headers, self.identity)
+
+    async def _read_body(self, request: Request) -> bytes | None:
+        """The request body, or None once it passes max_request_bytes. Holds at most the limit plus one chunk."""
+        try:
+            declared = int(request.headers.get("content-length", ""))
+        except ValueError:
+            declared = 0  # absent or malformed: the running total below is the check
+        if declared > self.max_request_bytes:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > self.max_request_bytes:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def _request_too_large(self) -> JSONResponse:
+        base = dict(call_id=uuid.uuid4().hex, principal=None, method=None, tool=None, args=None, trace_id=None)
+        self._audit_deny(base, "request.too_large", None, f"limit {self.max_request_bytes} bytes")
+        return _rpc_error(None, INVALID_REQUEST, "Request body too large", status=413)
+
     async def _passthrough(self, body, headers, who: Principal, method, base) -> Response:
         self.audit.write(phase="intent", verdict="allow", rule_id="passthrough", **base)  # a raise here fails closed
         t0 = time.perf_counter()
-        status, reply = await self.forward(body, headers, who)
+        try:
+            status, reply = await self.forward(body, headers, who)
+        except UpstreamTooLarge as e:
+            self._outcome(verdict="error", rule_id="upstream.too_large", upstream_status=e.status, latency_ms=_ms(t0),
+                          detail=f"limit {e.limit} bytes", **base)
+            return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: the upstream response exceeded {e.limit} bytes", status=502)
         if method == "tools/list" and isinstance(reply.get("result"), dict):
             self._filter_tools(reply["result"], who)
             self._vet_tools(reply["result"], base)
@@ -307,7 +366,15 @@ class Airlock:
         fwd["params"]["arguments"] = fwd_args
         self.audit.write(phase="intent", verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run, **base)
         t0 = time.perf_counter()
-        status, reply = await self.forward(fwd, fwd_headers, who)
+        try:
+            status, reply = await self.forward(fwd, fwd_headers, who)
+        except UpstreamTooLarge as e:  # the upstream acted: on a real call the key stays burned and the charge stays
+            self._outcome(verdict="error", rule_id="upstream.too_large", tier=d.tier, dry_run=d.dry_run,
+                          upstream_status=e.status, latency_ms=_ms(t0), detail=f"limit {e.limit} bytes", **base)
+            ran = "the dry run itself ran, nothing was executed" if d.dry_run else "the call itself ran"
+            if d.verdict == "confirm":  # the preview is gone: no prompt without it, and a retry costs nothing
+                ran += " and no confirmation was issued"
+            return _tool_error(rid, f"airlock: the upstream response exceeded {e.limit} bytes and was dropped; {ran}", "upstream.too_large")
         result = reply.get("result")
         gated = d.verdict == "confirm" or d.rule_id == "tier.L2.confirmed"
         if gated and isinstance(result, dict) and result.get("resultType") == "input_required":
@@ -371,8 +438,11 @@ class Airlock:
         ttl_ms, cursor = 0, None
         for _ in range(10):  # ponytail: 10 pages max; a bigger catalog deserves a real cache
             params: dict[str, Any] = {"_meta": envelope, **({"cursor": cursor} if cursor else {})}
-            status, reply = await self.forward({"jsonrpc": "2.0", "id": f"airlock-catalog-{uuid.uuid4().hex[:8]}",
-                                                "method": "tools/list", "params": params}, list_headers, who)
+            try:
+                status, reply = await self.forward({"jsonrpc": "2.0", "id": f"airlock-catalog-{uuid.uuid4().hex[:8]}",
+                                                    "method": "tools/list", "params": params}, list_headers, who)
+            except UpstreamTooLarge as e:
+                raise CatalogUnavailable(f"upstream tools/list response exceeded {e.limit} bytes") from e
             result = reply.get("result") if status == 200 else None
             if not isinstance(result, dict):
                 raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {_clip(str(reply.get('error') or 'no result'))}")
@@ -408,17 +478,29 @@ class Airlock:
         params["_meta"] = meta
         out_headers = {k: v for k, v in headers.items() if k in FORWARD_HEADERS or k.startswith(MCP_PARAM_PREFIX)}
         out_headers["accept"] = "application/json, text/event-stream"  # we parse both; never let a picky client cause a 406
+        out_headers["accept-encoding"] = "identity"  # the limit below holds per wire chunk only while nothing is decoded
         out_headers["traceparent"] = meta.get("traceparent", "")
         out_headers.update(self.upstream_headers)
+        chunks: list[bytes] = []
+        total = 0
         try:
-            r = await self.http.post(self.upstream, content=json.dumps(dict(body, params=params)), headers=out_headers)
+            async with self.http.stream("POST", self.upstream, content=json.dumps(dict(body, params=params)), headers=out_headers) as r:
+                if r.headers.get("content-encoding", "identity").strip().lower() not in ("identity", ""):
+                    # Refused unread: one gzip chunk can decode to a thousand times its size before the count below sees it.
+                    return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream returned encoded content despite accept-encoding identity ({r.status_code})"}}
+                async for chunk in r.aiter_bytes():
+                    total += len(chunk)
+                    if total > self.max_upstream_bytes:
+                        raise UpstreamTooLarge(r.status_code, self.max_upstream_bytes)  # leaving the block closes the response
+                    chunks.append(chunk)
         except httpx.HTTPError as e:
             return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream unreachable: {type(e).__name__}"}}
+        raw = b"".join(chunks)
         ctype = r.headers.get("content-type", "")
         if ctype.startswith("text/event-stream"):
-            return r.status_code, _last_sse_message(r.text)
+            return r.status_code, _last_sse_message(raw.decode("utf-8", errors="replace"))
         try:
-            reply = r.json()
+            reply = json.loads(raw)
         except ValueError:
             return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream returned non-JSON ({r.status_code})"}}
         if not isinstance(reply, dict):
@@ -594,7 +676,7 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
             return HTMLResponse("Invalid or expired approval link.", status_code=400)
         await self.engine.store.approve(claims["k"], claims["exp"])
         headers = {k.lower(): v for k, v in request.headers.items()}
-        who = resolve(headers, self.identity)
+        who = await self._resolve(headers)
         # Who clicked: a verified token when there is one, else whatever the fronting SSO proxy put in a header.
         if who and headers.get("authorization"):
             approver, source = who.sub, "verified"
@@ -648,8 +730,23 @@ def _last_sse_message(text: str) -> dict[str, Any]:
     return last or {"jsonrpc": "2.0", "id": None, "error": {"code": INTERNAL_ERROR, "message": "empty SSE response"}}
 
 
+def _env_limit(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return n
+
+
 def build(policy_path: str, upstream: str, audit_path: str, environment: str | None = None, **kw: Any) -> Airlock:
     policy = Policy.load(policy_path, environment or os.environ.get("AIRLOCK_ENV"))
+    max_request = _env_limit("AIRLOCK_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES)  # before the audit file and store open
+    max_upstream = _env_limit("AIRLOCK_MAX_UPSTREAM_BYTES", DEFAULT_MAX_UPSTREAM_BYTES)
     secret = os.environ.get("AIRLOCK_SECRET")
     upstream_headers = {}
     if auth := os.environ.get("AIRLOCK_UPSTREAM_AUTH"):
@@ -660,4 +757,5 @@ def build(policy_path: str, upstream: str, audit_path: str, environment: str | N
                    identity=IdentityConfig.from_env(), store=store_from_env(),
                    upstream_headers=upstream_headers, webhook=webhook, telegram_chat=telegram_chat,
                    public_url=os.environ.get("AIRLOCK_PUBLIC_URL", "http://127.0.0.1:9000"),
-                   approval_mode=os.environ.get("AIRLOCK_APPROVAL_MODE") or None, **kw)
+                   approval_mode=os.environ.get("AIRLOCK_APPROVAL_MODE") or None,
+                   max_request_bytes=max_request, max_upstream_bytes=max_upstream, **kw)

@@ -11,7 +11,7 @@ from mcp_airlock import __main__ as cli
 from mcp_airlock import guard, pins
 from mcp_airlock.app import META
 
-from .conftest import audit_rows, call, make_airlock, rpc
+from .conftest import audit_rows, call, make_airlock, patch_post, rpc
 from .fake_upstream import INJECTION
 
 TOOL = {"name": "t", "description": "d", "inputSchema": {"type": "object", "properties": {"a": {"type": "string"}}},
@@ -135,7 +135,7 @@ def rewrite_list(airlock, edit) -> None:
             return httpx.Response(200, json=data)
         return r
 
-    airlock.http.post = post
+    patch_post(airlock, post)
 
 
 def by_name(tools, name) -> dict:

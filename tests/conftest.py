@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,6 +43,15 @@ async def upstream():
     yield SimpleNamespace(app=app, CALLS=fake_upstream.CALLS)
     stop.set()
     await task
+
+
+def patch_post(airlock: Airlock, post) -> None:
+    """Replace what the upstream answers with a post(url, content=, headers=) fake. forward() streams, so adapt it to stream()."""
+    @asynccontextmanager
+    async def stream(method, url, *, content, headers):
+        yield await post(url, content=content, headers=headers)
+
+    airlock.http.stream = stream
 
 
 @pytest.fixture

@@ -407,6 +407,39 @@ async def s20():
             f"no real delete_rows call for {who}, rows 130-137 all present")
 
 
+@check("21 size limits")
+async def s21():
+    who, tok = "olga", token("olga")  # fresh principal, fresh row 150
+    calls_before = q("SELECT count(*) FROM calls")[0][0]
+    refused_before = aq("SELECT count(*) FROM airlock_audit WHERE rule_id = 'request.too_large'")[0][0]
+    huge = await rpc(A, "tools/call", {"name": "update_note", "arguments": {"id": 150, "text": "z" * (3 << 19)}}, tok=tok)  # 1.5 MiB
+    err = huge.json()
+    assert huge.status_code == 413 and err["id"] is None and err["error"]["code"] == -32600, (huge.status_code, huge.text[:200])
+    assert q("SELECT count(*) FROM calls")[0][0] == calls_before and q("SELECT note FROM customers WHERE id = 150")[0][0] == ""
+    refused = aq("SELECT phase, principal, rec::text FROM airlock_audit WHERE rule_id = 'request.too_large' ORDER BY ts")
+    assert len(refused) == refused_before + 2 and {p for p, _, _ in refused[refused_before:]} == {"intent", "outcome"}, refused
+    assert all(pr is None and "zzzz" not in rec for _, pr, rec in refused), refused
+    # A 300000 char note: 200000 byte limit on airlock-pins, default 8 MiB on airlock-a.
+    wrote = result(await rpc(A, "tools/call", {"name": "update_note", "arguments": {"id": 150, "text": "y" * 300_000}}, tok=tok))
+    assert not wrote.get("isError") and q("SELECT length(note) FROM customers WHERE id = 150")[0][0] == 300_000, wrote
+    read = {"name": "get_note", "arguments": {"id": 150}}
+    cut = result(await rpc(PINS, "tools/call", read, tok=tok))
+    text = cut["content"][0]["text"]
+    assert cut["isError"] and cut["_meta"][M + "rule_id"] == "upstream.too_large", cut
+    assert "upstream response exceeded 200000 bytes" in text and "the call itself ran" in text and "yyyy" not in text, text
+    assert len(q("SELECT 1 FROM calls WHERE tool = 'get_note' AND principal = %s", who)) == 1  # the call did reach the service
+    out = aq("SELECT verdict, upstream_status FROM airlock_audit WHERE rule_id = 'upstream.too_large' AND principal = %s "
+             "AND phase = 'outcome'", who)
+    assert out == [("error", 200)], out
+    full = result(await rpc(A, "tools/call", read, tok=tok))
+    info = full["_meta"][M + "output"]
+    assert full["_meta"][M + "rule_id"] == "tier.L0.read" and info["truncated"] and info["chars"] > 300_000, full["_meta"]
+    assert full["content"][0]["text"].startswith("yyyy")
+    return (f"1.5 MiB request: HTTP 413, 2 request.too_large audit records (no principal, no body), service saw nothing; "
+            f"300000 char note: airlock-pins isError upstream.too_large ('the call itself ran', audit outcome upstream_status 200), "
+            f"airlock-a returned it capped by the output cap ({info['chars']} chars cut to {info['max_chars']})")
+
+
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
@@ -560,7 +593,7 @@ async def wait_ready() -> None:
 async def main() -> int:
     await wait_ready()
     t0 = time.time()
-    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s14, s13):
+    for s in (s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11a, s11b, s12, s15, s16, s17, s18, s19, s20, s21, s14, s13):
         await s()
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"\n==== SUMMARY: {len(RESULTS) - len(failed)} passed, {len(failed)} failed in {time.time() - t0:.1f}s ====")

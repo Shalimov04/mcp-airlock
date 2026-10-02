@@ -122,6 +122,8 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
+| `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. Must be a positive integer. |
+| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. Must be a positive integer. |
 
 ## The policy file
 
@@ -178,7 +180,7 @@ Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unas
 `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
 `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
 `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
-`internal.error`.
+`request.too_large`, `upstream.too_large`, `internal.error`.
 
 ## Confirmations in detail
 
@@ -331,6 +333,9 @@ Output capping works on the serialized result. Over the cap, text blocks are tri
 that had `structuredContent` comes back with `isError: true`, because it no longer matches the
 tool's `outputSchema` and SDK clients refuse non-error results that don't. The text says the
 call itself ran, so an agent does not repeat a write because its output was too long.
+An upstream answer over `AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it
+comes back as an error that says the call ran (or that only its dry run did), with rule
+`upstream.too_large`.
 
 Upstream responses arriving as SSE are reduced to the final message; progress
 notifications are dropped. Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.

@@ -104,6 +104,7 @@ services:
       AIRLOCK_PUBLIC_URL: http://airlock-pins:9000
       AIRLOCK_APPROVAL_MODE: inband
       AIRLOCK_PINS: /pins/pins.json
+      AIRLOCK_MAX_UPSTREAM_BYTES: "200000"  # far below the 8 MiB default, so scenario 21 can overflow it with one note
 
   runner:
     image: mcp-airlock-e2e:local
