@@ -65,12 +65,27 @@ def _clean_detail(value: Any, key: str = "") -> Any:
     return scrub(value) if isinstance(value, str) else value
 
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _wellformed(value: Any) -> Any:
+    """A lone surrogate in client text (JSON allows "\\ud800") cannot be encoded as UTF-8, so it would fail the write and the hash.
+    Replace it with U+FFFD in every string and key."""
+    if isinstance(value, str):
+        return _LONE_SURROGATE.sub("\ufffd", value)
+    if isinstance(value, dict):
+        return {_wellformed(k): _wellformed(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_wellformed(v) for v in value]
+    return value
+
+
 def _row(rec: dict[str, Any]) -> dict[str, Any]:
     row = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
     row.update({k: rec.get(k) for k in FIELDS})
     row["args"] = redact(row["args"]) if row["args"] is not None else None
     row["detail"] = _clean_detail(row["detail"])
-    return row
+    return _wellformed(row)
 
 
 def _dumps(row: dict[str, Any]) -> str:

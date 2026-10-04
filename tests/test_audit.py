@@ -16,7 +16,7 @@ from mcp_airlock import __main__ as cli
 from mcp_airlock import audit
 from mcp_airlock.app import build
 from mcp_airlock.audit import GENESIS, REDACTED, AuditLog, MultiAudit, PostgresAuditLog, audit_from_env, row_hash, scrub
-from mcp_airlock.audit_cli import default_files, main
+from mcp_airlock.audit_cli import default_files, main, verify
 
 from .conftest import ROOT
 
@@ -111,6 +111,18 @@ def test_postgres_reconnects_once(pg_dsn):
     p.close()
     with psycopg.connect(pg_dsn) as c:
         assert c.execute("SELECT count(*) FROM airlock_audit").fetchone() == (2,)
+
+
+def test_lone_surrogate_in_client_text_is_replaced_and_chain_verifies(tmp_path):
+    path = tmp_path / "a.jsonl"
+    log = AuditLog(path)
+    log.write(phase="intent", **{**BASE, "args": {"q": "a\ud800b", "k\udc00": ["\udfff"]}, "tool": "t\ud800"})
+    log.write(phase="outcome", **BASE)
+    log.close()
+    first = jsonl_rows(path)[0]
+    assert first["args"] == {"q": "a\ufffdb", "k\ufffd": ["\ufffd"]}
+    assert first["tool"] == "t\ufffd"
+    assert verify([str(path)])[0]
 
 
 def test_multi_audit_survives_broken_sink(tmp_path):
