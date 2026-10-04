@@ -120,7 +120,7 @@ class Airlock:
         notify_http: httpx.AsyncClient | None = None,
         public_url: str | None = None,
         approval_mode: str | None = None,
-        pins: dict[str, str] | None = None,  # {tool: "sha256:<hex>"}, None means off
+        pins: dict[str, str] | None = None,  # {tool: "sha256v2:<hex>"}, None means off
         max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
         max_upstream_bytes: int = DEFAULT_MAX_UPSTREAM_BYTES,
         reload_source: ReloadSource | None = None,  # None: reload() has nothing to read
@@ -581,7 +581,7 @@ class Airlock:
             if dropped:
                 for t in dropped:  # own call_id: the tools/list call keeps its single intent/outcome pair
                     self._audit_deny(dict(base, call_id=uuid.uuid4().hex), "catalog.pin_mismatch", None,
-                                     f"{t.get('name')}: description or schema changed since it was pinned")
+                                     f"{t.get('name')}: definition changed since it was pinned")
                 meta[META + "pin_mismatch"] = len(dropped)
                 result["tools"] = tools = kept
         # one scan per tool: guard.scan dedupes by phrase, and the same phrase in two descriptions must name both tools

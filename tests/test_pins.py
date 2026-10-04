@@ -16,15 +16,16 @@ from .fake_upstream import INJECTION
 
 TOOL = {"name": "t", "description": "d", "inputSchema": {"type": "object", "properties": {"a": {"type": "string"}}},
         "outputSchema": {"type": "object"}, "annotations": {"readOnlyHint": True}}
-ZEROS = "sha256:" + "0" * 64
+ZEROS = "sha256v2:" + "0" * 64
+OLD_ZEROS = "sha256:" + "0" * 64
 
 
 # ---------------------------------------------------------------- hash
 
 def test_hash_has_a_fixed_format_and_canonical_input():
-    # name, description, inputSchema, outputSchema, annotations as sorted compact JSON, UTF-8 (not \u-escaped)
+    # name, title, description, inputSchema, outputSchema, annotations as sorted compact JSON, UTF-8 (not \u-escaped)
     h = pins.tool_hash({"name": "a", "description": "é", "inputSchema": {"type": "object"}})
-    assert h == "sha256:e893288aeb84eb4c837b1239e37d45b4cf8e74fa7b4e5b08826ff163557b979b"
+    assert h == "sha256v2:7ea5c15a93fd80fc25962ca8b571530ac8727aafe041d06c6b2b2beba0a0128f"
 
 
 def test_hash_does_not_depend_on_key_order():
@@ -34,7 +35,7 @@ def test_hash_does_not_depend_on_key_order():
 
 
 def test_hash_ignores_fields_the_model_does_not_read_and_treats_missing_as_null():
-    assert pins.tool_hash({**TOOL, "title": "x", "_meta": {"k": 1}}) == pins.tool_hash(TOOL)
+    assert pins.tool_hash({**TOOL, "_meta": {"k": 1}, "icons": []}) == pins.tool_hash(TOOL)
     assert pins.tool_hash({"name": "t"}) == pins.tool_hash({"name": "t", "description": None, "annotations": None})
 
 
@@ -44,9 +45,21 @@ def test_hash_ignores_fields_the_model_does_not_read_and_treats_missing_as_null(
     ("outputSchema", {"type": "string"}),
     ("annotations", {"readOnlyHint": False}),
     ("name", "t2"),
+    ("title", "Read rows"),
 ])
 def test_each_field_changes_the_hash(field, value):
     assert pins.tool_hash({**TOOL, field: value}) != pins.tool_hash(TOOL)
+
+
+def test_title_absent_empty_and_null_are_told_apart_where_they_differ():
+    absent, null, empty = TOOL, {**TOOL, "title": None}, {**TOOL, "title": ""}
+    assert pins.tool_hash(absent) == pins.tool_hash(null)  # a missing title reads as null, like the other fields
+    assert pins.tool_hash(empty) != pins.tool_hash(absent)
+
+
+def test_a_unicode_title_hashes_as_utf8_and_a_lookalike_differs():
+    a, b = {**TOOL, "title": "Caf\u00e9"}, {**TOOL, "title": "Cafe\u0301"}  # precomposed vs combining accent
+    assert pins.tool_hash(a) != pins.tool_hash(b) != pins.tool_hash({**TOOL, "title": "\u202egnihtemos"})
 
 
 def test_a_lone_surrogate_in_a_description_still_hashes():
@@ -74,17 +87,32 @@ def test_load_reads_a_pins_file(tmp_path):
     {"t": 5},
     {"t": None},
     {"t": "0" * 64},  # no prefix
-    {"t": "sha256:" + "0" * 63},
-    {"t": "sha256:" + "0" * 65},
-    {"t": "sha256:" + "A" * 64},  # uppercase
-    {"t": "sha256:" + "g" * 64},
+    {"t": "sha256v2:" + "0" * 63},
+    {"t": "sha256v2:" + "0" * 65},
+    {"t": "sha256v2:" + "A" * 64},  # uppercase
+    {"t": "sha256v2:" + "g" * 64},
     {"t": "sha1:" + "0" * 64},
-    {"ok": ZEROS, "t": "sha256:zz"},  # one bad value among good ones
+    {"t": "sha256:" + "0" * 64, "u": ZEROS},  # old and new mixed
+    {"ok": ZEROS, "t": "sha256v2:zz"},  # one bad value among good ones
 ])
 def test_load_rejects_a_bad_file_and_names_it(tmp_path, body):
     path = write_pins(tmp_path, body)
     with pytest.raises(ValueError, match="pins.json"):
         pins.load(path)
+
+
+def test_load_refuses_an_old_format_file_with_one_message(tmp_path):
+    path = write_pins(tmp_path, {"a": OLD_ZEROS, "b": OLD_ZEROS, "c": OLD_ZEROS})
+    with pytest.raises(ValueError, match="old pin format") as e:
+        pins.load(path)
+    assert path in str(e.value) and "airlock-policy pin" in str(e.value)
+
+
+def test_startup_stops_on_an_old_format_file(monkeypatch, tmp_path):
+    path = write_pins(tmp_path, {"t": OLD_ZEROS})
+    with pytest.raises(SystemExit) as e:
+        run_main(monkeypatch, ["--pins", path])
+    assert "old pin format" in str(e.value.code)
 
 
 def test_load_rejects_a_missing_file(tmp_path):
@@ -226,7 +254,7 @@ async def test_each_removed_tool_gets_an_audit_pair_and_the_call_its_own_records
     rows = audit_rows(audit_path)
     mism = [r for r in rows if r["rule_id"] == "catalog.pin_mismatch"]
     assert sorted((r["phase"], r["detail"]) for r in mism) == sorted(
-        (ph, f"{t}: description or schema changed since it was pinned") for t in ("get_service", "rotate_key") for ph in ("intent", "outcome"))
+        (ph, f"{t}: definition changed since it was pinned") for t in ("get_service", "rotate_key") for ph in ("intent", "outcome"))
     assert {r["verdict"] for r in mism} == {"deny"} and {r["method"] for r in mism} == {"tools/list"}
     pairs = {}
     for r in rows:
