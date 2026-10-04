@@ -27,13 +27,17 @@ def parse_since(s: str) -> datetime:
 
 
 def query_jsonl(path: str, where: dict, since: datetime | None, limit: int | None) -> list[dict]:
+    files = default_files(path)  # rotated files first, so the output stays oldest first
+    if not files:
+        raise FileNotFoundError(path)
     rows = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():  # ponytail: full scan; fine up to ~1M lines
-        if not line.strip():
-            continue
-        r = json.loads(line)
-        if all(r.get(k) == v for k, v in where.items()) and (since is None or datetime.fromisoformat(r["ts"]) >= since):
-            rows.append(r)
+    for f in files:
+        for line in Path(f).read_text(encoding="utf-8").splitlines():  # ponytail: full scan; fine up to ~1M lines
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            if all(r.get(k) == v for k, v in where.items()) and (since is None or datetime.fromisoformat(r["ts"]) >= since):
+                rows.append(r)
     return rows[-limit:] if limit else rows
 
 

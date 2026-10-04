@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
+  stored as U+FFFD.
+* `airlock-audit query` reads the rotated files too, oldest first.
+
 ## 0.3.0 - 2026-10-02
 
 ### Changed
