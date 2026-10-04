@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from mcp_airlock.app import CONFIRM_KEY, META, PRINCIPAL_REQUIRED
 
-from .conftest import audit_rows, call, make_airlock, patch_post, rpc
+from .conftest import ENVELOPE, V, audit_rows, call, make_airlock, patch_post, rpc
 
 
 def spy_forwarded(airlock) -> list[dict]:
@@ -303,3 +305,16 @@ async def test_tool_output_injection_cannot_escalate(client, upstream):
 
     executed = [c for c in upstream.CALLS if c["tool"] in ("delete_service", "set_replicas", "rm_rf") and not c["args"].get("dry_run")]
     assert executed == []
+
+
+async def test_lone_surrogate_in_arguments_is_audited(client, audit_path):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"_meta": dict(ENVELOPE), "name": "get_service", "arguments": {"name": "api@@"}}}
+    raw = json.dumps(body).replace("@@", "\\ud800")  # httpx would refuse the str itself; the wire carries the escape
+    headers = {"mcp-protocol-version": V, "mcp-method": "tools/call", "mcp-name": "get_service", "x-airlock-principal": "alice",
+               "accept": "application/json, text/event-stream", "content-type": "application/json"}
+    r = await client.post("/mcp", headers=headers, content=raw.encode())
+    assert r.status_code == 200, r.text
+    rows = audit_rows(audit_path)
+    assert [r["phase"] for r in rows] == ["intent", "outcome"]
+    assert rows[0]["args"] == {"name": "api\ufffd"}
