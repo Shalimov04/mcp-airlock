@@ -16,7 +16,7 @@ from mcp_airlock import __main__ as cli
 from mcp_airlock import audit
 from mcp_airlock.app import build
 from mcp_airlock.audit import GENESIS, REDACTED, AuditLog, MultiAudit, PostgresAuditLog, audit_from_env, row_hash, scrub
-from mcp_airlock.audit_cli import default_files, main
+from mcp_airlock.audit_cli import default_files, main, query_jsonl, verify
 
 from .conftest import ROOT
 
@@ -111,6 +111,29 @@ def test_postgres_reconnects_once(pg_dsn):
     p.close()
     with psycopg.connect(pg_dsn) as c:
         assert c.execute("SELECT count(*) FROM airlock_audit").fetchone() == (2,)
+
+
+def test_lone_surrogate_in_client_text_is_replaced_and_chain_verifies(tmp_path):
+    path = tmp_path / "a.jsonl"
+    log = AuditLog(path)
+    log.write(phase="intent", **{**BASE, "args": {"q": "a\ud800b", "k\udc00": ["\udfff"]}, "tool": "t\ud800"})
+    log.write(phase="outcome", **BASE)
+    log.close()
+    first = jsonl_rows(path)[0]
+    assert first["args"] == {"q": "a\ufffdb", "k\ufffd": ["\ufffd"]}
+    assert first["tool"] == "t\ufffd"
+    assert verify([str(path)])[0]
+
+
+def test_query_reads_rotated_files_oldest_first(tmp_path):
+    log = AuditLog(tmp_path / "a.jsonl", max_bytes=600, keep=10)
+    for i in range(8):
+        log.write(phase="intent", **dict(BASE, call_id=f"c{i}"))
+    log.close()
+    assert len(default_files(str(tmp_path / "a.jsonl"))) > 1
+    rows = query_jsonl(str(tmp_path / "a.jsonl"), {}, None, None)
+    assert [r["call_id"] for r in rows] == [f"c{i}" for i in range(8)]
+    assert [r["call_id"] for r in query_jsonl(str(tmp_path / "a.jsonl"), {}, None, 2)] == ["c6", "c7"]
 
 
 def test_multi_audit_survives_broken_sink(tmp_path):
