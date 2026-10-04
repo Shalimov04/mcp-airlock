@@ -26,14 +26,14 @@ def changed(pins: dict[str, str], tool: dict[str, Any]) -> bool:
 
 def load(path: str | Path) -> dict[str, str]:
     """Raises ValueError naming the file when it is unreadable, not a JSON object, or holds anything but 'sha256v2:' + 64 hex.
-    A file with v1 pins ('sha256:') is refused as a whole: they cannot be compared, and accepting them would leave tools unpinned."""
+    A file holding any v1 pin ('sha256:') is refused as a whole: they cannot be compared, and accepting them would leave tools unpinned."""
     try:
         pins = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
         raise ValueError(f"pins file {path}: {e}") from e
     if not isinstance(pins, dict):
         raise ValueError(f"pins file {path}: expected a JSON object of tool name to sha256v2 pin")
-    if pins and all(isinstance(p, str) and OLD_PIN.fullmatch(p) for p in pins.values()):
+    if any(isinstance(p, str) and OLD_PIN.fullmatch(p) for p in pins.values()):
         raise ValueError(f"pins file {path}: written in the old pin format (sha256:, which did not cover the tool title); "
                          "rewrite it with `airlock-policy pin`")
     for name, pin in pins.items():

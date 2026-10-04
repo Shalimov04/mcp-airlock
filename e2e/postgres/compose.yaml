@@ -90,7 +90,7 @@ services:
         until airlock-policy pin /e2e/policy.yaml --upstream http://service:8000/mcp --pins /pins/pins.json; do
           i=$$((i + 1)); [ $$i -lt 60 ] || exit 1; sleep 1
         done
-        python -c "import json; p = '/pins/pins.json'; d = json.load(open(p)); d['get_note'] = 'sha256:' + '0' * 64; json.dump(d, open(p, 'w'))"
+        python -c "import json; p = '/pins/pins.json'; d = json.load(open(p)); d['get_note'] = 'sha256v2:' + '0' * 64; json.dump(d, open(p, 'w'))"
     volumes: ["./:/e2e:ro", "pins:/pins"]
     networks: [e2e]
     depends_on:

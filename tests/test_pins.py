@@ -59,7 +59,8 @@ def test_title_absent_empty_and_null_are_told_apart_where_they_differ():
 
 def test_a_unicode_title_hashes_as_utf8_and_a_lookalike_differs():
     a, b = {**TOOL, "title": "Caf\u00e9"}, {**TOOL, "title": "Cafe\u0301"}  # precomposed vs combining accent
-    assert pins.tool_hash(a) != pins.tool_hash(b) != pins.tool_hash({**TOOL, "title": "\u202egnihtemos"})
+    c = pins.tool_hash({**TOOL, "title": "\u202egnihtemos"})
+    assert len({pins.tool_hash(a), pins.tool_hash(b), c}) == 3
 
 
 def test_a_lone_surrogate_in_a_description_still_hashes():
@@ -92,12 +93,17 @@ def test_load_reads_a_pins_file(tmp_path):
     {"t": "sha256v2:" + "A" * 64},  # uppercase
     {"t": "sha256v2:" + "g" * 64},
     {"t": "sha1:" + "0" * 64},
-    {"t": "sha256:" + "0" * 64, "u": ZEROS},  # old and new mixed
     {"ok": ZEROS, "t": "sha256v2:zz"},  # one bad value among good ones
 ])
 def test_load_rejects_a_bad_file_and_names_it(tmp_path, body):
     path = write_pins(tmp_path, body)
     with pytest.raises(ValueError, match="pins.json"):
+        pins.load(path)
+
+
+def test_load_names_the_old_format_in_a_mixed_file(tmp_path):
+    path = write_pins(tmp_path, {"t": OLD_ZEROS, "u": ZEROS})
+    with pytest.raises(ValueError, match="old pin format"):
         pins.load(path)
 
 
