@@ -77,7 +77,7 @@ proxy runs without exporting.
 The container image `ghcr.io/shalimov04/mcp-airlock` includes both extras. It listens on
 `0.0.0.0:9000`, runs as a non-root user and has `/data` as its working directory, so
 `audit.jsonl` lands there. Each release is tagged with its version and its major.minor
-(`0.4.0` and `0.4`).
+(`X.Y.Z` and `X.Y`).
 
 From a checkout, `uv sync --all-extras` installs everything including the test tools.
 
@@ -93,14 +93,15 @@ The same as a container:
 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
-  ghcr.io/shalimov04/mcp-airlock:0.4 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
+  ghcr.io/shalimov04/mcp-airlock:0.3 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
 The image has a `HEALTHCHECK` that asks `http://127.0.0.1:9000/healthz` with python every 30
-seconds (the image has no curl), ignoring any `HTTP_PROXY`. If you pass `--port`, override it
-with `--health-cmd` or a compose `healthcheck:`. Its `--start-interval` needs Docker Engine 25+
-(older ones ignore it). Kubernetes ignores the check: point a liveness probe at `/healthz` and
-a readiness probe at `/readyz`, as the [Helm chart](#in-kubernetes) does.
+seconds (the image has no curl), ignoring any `HTTP_PROXY`. If you pass `--port`, or a `--host`
+bound to a specific non-loopback address, override it with `--health-cmd` or a compose
+`healthcheck:`. Its `--start-interval` needs Docker Engine 25+ (older ones ignore it).
+Kubernetes ignores the check: point a liveness probe at `/healthz` and a readiness probe at
+`/readyz`, as the [Helm chart](#in-kubernetes) does.
 
 From a checkout:
 
@@ -236,7 +237,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it if you run more than one replica. |
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. Needs the `postgres` extra. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. Needs the `postgres` extra. |
-| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, and the longest a store call waits for a pooled connection or for a reply. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
+| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
 | `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. A positive integer. See [Postgres](#postgres). |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `https://api.telegram.org/bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
@@ -257,8 +258,8 @@ The OpenTelemetry SDK reads the other standard variables too: the rest of
 [Tracing](#tracing).
 
 A bad value (a limit that is not a positive integer, a DSN that does not parse, an unknown
-approval mode, a policy that fails validation, an invalid pins file) stops the start with one
-line on stderr and exit status 1.
+approval mode, a policy that fails validation, an invalid pins file) stops the start with an
+error message on stderr and exit status 1.
 
 ### Startup warnings
 
@@ -399,10 +400,10 @@ keep the `httpx` logger at `WARNING`.
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
 `X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as
-unverified unless it came from a bearer token the proxy could check. The page shows the
-redacted arguments and the dry-run preview (the first 8000 characters), kept in the store until
-the prompt expires. The approval itself is audited with `method: approve` and rule
-`mrtr.approved_oob`.
+unverified unless it came from a bearer token the proxy could check. The page shows the prompt
+text (the redacted arguments and up to 2000 characters of the dry-run preview), cut at 8000
+characters with a note, kept in the store until the prompt expires. The approval itself is
+audited with `method: approve` and rule `mrtr.approved_oob`.
 
 ## Audit
 
@@ -476,12 +477,14 @@ anchored anywhere outside the host, so these are only protected by anchoring it 
 
 ## Tracing
 
-Each request produces one OpenTelemetry span: `execute_tool <tool>` for a `tools/call`, the
-method name otherwise. It carries the `gen_ai.*` attributes (`gen_ai.operation.name`,
-`gen_ai.tool.name`, `gen_ai.tool.call.id`), `rpc.method`, the principal as `enduser.id`, the
-verdict, the rule and the tier as `airlock.*`, and the number of injection findings. Never the
-arguments. An incoming `traceparent` (header or `_meta`) is continued and a new one is put into
-the upstream `_meta`, so the audit's `trace_id` matches what the upstream sees.
+Each proxied request produces one OpenTelemetry span: `execute_tool <tool>` for a `tools/call`,
+the method name otherwise. A request rejected before that (a parse error, an oversized body, a
+method the proxy does not forward) produces none. The span carries the `gen_ai.*` attributes
+(`gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`), `rpc.method` and the
+principal as `enduser.id`; a `tools/call` span also carries the verdict, the rule and the tier
+as `airlock.*`, and the number of injection findings. Never the arguments. An incoming
+`traceparent` (header or `_meta`) is continued and a new one is put into the upstream `_meta`,
+so the audit's `trace_id` matches what the upstream sees.
 
 Spans go to a file with `--otel-file` (or `AIRLOCK_OTEL_FILE`), to an OTLP collector when
 `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, or to both. The
@@ -509,16 +512,17 @@ created on first use.
 The store keeps a small connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on
 first use and closes at shutdown. Replicas times the pool size must fit the server's
 `max_connections`. Pooled connections never auto-prepare statements, so PgBouncer in
-transaction mode works. The audit sink uses one connection of its own and reconnects once when
-it drops.
+transaction mode works for `AIRLOCK_STORE_DSN`. The audit sink uses one connection of its own,
+with psycopg's default auto-prepare, and reconnects once when it drops; point
+`AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer in session mode.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),
-`tcp_user_timeout` (the same value, in ms) and TCP keepalives (idle 10 s, interval 5 s,
-3 probes). The connect timeout applies to each attempt, so to every host of a multi-host DSN;
-libpq rounds values below 2 up to 2. A `service=` DSN is left unchanged, and then the pool wait
-is `PGCONNECT_TIMEOUT` or `AIRLOCK_STORE_CONNECT_TIMEOUT`, never a `connect_timeout` from the
-service file.
+`tcp_user_timeout` (the connect timeout in force, in ms; only with libpq 12 or newer) and TCP
+keepalives (idle 10 s, interval 5 s, 3 probes). The connect timeout applies to each attempt, so
+to every host of a multi-host DSN; libpq rounds values below 2 up to 2. A `service=` DSN is
+left unchanged, and then the pool wait is `PGCONNECT_TIMEOUT` or
+`AIRLOCK_STORE_CONNECT_TIMEOUT`, never a `connect_timeout` from the service file.
 
 The connect timeout in force (the DSN's own, else `PGCONNECT_TIMEOUT`, else
 `AIRLOCK_STORE_CONNECT_TIMEOUT`, at least 2 s) bounds every store call: the wait for a pooled

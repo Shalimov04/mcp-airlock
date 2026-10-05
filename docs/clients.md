@@ -12,10 +12,10 @@ export AIRLOCK_TRUST_PRINCIPAL_HEADER=1
 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env dev
 ```
 
-The proxy listens on `127.0.0.1` unless you pass `--host`. Only do that on a machine where
-nobody else can reach port 9000. Anywhere shared, leave the variable unset and give the client
-a bearer JWT instead (`AIRLOCK_JWT_SECRET` or `AIRLOCK_JWKS_URL` on the proxy side, see the
-README's "Environment variables" table).
+Only trust the header on a machine where nobody else can reach port 9000; the proxy listens on
+`127.0.0.1` unless you pass `--host`. Anywhere shared, leave the variable unset and give the
+client a bearer JWT instead (`AIRLOCK_JWT_SECRET` or `AIRLOCK_JWKS_URL` on the proxy side, see
+the README's "Environment variables" table).
 
 ## Claude Code
 

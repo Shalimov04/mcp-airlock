@@ -74,7 +74,7 @@ OTLP-endpoint без extra `otlp` даёт предупреждение при �
 
 Образ контейнера `ghcr.io/shalimov04/mcp-airlock` включает оба extra. Он слушает
 `0.0.0.0:9000`, работает не от root, и его рабочий каталог `/data`, так что `audit.jsonl`
-оказывается там. Каждый релиз получает тег с версией и с major.minor (`0.4.0` и `0.4`).
+оказывается там. Каждый релиз получает тег с версией и с major.minor (`X.Y.Z` и `X.Y`).
 
 Из чекаута `uv sync --all-extras` ставит всё, включая инструменты для тестов.
 
@@ -90,15 +90,15 @@ uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env 
 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
-  ghcr.io/shalimov04/mcp-airlock:0.4 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
+  ghcr.io/shalimov04/mcp-airlock:0.3 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
 В образе есть `HEALTHCHECK`: раз в 30 секунд python запрашивает `http://127.0.0.1:9000/healthz`
-(curl в образе нет), не обращая внимания на `HTTP_PROXY`. Если передаёте `--port`,
-переопределите проверку через `--health-cmd` или `healthcheck:` в compose. Его
-`--start-interval` требует Docker Engine 25+ (старые его игнорируют). Kubernetes проверку не
-читает: укажите `/healthz` в liveness probe и `/readyz` в readiness probe, как делает
-[Helm-чарт](#в-kubernetes).
+(curl в образе нет), не обращая внимания на `HTTP_PROXY`. Если передаёте `--port` или `--host`
+с конкретным не-loopback адресом, переопределите проверку через `--health-cmd` или
+`healthcheck:` в compose. Его `--start-interval` требует Docker Engine 25+ (старые его
+игнорируют). Kubernetes проверку не читает: укажите `/healthz` в liveness probe и `/readyz` в
+readiness probe, как делает [Helm-чарт](#в-kubernetes).
 
 Из чекаута:
 
@@ -238,7 +238,7 @@ helm install airlock charts/mcp-airlock \
 | `AIRLOCK_SECRET` | Ключ подписи токенов подтверждения. Без него генерируется случайный на процесс, и рестарт забывает незавершённые подтверждения. Задайте, если реплик больше одной. |
 | `AIRLOCK_STORE_DSN` | DSN Postgres для общего состояния: использованные ключи, одобрения, текст запроса для страницы одобрения, счётчики blast radius. Без него состояние живёт в памяти процесса. Нужен extra `postgres`. |
 | `AIRLOCK_AUDIT_DSN` | DSN Postgres для аудита, в дополнение к JSONL-файлу. Нужен extra `postgres`. |
-| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Таймаут подключения в секундах для Postgres-хранилища и аудит-приёмника, он же максимум ожидания соединения из пула и ответа на запрос. По умолчанию `10`. Целое от 1 до 86400. См. [Postgres](#postgres). |
+| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Таймаут подключения в секундах для Postgres-хранилища и аудит-приёмника, если его не задают DSN или `PGCONNECT_TIMEOUT`. Действующий таймаут подключения (минимум 2 с) ограничивает и ожидание соединения из пула, и ответ на запрос хранилища. По умолчанию `10`. Целое от 1 до 86400. См. [Postgres](#postgres). |
 | `AIRLOCK_STORE_POOL_SIZE` | Наибольшее число соединений, которые Postgres-хранилище держит открытыми на одну реплику. По умолчанию `4`. Целое положительное. См. [Postgres](#postgres). |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-совместимый incoming webhook или Telegram-URL вида `https://api.telegram.org/bot<token>/sendMessage`. Туда уходят запросы подтверждения со ссылкой. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` или `inband`. При `oob` одобряет только ссылка; `accept` в `inputResponses` считается отсутствием ответа. При `inband` одобряет `accept` клиента; `accept` с токеном `oob` там тоже игнорируется. По умолчанию `oob`, если задан webhook, иначе `inband`. `oob` без webhook отклоняется при запуске. |
@@ -259,7 +259,7 @@ SDK OpenTelemetry читает и остальные стандартные пе
 
 Неверное значение (лимит, который не является целым положительным числом, DSN, который не
 разбирается, неизвестный режим одобрения, политика, не прошедшая валидацию, невалидный файл
-пинов) останавливает запуск одной строкой в stderr и кодом выхода 1.
+пинов) останавливает запуск с сообщением об ошибке в stderr и кодом выхода 1.
 
 ### Предупреждения при старте
 
@@ -404,9 +404,10 @@ accept проигнорирован; `decline` по-прежнему сжига�
 Ставьте `/approve` за свой SSO-прокси или VPN; личность, которую тот передаст в
 `X-Airlock-Principal` или `X-Forwarded-User`, запишется рядом с одобрением с пометкой
 «непроверенная», если она не пришла в bearer-токене, который прокси смог проверить.
-Страница показывает аргументы с вырезанными секретами и dry-run превью (первые 8000
-символов); они хранятся в хранилище, пока запрос не истечёт. Само одобрение попадает в аудит
-с `method: approve` и правилом `mrtr.approved_oob`.
+Страница показывает текст запроса (аргументы с вырезанными секретами и до 2000 символов
+dry-run превью), обрезанный до 8000 символов с пометкой; он хранится в хранилище, пока запрос
+не истечёт. Само одобрение попадает в аудит с `method: approve` и правилом
+`mrtr.approved_oob`.
 
 ## Аудит
 
@@ -482,12 +483,14 @@ uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
 
 ## Трейсинг
 
-На каждый запрос создаётся один спан OpenTelemetry: `execute_tool <tool>` для `tools/call`,
-иначе имя метода. В нём атрибуты `gen_ai.*` (`gen_ai.operation.name`, `gen_ai.tool.name`,
-`gen_ai.tool.call.id`), `rpc.method`, principal как `enduser.id`, вердикт, правило и тир как
-`airlock.*` и число находок разметки инъекций. Аргументов там нет никогда. Входящий
-`traceparent` (заголовок или `_meta`) продолжается, а новый кладётся в `_meta` для upstream,
-так что `trace_id` в аудите совпадает с тем, что видит сервер.
+На каждый проксируемый запрос создаётся один спан OpenTelemetry: `execute_tool <tool>` для
+`tools/call`, иначе имя метода. Запрос, отклонённый раньше (ошибка разбора, слишком большое
+тело, метод, который прокси не пересылает), спана не создаёт. В спане атрибуты `gen_ai.*`
+(`gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`), `rpc.method` и principal
+как `enduser.id`; в спане `tools/call` ещё вердикт, правило и тир как `airlock.*` и число
+находок разметки инъекций. Аргументов там нет никогда. Входящий `traceparent` (заголовок или
+`_meta`) продолжается, а новый кладётся в `_meta` для upstream, так что `trace_id` в аудите
+совпадает с тем, что видит сервер.
 
 Спаны пишутся в файл через `--otel-file` (или `AIRLOCK_OTEL_FILE`), в OTLP-коллектор, если
 задан `OTEL_EXPORTER_OTLP_ENDPOINT` или `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, или и туда, и
@@ -516,17 +519,19 @@ Stateless только сторона MCP, сторона governance нет. И�
 Хранилище держит небольшой пул соединений (`AIRLOCK_STORE_POOL_SIZE`, по умолчанию 4): он
 открывается при первом обращении и закрывается при остановке. Число реплик, умноженное на
 размер пула, должно укладываться в `max_connections` сервера. Соединения из пула никогда не
-готовят запросы автоматически (prepared statements), поэтому PgBouncer в transaction mode
-работает. Аудит-приёмник держит одно собственное соединение и один раз переподключается, если
-оно оборвалось.
+готовят запросы автоматически (prepared statements), поэтому для `AIRLOCK_STORE_DSN` PgBouncer
+в transaction mode работает. Аудит-приёмник держит одно собственное соединение с обычным для
+psycopg автоматическим prepare и один раз переподключается, если оно оборвалось; направляйте
+`AIRLOCK_AUDIT_DSN` прямо в Postgres или в PgBouncer в session mode.
 
 Если DSN не задаёт их сам, в оба DSN добавляются `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, по умолчанию 10 с; не добавляется при заданном
-`PGCONNECT_TIMEOUT`), `tcp_user_timeout` (то же значение в мс) и TCP keepalive (простой 10 с,
-интервал 5 с, 3 пробы). Таймаут подключения действует на каждую попытку, то есть на каждый
-хост DSN с несколькими хостами; libpq округляет значения меньше 2 до 2. DSN с `service=`
-не меняется, и тогда ожидание пула равно `PGCONNECT_TIMEOUT` или
-`AIRLOCK_STORE_CONNECT_TIMEOUT`, но не `connect_timeout` из файла сервисов.
+`PGCONNECT_TIMEOUT`), `tcp_user_timeout` (действующий таймаут подключения в мс; только с libpq
+12 и новее) и TCP keepalive (простой 10 с, интервал 5 с, 3 пробы). Таймаут подключения
+действует на каждую попытку, то есть на каждый хост DSN с несколькими хостами; libpq
+округляет значения меньше 2 до 2. DSN с `service=` не меняется, и тогда ожидание пула равно
+`PGCONNECT_TIMEOUT` или `AIRLOCK_STORE_CONNECT_TIMEOUT`, но не `connect_timeout` из файла
+сервисов.
 
 Действующий таймаут подключения (из DSN, иначе `PGCONNECT_TIMEOUT`, иначе
 `AIRLOCK_STORE_CONNECT_TIMEOUT`, минимум 2 с) ограничивает каждый вызов хранилища: и ожидание
