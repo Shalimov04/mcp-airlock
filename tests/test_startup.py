@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -129,9 +130,10 @@ def test_warnings_are_plain_sentences_that_avoid_the_words_the_e2e_run_greps_for
 ENV_VARS = ["AIRLOCK_JWT_SECRET", "AIRLOCK_JWKS_URL", "AIRLOCK_JWT_ISSUER", "AIRLOCK_JWT_AUDIENCE", "AIRLOCK_TRUST_PRINCIPAL_HEADER",
             "AIRLOCK_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK", "AIRLOCK_PUBLIC_URL", "AIRLOCK_PINS"]
 GOOD_ENV = {"AIRLOCK_JWT_SECRET": KEY32, "AIRLOCK_SECRET": "s"}
+STUB_PROVIDER = SimpleNamespace(shutdown=lambda: None)
 
 
-def run_main(monkeypatch, env, *argv, seen=None):
+def run_main(monkeypatch, env, *argv, seen=None, kw_out=None):
     """main() with build, otel and uvicorn stubbed; seen records which of them ran, also when main() exits early."""
     seen = {} if seen is None else seen
     seen.update(built=False, ran=False, otel=False)
@@ -140,9 +142,9 @@ def run_main(monkeypatch, env, *argv, seen=None):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr("sys.argv", ["mcp-airlock", "--policy", "p.yaml", "--upstream", "http://x/mcp", *argv])
-    monkeypatch.setattr(cli, "build", lambda *a, **kw: seen.update(built=True) or type("A", (), {"app": None})())
+    monkeypatch.setattr(cli, "build", lambda *a, **kw: seen.update(built=True) or (kw_out is not None and kw_out.update(kw)) or type("A", (), {"app": None})())
     monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **kw: seen.update(ran=True))
-    monkeypatch.setattr(cli, "setup_otel", lambda f: seen.update(otel=True))
+    monkeypatch.setattr(cli, "setup_otel", lambda f: seen.update(otel=True) or STUB_PROVIDER)
     cli.main()
     return seen
 
@@ -212,3 +214,9 @@ def test_a_webhook_with_a_public_url_and_a_store_with_a_secret_pass_strict(monke
            "AIRLOCK_STORE_DSN": "postgresql://x"}
     assert run_main(monkeypatch, env, "--strict")["ran"]
     assert capsys.readouterr().err == ""
+
+
+def test_main_hands_the_provider_shutdown_to_the_app(monkeypatch):
+    kw = {}
+    run_main(monkeypatch, GOOD_ENV, kw_out=kw)
+    assert kw["on_shutdown"] is STUB_PROVIDER.shutdown

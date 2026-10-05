@@ -15,6 +15,7 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -124,9 +125,11 @@ class Airlock:
         max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
         max_upstream_bytes: int = DEFAULT_MAX_UPSTREAM_BYTES,
         reload_source: ReloadSource | None = None,  # None: reload() has nothing to read
+        on_shutdown: Callable[[], None] | None = None,  # runs last in the lifespan shutdown, e.g. a span flush
     ):
         self.engine = Engine(policy, store)
         self.reload_source = reload_source
+        self.on_shutdown = on_shutdown
         self.audit = audit
         self.secret = secret or secrets.token_bytes(32)  # random per process: restart voids pending confirmations
         self.approve_secret = hmac.new(self.secret, b"approve", hashlib.sha256).digest()
@@ -168,13 +171,18 @@ class Airlock:
         try:
             yield
         finally:
-            if hup is not None:
-                loop.remove_signal_handler(hup)
             try:
-                if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
-                    await self.http.aclose()
+                if hup is not None:
+                    loop.remove_signal_handler(hup)
+                try:
+                    if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
+                        await self.http.aclose()
+                finally:
+                    self.audit.close()
             finally:
-                self.audit.close()
+                # uvicorn re-raises SIGTERM after this, so atexit never runs: flush spans here, after the audit
+                if self.on_shutdown is not None:
+                    self.on_shutdown()
 
     def reload(self) -> ReloadResult:
         """Load the policy file and the pins file, then swap both in together. Nothing changes unless both load.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -100,7 +101,7 @@ def run_main(monkeypatch, argv, env=None):
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(cli, "build", lambda *a, **kw: seen.update(kw) or type("A", (), {"app": None})())
     monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **kw: seen.update(ran=True))
-    monkeypatch.setattr(cli, "setup_otel", lambda f: None)
+    monkeypatch.setattr(cli, "setup_otel", lambda f: SimpleNamespace(shutdown=lambda: None))
     cli.main()
     return seen
 

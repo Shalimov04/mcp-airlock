@@ -83,9 +83,10 @@ def main() -> None:
             psycopg_module()
         except RuntimeError as e:
             raise SystemExit(f"mcp-airlock: {e}") from None
-    setup_otel(a.otel_file)
+    provider = setup_otel(a.otel_file)
     airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
-                    audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep)
+                    audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep,
+                    on_shutdown=provider.shutdown)
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 
 
