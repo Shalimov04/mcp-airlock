@@ -85,6 +85,10 @@
   tool description) or in the arguments of an `L2` call no longer turns the response into a bare
   HTTP 500 after the upstream already acted. The answer is sent with the JSON escape, the approval
   prompt and the webhook text carry U+FFFD, and the call keeps one outcome record.
+* `NaN`, `Infinity` and numbers that overflow a double (`1e400`) in the request body are refused
+  with a parse error instead of being forwarded, written to `audit.jsonl` as non-JSON and dropped
+  by the Postgres sink. A body nested deeper than 64 levels is refused with `-32600`; one too deep
+  to parse at all is a parse error. Both used to be an unaudited bare 500.
 * `airlock-audit query` reads the rotated files too, oldest first.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.

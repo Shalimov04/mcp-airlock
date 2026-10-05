@@ -69,6 +69,7 @@ APPROVE_PAGE_HEADERS = {
 READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
 DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
+MAX_DEPTH = 64  # JSON nesting of the whole request body; far below the recursion limit of the parser and the audit
 _tracer = trace.get_tracer("mcp-airlock")
 
 
@@ -327,11 +328,17 @@ class Airlock:
         who = await self._resolve(headers)
         sub = who.sub if who else None
         try:
-            body = json.loads(raw)
-        except ValueError:
+            # NaN/Infinity are not JSON and 1e400 overflows to inf: both would be forwarded, written to the audit file
+            # as non-JSON and refused by the Postgres sink. A body nested past the interpreter's limit raises
+            # RecursionError, which is not a ValueError.
+            body = json.loads(raw, parse_constant=_no_constant, parse_float=_finite_float)
+        except (ValueError, RecursionError):
             return self._reject(None, PARSE_ERROR, "Parse error", sub, None, None)
         if not isinstance(body, dict) or "id" not in body or not isinstance(body.get("method"), str):
             return self._reject(None, INVALID_REQUEST, "Body must be a single JSON-RPC request", sub, None, None)
+        if _depth(body) > MAX_DEPTH:  # redaction and the audit write recurse over the arguments
+            rid = body["id"] if isinstance(body["id"], (str, int, float)) or body["id"] is None else None
+            return self._reject(rid, INVALID_REQUEST, f"Body nested deeper than {MAX_DEPTH} levels", sub, None, None)
         rid, method = body["id"], body["method"]
         params = body.get("params")
         tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
@@ -869,6 +876,28 @@ def _last_sse_message(text: str) -> dict[str, Any]:
             except ValueError:
                 pass
     return last or {"jsonrpc": "2.0", "id": None, "error": {"code": INTERNAL_ERROR, "message": "empty SSE response"}}
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not JSON")  # NaN, Infinity, -Infinity
+
+
+def _finite_float(text: str) -> float:
+    f = float(text)
+    if f != f or f in (float("inf"), float("-inf")):  # 1e400 parses as inf without going through parse_constant
+        raise ValueError(f"{text} does not fit a double")
+    return f
+
+
+def _depth(value: Any) -> int:
+    """Nesting depth of a decoded body, without recursion (the body may be deeper than the Python stack allows)."""
+    deepest, stack = 0, [(value, 0)]
+    while stack:
+        v, d = stack.pop()
+        if isinstance(v, (dict, list)):
+            deepest = max(deepest, d + 1)
+            stack.extend((c, d + 1) for c in (v.values() if isinstance(v, dict) else v))
+    return deepest
 
 
 def _env_limit(name: str, default: int) -> int:

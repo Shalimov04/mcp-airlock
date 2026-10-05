@@ -144,3 +144,69 @@ async def test_a_surrogate_in_l2_arguments_prompts_and_notifies(upstream, audit_
     key = res["_meta"][META + "idempotency_key"]
     assert "�" in (await al.engine.store.get_prompt(key))  # and the approve page has its text
     assert [x["verdict"] for x in audit_rows(audit_path)] == ["confirm", "confirm"]
+
+
+# ---------------------------------------------------------------- non-finite numbers (B07) and deep nesting (B17)
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e400", "-1e999"])
+async def test_non_finite_numbers_in_the_arguments_are_a_parse_error(upstream, audit_path, literal):
+    al = make_airlock(upstream, audit_path)
+    body = envelope(1, "tools/call", {"name": "get_service", "arguments": {"name": "api", "x": "PLACEHOLDER"}})
+    body = body.replace(b'"PLACEHOLDER"', literal.encode())
+    async with serving(al) as c:
+        r = await c.post("/mcp", content=body, headers=headers("tools/call", "get_service"))
+    assert r.status_code == 400 and r.json()["error"]["code"] == -32700, r.text
+    assert upstream.CALLS == []
+    rows = audit_rows(audit_path)
+    assert [x["rule_id"] for x in rows] == ["protocol.-32700"] * 2 and rows[0]["principal"] == "alice"
+    raw = audit_path.read_text()
+    assert "NaN" not in raw and "Infinity" not in raw  # the file stays RFC 8259 JSON
+    for line in raw.splitlines():
+        json.loads(line, parse_constant=pytest.fail)
+
+
+async def test_a_non_finite_id_is_a_parse_error_not_a_500(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    body = envelope(1, "tools/call", {"name": "get_service", "arguments": {"name": "api"}}).replace(b'"id": 1', b'"id": NaN')
+    assert b"NaN" in body
+    async with serving(al) as c:
+        r = await c.post("/mcp", content=body, headers=headers("tools/call", "get_service"))
+    assert r.status_code == 400 and r.json()["error"]["code"] == -32700 and r.json()["id"] is None
+    assert upstream.CALLS == []
+
+
+def nested(levels: int) -> str:
+    return "[" * levels + "1" + "]" * levels
+
+
+async def test_deeply_nested_arguments_are_refused_and_audited(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    args = '{"names": ' + nested(1500) + ', "replicas": 1}'
+    body = envelope(1, "tools/call", {"name": "set_replicas", "arguments": "ARGS"}).replace(b'"ARGS"', args.encode())
+    async with serving(al) as c:
+        r = await c.post("/mcp", content=body, headers=headers("tools/call", "set_replicas"))
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == -32600 and "nested deeper than 64" in err["message"] and r.json()["id"] == 1
+    rows = audit_rows(audit_path)
+    assert [x["phase"] for x in rows] == ["intent", "outcome"] and rows[0]["principal"] == "alice"
+    assert rows[0]["rule_id"] == "protocol.-32600" and rows[0]["args"] is None
+    assert upstream.CALLS == []
+
+
+async def test_a_body_too_deep_to_parse_is_a_parse_error_even_without_a_principal(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    async with serving(al) as c:
+        r = await c.post("/mcp", content=nested(100_000).encode(), headers=headers("tools/call", "x", principal=None))
+    assert r.status_code == 400 and r.json()["error"]["code"] == -32700, r.text
+    rows = audit_rows(audit_path)
+    assert [x["rule_id"] for x in rows] == ["protocol.-32700"] * 2 and rows[0]["principal"] is None
+
+
+async def test_moderate_nesting_still_passes(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    deep: dict = {"name": "api"}
+    for _ in range(40):  # 40 levels inside the arguments, under the 64 for the whole body
+        deep = {"inner": deep}
+    async with serving(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api", "tree": deep}})
+    assert r.status_code == 200 and r.json()["result"]["isError"] is False, r.text

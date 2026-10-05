@@ -677,6 +677,11 @@ The upstream call has a 60 second timeout. Upstream responses arriving as SSE ar
 final message; progress notifications are dropped. The catalog is read in at most 10 pages.
 Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
 
+The request body must be strict JSON: `NaN`, `Infinity` and a number that does not fit a double
+(`1e400`) are refused with a parse error (`-32700`), since they are not JSON and the Postgres sink
+would drop the record. A body nested deeper than 64 levels is refused with `-32600`. Both are
+audited as `protocol.<code>` denials.
+
 There is no rate limit on prompting. An agent that keeps re-sending an `L2` call gets a new
 prompt, and a new webhook message, each time.
 
