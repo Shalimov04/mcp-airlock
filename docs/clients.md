@@ -12,9 +12,10 @@ export AIRLOCK_TRUST_PRINCIPAL_HEADER=1
 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env dev
 ```
 
-Only do that on a machine where nobody else can reach port 9000. Anywhere shared, leave the
-variable unset and give the client a bearer JWT instead (`AIRLOCK_JWT_SECRET` or
-`AIRLOCK_JWKS_URL` on the proxy side, see the README).
+The proxy listens on `127.0.0.1` unless you pass `--host`. Only do that on a machine where
+nobody else can reach port 9000. Anywhere shared, leave the variable unset and give the client
+a bearer JWT instead (`AIRLOCK_JWT_SECRET` or `AIRLOCK_JWKS_URL` on the proxy side, see the
+README's "Environment variables" table).
 
 ## Claude Code
 
@@ -43,7 +44,9 @@ Code treats an entry with a `url` and no `type` as a misconfigured stdio server:
 `claude mcp get github-airlocked` shows whether it connected. `tools/list` through the
 proxy only returns tools that are in the policy and, with a pins file, whose definition
 still matches its pin (audited as `catalog.pin_mismatch`), so a tool the agent "cannot
-see" is a policy question, not a connection problem.
+see" is a policy question, not a connection problem. The answer's `_meta` says how many
+tools were hidden (`io.mcp-airlock/hidden_tools`) and how many failed their pin
+(`io.mcp-airlock/pin_mismatch`).
 
 ## Cursor
 
@@ -76,14 +79,15 @@ list.
 
 That last point is the one to check before relying on `L2`. The table below records which
 clients have been tested; for a client not listed, call an `L2` tool and see whether you get
-asked. If the client ignores `input_required`, the model
-just sees an unusual result and cannot complete the call; in that case keep such tools at
-`L3` with a small blast radius, or at `L1`, until the client catches up. Out-of-band
-approval through Slack or Telegram does not remove the need to repeat the call: the agent
-still has to repeat it with `requestState` after the button is pressed. With a webhook
-configured the proxy runs in `oob` mode by default, so accepting the prompt in the client
-does not approve anything; the client shows the prompt, and the person approves through the
-link. Set `AIRLOCK_APPROVAL_MODE=inband` if you want the client's accept to approve.
+asked. If the client ignores `input_required`, the model just sees an unusual result and
+cannot complete the call; in that case keep such tools at `L3` with a small blast radius, or
+at `L1`, until the client catches up. Out-of-band approval through Slack or Telegram does not
+remove the need to repeat the call: the agent still has to repeat it with `requestState`
+after the button is pressed. With a webhook configured the proxy runs in `oob` mode by
+default, so accepting the prompt in the client does not approve anything; the client shows
+the prompt, and the person approves through the link. Set `AIRLOCK_APPROVAL_MODE=inband` if
+you want the client's accept to approve. The README section "Confirmations in detail" has
+the rest.
 
 ## Which clients handle the confirmation
 
