@@ -43,6 +43,44 @@ Refusals come back as tool results with `isError: true`, not as protocol errors,
 model sees why and can do something else. Every result carries the verdict and the rule
 that produced it in `_meta`.
 
+The proxy accepts three methods: `tools/call` as above, `tools/list` and `server/discover`.
+A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of
+hidden tools is in `_meta["io.mcp-airlock/hidden_tools"]`), then checked against the
+[pins](#pinning-tool-descriptions) and scanned for injection phrases. Any other method is
+refused with `METHOD_NOT_FOUND`.
+
+## Installing
+
+From PyPI, as a tool or a package:
+
+```
+uvx mcp-airlock --help
+pip install mcp-airlock
+```
+
+Two features are extras, so the base install stays small:
+
+| Extra | Brings | Needed for |
+|---|---|---|
+| `postgres` | psycopg, psycopg-pool | `AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit query --dsn` |
+| `otlp` | the OTLP HTTP span exporter | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` |
+
+```
+uvx --from 'mcp-airlock[postgres,otlp]' mcp-airlock ...
+pip install 'mcp-airlock[postgres,otlp]'
+```
+
+A DSN without the `postgres` extra stops the proxy at startup with that hint. An OTLP
+endpoint without the `otlp` extra is a startup warning (an error under `--strict`) and the
+proxy runs without exporting.
+
+The container image `ghcr.io/shalimov04/mcp-airlock` includes both extras. It listens on
+`0.0.0.0:9000`, runs as a non-root user and has `/data` as its working directory, so
+`audit.jsonl` lands there. Each release is tagged with its version and its major.minor
+(`X.Y.Z` and `X.Y`).
+
+From a checkout, `uv sync --all-extras` installs everything including the test tools.
+
 ## Running it
 
 The released version, no clone needed:
@@ -51,34 +89,24 @@ The released version, no clone needed:
 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
 ```
 
-Postgres support (`AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit --dsn`) is an extra (it
-brings psycopg and psycopg-pool):
-`uvx --from 'mcp-airlock[postgres]' mcp-airlock ...` or `pip install 'mcp-airlock[postgres]'`. Without
-it a DSN makes the proxy exit at startup with that hint. The container image includes it.
-
-OTLP span export is the `otlp` extra: `uvx --from 'mcp-airlock[otlp]' mcp-airlock ...` or
-`pip install 'mcp-airlock[otlp]'`. Extras combine: `mcp-airlock[postgres,otlp]`. The container
-image includes it. Without it an OTLP endpoint gives a startup warning and the proxy runs
-without exporting.
-
-The same as a container. The image listens on `0.0.0.0:9000`, runs as a non-root user and
-writes `audit.jsonl` into `/data`:
+The same as a container:
 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
-  ghcr.io/shalimov04/mcp-airlock:0.2 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
+  ghcr.io/shalimov04/mcp-airlock:0.3 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
-The image has a `HEALTHCHECK` that asks `http://127.0.0.1:9000/healthz` with python every 30 seconds
-(the image has no curl). If you pass `--port`, or a `--host` bound to a specific non-loopback address, override it with
-`--health-cmd` or a compose `healthcheck:`. The start interval needs Docker Engine 25+ (older ones
-ignore it). Kubernetes ignores the check: point a liveness probe at `/healthz` and a readiness probe
-at `/readyz`.
+The image has a `HEALTHCHECK` that asks `http://127.0.0.1:9000/healthz` with python every 30
+seconds (the image has no curl), ignoring any `HTTP_PROXY`. If you pass `--port`, or a `--host`
+bound to a specific non-loopback address, override it with `--health-cmd` or a compose
+`healthcheck:`. Its `--start-interval` needs Docker Engine 25+ (older ones ignore it).
+Kubernetes ignores the check: point a liveness probe at `/healthz` and a readiness probe at
+`/readyz`, as the [Helm chart](#in-kubernetes) does.
 
 From a checkout:
 
 ```
-uv sync
+uv sync --all-extras
 uv run pytest
 uv run python demo.py
 ```
@@ -107,28 +135,39 @@ uv run mcp-airlock --policy policy.example.yaml --env prod \
     --upstream http://127.0.0.1:9001/mcp --audit audit.jsonl
 ```
 
-There are ready-made policies for the GitHub, Grafana and Kubernetes MCP servers in
-`examples/policies/`. They were written against the servers' source at a pinned commit,
-so check them against your actual server before trusting them:
+There are ready-made policies for the GitHub, Grafana, Kubernetes and Postgres MCP servers in
+`examples/policies/`. They were written against the servers' source at a pinned commit, so
+check them against your actual server before trusting them:
 
 ```
 uv run airlock-policy lint examples/policies/github.yaml
 uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0.0.1:8080/mcp --env prod
 ```
 
-`diff` tells you which tools the server has that the policy doesn't mention, which policy
-entries the server no longer has, and which L1/L2 tools have no `dry_run` argument.
+`lint` needs no network. It reports a tool without tiers (`no_tiers`, an error), a write tool
+without a description (`no_description`), a `count_arg` that relies on the global blast radius
+(`blast_radius_default`), a `where` rule for an environment no tier mentions
+(`where_env_unknown`) and an environment no tool covers (`env_unused`); `--env` adds
+environments that must be covered. `diff` asks the server itself (not the proxy, which hides
+unlisted tools) for `tools/list` and tells you which allowlisted tools the server no longer has
+(`missing_upstream`, an error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`),
+which `where` rules name an argument that is not in the schema (`where_unknown_arg`) and which
+server tools the policy does not mention (`not_allowlisted`). With `--pins` it also checks the
+[pins](#pinning-tool-descriptions). Both exit 1 when any finding is an error.
 
 ### In Kubernetes
 
 There is a small Helm chart in `charts/mcp-airlock/` (Deployment, Service, a ConfigMap for the
-policy). There is no chart repository, so install it from a checkout:
+policy, a Secret for the keys, probes on `/healthz` and `/readyz`, a hardened security
+context). There is no chart repository, so install it from a checkout:
 
 ```
 helm install airlock charts/mcp-airlock \
   --set upstream=http://my-mcp-server:8080/mcp --set environment=prod \
   --set-file policy=policy.yaml
 ```
+
+The values are documented in `charts/mcp-airlock/values.yaml`. The points that matter:
 
 * **Identity.** By default the chart creates a Secret with a random `AIRLOCK_JWT_SECRET` and keeps
   it across upgrades. Read it with
@@ -143,65 +182,113 @@ helm install airlock charts/mcp-airlock \
   `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN` and the JWT secret; the chart refuses them in
   `env`. Do not put credentials in the `upstream` URL either, they end up in the pod spec.
 * **More than one replica.** Create a Secret with `AIRLOCK_STORE_DSN` and `AIRLOCK_SECRET`, then
-  `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. `AIRLOCK_SECRET` is
-  only set together with the shared store: a fixed key with per-process memory would let a used
-  confirmation run again after a restart.
+  `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. The chart refuses
+  more replicas without `sharedStore`. `AIRLOCK_SECRET` is only set together with the shared
+  store: a fixed key with per-process memory would let a used confirmation run again after a
+  restart. See [Postgres](#postgres) for the pool and the timeouts.
 * **Audit.** `/data` is an emptyDir, so `audit.jsonl` goes with the pod. Set `AIRLOCK_AUDIT_DSN`, or
   point `dataVolume` at a `persistentVolumeClaim` (and set `dataVolume.emptyDir=null`, Helm merges
   maps), to keep it. A persistent `dataVolume` switches the Deployment to `Recreate` (two pods on
   one file would fork the audit hash chain, and `airlock-audit verify` would report `prev
   mismatch`) and the chart refuses it with `replicaCount` above 1. With several replicas use an
   emptyDir and `AIRLOCK_AUDIT_DSN`; the hash chain is per pod, so the `airlock_audit` table holds
-  one interleaved chain per pod. Rotation goes in `extraArgs`.
+  one interleaved chain per pod. Rotation flags go in `extraArgs`.
 * **Policy changes.** A new policy rolls the pods; SIGHUP reload is not used here.
-* **Strictness.** `strict` is on, so any startup warning stops the pod. The log says why.
-* **Approve page.** `/approve` is on the same Service, so put it behind SSO, as the Confirmations
-  section says.
+* **Strictness.** `strict` is on, so any [startup warning](#startup-warnings) stops the pod. The
+  log says why.
+* **Approve page.** `/approve` is on the same Service, so put it behind SSO, as the
+  [Confirmations](#confirmations-in-detail) section says.
+* **Tracing.** Set `env.OTEL_EXPORTER_OTLP_ENDPOINT` to export spans; the image has the extra.
+  `OTEL_EXPORTER_OTLP_HEADERS` is a credential and belongs in a Secret you mount yourself.
 * **GitOps.** Argo CD and other `helm template` based tools do not run `lookup`, so the generated
   key would change on every render. Use `existingSecret` there.
 
-### Configuration
+## Configuration
 
-Everything is environment variables. None are required for a single-process setup.
+### Flags
+
+`mcp-airlock` takes these flags. Only `--policy` and `--upstream` are required.
+
+| Flag | What it does |
+|---|---|
+| `--policy PATH` | The policy file. Required. |
+| `--upstream URL` | The MCP endpoint of the server behind the proxy. Required. |
+| `--env NAME` | Environment name, picks the tier column. Overrides `AIRLOCK_ENV` and the policy's own `environment`. |
+| `--audit PATH` | The JSONL audit file. Default `audit.jsonl` in the working directory. |
+| `--audit-max-bytes N` | Rotate the audit file before a write would take it past `N` bytes. `0` or unset: never. |
+| `--audit-keep N` | Rotated audit files to keep. Default `5`, at least `1`. |
+| `--otel-file PATH` | Append spans as JSON to this file. The same as `AIRLOCK_OTEL_FILE`. |
+| `--pins PATH` | Tool pins file written by `airlock-policy pin`. The same as `AIRLOCK_PINS`. |
+| `--strict` | Exit with status 2 if the configuration has any startup warning. |
+| `--host ADDR` | Listen address. Default `127.0.0.1`; the container image passes `0.0.0.0`. |
+| `--port N` | Listen port. Default `9000`. |
+
+### Environment variables
+
+Everything else is environment variables. None are required for a single-process setup.
 
 | Variable | What it does |
 |---|---|
-| `AIRLOCK_ENV` | Environment name, picks the tier column in the policy. `--env` does the same. |
-| `AIRLOCK_JWT_SECRET` | Verify bearer tokens with HS256. `sub` becomes the principal, `groups` the groups. |
-| `AIRLOCK_JWKS_URL`, `AIRLOCK_JWT_ISSUER`, `AIRLOCK_JWT_AUDIENCE` | Verify bearer tokens against an OIDC provider (RS256/ES256). Takes precedence over the shared secret. Set the audience; without it any token from that provider is accepted. |
-| `AIRLOCK_GROUPS_CLAIM` | Claim to read groups from. Default `groups`. |
-| `AIRLOCK_TRUST_PRINCIPAL_HEADER` | Set to `1` to accept `X-Airlock-Principal` and `X-Airlock-Groups`. Off by default. Only turn it on behind a gateway that sets those headers itself and strips them from clients. |
+| `AIRLOCK_ENV` | Environment name, picks the tier column in the policy. Overrides the policy's `environment`; `--env` overrides both. |
+| `AIRLOCK_JWT_SECRET` | Verify bearer tokens with HS256. `sub` becomes the principal, `groups` the groups. `exp` and `sub` are required claims. |
+| `AIRLOCK_JWKS_URL`, `AIRLOCK_JWT_ISSUER`, `AIRLOCK_JWT_AUDIENCE` | Verify bearer tokens against an OIDC provider (RS256/ES256). Takes precedence over the shared secret. Set the audience; without it any token from that provider is accepted. The issuer is checked only when set. |
+| `AIRLOCK_GROUPS_CLAIM` | Claim to read groups from. Default `groups`. A list, or a string split on commas and spaces. |
+| `AIRLOCK_TRUST_PRINCIPAL_HEADER` | Set to `1` to accept `X-Airlock-Principal` and `X-Airlock-Groups` (comma or space separated). Off by default. Only turn it on behind a gateway that sets those headers itself and strips them from clients. A bearer token that fails verification never falls back to the header. |
 | `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it if you run more than one replica. |
-| `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. |
-| `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. |
-| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink. Default `10`. Added to the DSN only when neither the DSN nor `PGCONNECT_TIMEOUT` sets one. It applies to each connection attempt (every host of a multi-host DSN). libpq rounds values below 2 up to 2. It is also the longest a store call waits for a pooled connection, and it sets `tcp_user_timeout` (in ms). TCP keepalives (idle 10 s, interval 5 s, 3 probes) are added too. Each key is added only when the DSN does not set it, and none when it uses `service=`. Must be an integer from 1 to 86400. |
-| `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. Calls beyond it wait for a free connection, up to the connect timeout. Replicas times this size must fit the server's `max_connections`. Must be a positive integer. |
-| `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
+| `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. Needs the `postgres` extra. |
+| `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. Needs the `postgres` extra. |
+| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
+| `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. A positive integer. See [Postgres](#postgres). |
+| `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `https://api.telegram.org/bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
 | `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
+| `AIRLOCK_OTEL_FILE` | Path of the span file, the same as `--otel-file`. |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
-| `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. Must be a positive integer. |
-| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. Must be a positive integer. |
+| `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. A positive integer. |
+| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. A positive integer. |
+| `PGCONNECT_TIMEOUT` | libpq's own connect timeout. When set, the proxy adds no `connect_timeout` of its own to the DSNs. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Turn on OTLP span export over HTTP/protobuf (needs the `otlp` extra). The base URL gets `/v1/traces` appended; the traces URL is used as it is. Only http/protobuf is supported and `OTEL_EXPORTER_OTLP_PROTOCOL` is not read: point it at the collector's HTTP port (4318), not gRPC (4317). |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Headers for the export request, for example `authorization=Bearer <token>`. Treat it as a secret. |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Resource of the spans. `service.name` defaults to `mcp-airlock`. |
 
-The SDK reads the other standard variables too: the rest of `OTEL_EXPORTER_OTLP_*` (timeout,
-compression, certificate) and `OTEL_BSP_*` (batching).
+The OpenTelemetry SDK reads the other standard variables too: the rest of
+`OTEL_EXPORTER_OTLP_*` (timeout, compression, certificate) and `OTEL_BSP_*` (batching). See
+[Tracing](#tracing).
+
+A bad value (a limit that is not a positive integer, a DSN that does not parse, an unknown
+approval mode, a policy that fails validation, an invalid pins file) stops the start with an
+error message on stderr and exit status 1.
+
+### Startup warnings
 
 At startup the proxy prints a warning to stderr for each of these:
 
 - no identity is configured (no JWT secret, no JWKS URL, no trusted header): every call gets 401
 - `AIRLOCK_JWKS_URL` without `AIRLOCK_JWT_AUDIENCE`
 - `AIRLOCK_JWT_SECRET` shorter than 32 bytes
-- `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without `Authorization` is trusted on the header alone
+- `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without
+  `Authorization` is trusted on the header alone
 - `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
-- `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the approve link
+- `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the
+  approve link
 - an OTLP endpoint without the `otlp` extra: spans are not exported
 
 With `--strict` any warning stops the start with exit code 2.
+
+### Endpoints
+
+| Path | What it does |
+|---|---|
+| `POST /mcp` | The MCP endpoint the client talks to. |
+| `GET /healthz` | `{"status":"ok"}` while the process is up. |
+| `GET /readyz` | 200 `{"status":"ok"}` when the store responds, 503 `{"status":"unavailable"}` on an error or after 2 seconds. With the memory store it is always 200. |
+| `GET /approve/<token>` | The approve page for an out-of-band confirmation. Renders only. |
+| `POST /approve/<token>` | Records the approval. |
+
+The probes need no credentials, write no audit record and never call the upstream; `/readyz`
+checks the store only. Use `/healthz` for liveness: a store outage must not restart the pods.
 
 ## The policy file
 
@@ -228,7 +315,9 @@ tools:
 
 A tier is resolved in this order: an entry for the exact principal, then the first matching
 group in the order the token lists them, then `tiers[environment]`. The `description` is what
-the person approving the call gets to read, so write it for them.
+the person approving the call gets to read, so write it for them. `output` and `blast_radius`
+on a tool replace the top-level values for that tool; `window_s` is at most 86400 (a day), as
+far back as the store keeps usage. Unknown keys are a load error.
 
 `where` limits a tool by argument values. Every rule that applies must hold, otherwise the call is
 denied with `args.violation`. The check runs right after the allowlist, before the tier and the
@@ -253,12 +342,14 @@ it before it validates it. For the same reason `not_in` also denies a value whos
 the listed values (`3` against `[kube-system]`). A regex runs in the request path on every call, so
 avoid nested repetition.
 
-Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`, `args.violation`,
-`tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`, `tier.L2.dry_run`,
-`tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`, `dry_run.unsupported`,
-`catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `mrtr.pending`, `mrtr.declined`, `mrtr.replay`,
-`mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
-`request.too_large`, `upstream.too_large`, `internal.error`.
+Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
+`args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
+`tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`,
+`dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`,
+`protocol.<code>`, `passthrough` (a `tools/list` or `server/discover`), `mrtr.pending`,
+`mrtr.declined`, `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`,
+`mrtr.approved_oob`, `mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`,
+`internal.error`.
 
 `SIGHUP` reloads the policy file and, if one is configured, the pins file, as one pair. A file
 that does not load keeps the current policy and pins, and the error is logged. The environment
@@ -297,8 +388,8 @@ polling with `InputRequiredRoundsExceededError`. Catch it and retry later with t
 `requestState`.
 
 In `oob` mode an in-band `accept` leaves the call `pending` and the audit record says the
-accept was ignored; a decline still burns the key.
-The mode travels in the token: an `oob` token or an `oob` replica ignores the in-band `accept`.
+accept was ignored; a decline still burns the key. The mode travels in the token: an `oob`
+token or an `oob` replica ignores the in-band `accept`.
 
 A failed webhook post is logged as the exception class and the HTTP status, never the URL,
 which holds the Telegram bot token or the Slack secret path. In `oob` mode a failed post
@@ -309,22 +400,25 @@ keep the `httpx` logger at `WARNING`.
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
 `X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as
-unverified unless it came from a bearer token the proxy could check. The page shows the
-redacted arguments and the dry-run preview, kept in the store until the prompt expires.
-
-`GET /healthz` answers `{"status":"ok"}` while the process is up. `GET /readyz` answers 200
-`{"status":"ok"}` when the store responds and 503 `{"status":"unavailable"}` after 2 seconds
-or on an error. Neither needs credentials, writes an audit record or calls the upstream;
-`/readyz` checks the store only.
+unverified unless it came from a bearer token the proxy could check. The page shows the prompt
+text (the redacted arguments and up to 2000 characters of the dry-run preview), cut at 8000
+characters with a note, kept in the store until the prompt expires. The approval itself is
+audited with `method: approve` and rule `mrtr.approved_oob`.
 
 ## Audit
 
 Two JSON lines per call, with a shared `call_id`:
 
 ```json
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"0000…","hash":"a3f1c0de…"}
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8…","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a…","detail":null,"prev":"a3f1c0de…","hash":"9b27e4d1…"}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8...","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a...","detail":null,"prev":"0000...","hash":"a3f1c0de..."}
+{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8...","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a...","detail":null,"prev":"a3f1c0de...","hash":"9b27e4d1..."}
 ```
+
+The fields, in the order written: `ts` (UTC, milliseconds), `phase` (`intent` before the
+upstream call, `outcome` after), `call_id`, `principal`, `method`, `tool`, `args` (redacted),
+`verdict` (`allow`, `deny`, `confirm` or `error`), `rule_id`, `tier`, `dry_run` (the value
+forwarded, `null` when the argument was left alone), `latency_ms`, `upstream_status`,
+`trace_id`, `detail`, `prev` and `hash`.
 
 `prev` is the `hash` of the previous record (64 zeros for the first record written into an
 empty audit file) and `hash` is the sha256 of the record's canonical JSON without `hash`
@@ -334,19 +428,24 @@ values in `rec`.
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
 `sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
-approvers, including the dry-run preview. `detail` holds
-the output-cap numbers and the injection rules that fired, when any did. Free text in
-`detail` is scrubbed the same way as the arguments.
+approvers, including the dry-run preview. `detail` holds the output-cap numbers and the
+injection rules that fired, when any did. Free text in `detail` is scrubbed the same way as
+the arguments. A lone surrogate in client text (JSON allows `"\ud800"`) is stored as U+FFFD.
 
 To read the log:
 
 ```
 uv run airlock-audit query --since 2h --verdict deny
 uv run airlock-audit query --principal alice --tool delete_service
+uv run airlock-audit query --rule tier.L2.confirmed --phase outcome --limit 20
 uv run airlock-audit query --stats
 ```
 
-The same commands work against Postgres with `--dsn` or `AIRLOCK_AUDIT_DSN`.
+`query` reads `audit.jsonl` and its rotated files, oldest first, and prints matching records
+as JSONL, newest last. `--jsonl` names another file. The filters are `--principal`, `--tool`,
+`--verdict`, `--rule`, `--phase` (`intent` or `outcome`) and `--since` (`30m`, `2h`, `7d` or an
+ISO 8601 time); `--limit` keeps the newest N; `--stats` prints counts by verdict and rule
+instead. The same filters work against Postgres with `--dsn` or `AIRLOCK_AUDIT_DSN`.
 
 The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
 it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and
@@ -363,28 +462,77 @@ uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
 ```
 
 With no files it reads `audit.jsonl` and its rotated files; given files must be oldest first.
-`verify` only reads the files, it never writes to them. On success it prints `OK: 812 records in 3 files, chain from <first prev> to <last hash>` and
-exits 0. At the first break it prints `BREAK: audit.jsonl.1:57: hash mismatch` and exits 1.
-The reason is `hash mismatch` (a line was edited), `prev mismatch` (a line was deleted or
-moved), `not JSON` or `missing hash`. Lines from before the chain existed are skipped and
-counted as `unchained records skipped`. The first record of the oldest file is checked only
-against its own hash.
+`verify` only reads the files, it never writes to them. On success it prints
+`OK: 812 records in 3 files, chain from <first prev> to <last hash>` and exits 0. At the first
+break it prints `BREAK: audit.jsonl.1:57: hash mismatch` and exits 1. The reason is
+`hash mismatch` (a line was edited), `prev mismatch` (a line was deleted or moved), `not JSON`
+or `missing hash`. Lines from before the chain existed are skipped and counted as
+`unchained records skipped`. The first record of the oldest file is checked only against its
+own hash.
 
 An edited, deleted or reordered line is caught. A truncated tail is not, and neither is the
 newest record of the newest file (it can be edited and re-hashed with nothing after it to
 check) or a file rewritten from start to end with a consistent chain: the last hash is not
 anchored anywhere outside the host, so these are only protected by anchoring it externally.
 
-Each request also produces one OpenTelemetry span named `execute_tool <tool>` with the
-`gen_ai.*` attributes, the principal and the verdict. An incoming `traceparent` (header or
-`_meta`) is continued and a new one is put into the upstream `_meta`, so the audit's
-`trace_id` matches what the upstream sees. Spans go to a file with `--otel-file`, to an
-OTLP collector when `OTEL_EXPORTER_OTLP_ENDPOINT` (or the traces variant) is set, or to both.
-Export is batched (5 seconds by default). On SIGTERM the queue is flushed before the process
-exits, which can take up to the exporter timeout if the collector is down
+## Tracing
+
+Each proxied request produces one OpenTelemetry span: `execute_tool <tool>` for a `tools/call`,
+the method name otherwise. A request rejected before that (a parse error, an oversized body, a
+method the proxy does not forward) produces none. The span carries the `gen_ai.*` attributes
+(`gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`), `rpc.method` and the
+principal as `enduser.id`; a `tools/call` span also carries the verdict, the rule and the tier
+as `airlock.*`, and the number of injection findings. Never the arguments. An incoming
+`traceparent` (header or `_meta`) is continued and a new one is put into the upstream `_meta`,
+so the audit's `trace_id` matches what the upstream sees.
+
+Spans go to a file with `--otel-file` (or `AIRLOCK_OTEL_FILE`), to an OTLP collector when
+`OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, or to both. The
+file is written span by span; the collector export is batched (5 seconds by default) and needs
+the `otlp` extra, which the container image has. On SIGTERM the queue is flushed before the
+process exits, which can take up to the exporter timeout if the collector is down
 (`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT`, 10 by default). The
 Python exporter reads it in seconds, although the OpenTelemetry spec says milliseconds, so do
 not set 10000. Keep the termination grace period longer than the timeout.
+
+With OTLP the spans leave the host, so use an `https` endpoint when the collector is not on the
+same machine, and treat `OTEL_EXPORTER_OTLP_HEADERS` as a secret. Telemetry is best effort: a
+down collector or a full queue drops spans and never blocks a call or changes a verdict. The
+audit log is the record.
+
+## Postgres
+
+The MCP side is stateless, the governance side is not. Used confirmation keys, approvals, the
+approve-page text and blast-radius counters have to live somewhere shared if you run more than
+one replica; that is what `AIRLOCK_STORE_DSN` is for. `AIRLOCK_AUDIT_DSN` adds a Postgres sink
+for the audit log next to the file. Both need the `postgres` extra and may point at the same
+database. The tables (`airlock_keys`, `airlock_prompts`, `airlock_usage`, `airlock_audit`) are
+created on first use.
+
+The store keeps a small connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on
+first use and closes at shutdown. Replicas times the pool size must fit the server's
+`max_connections`. Pooled connections never auto-prepare statements, so PgBouncer in
+transaction mode works for `AIRLOCK_STORE_DSN`. The audit sink uses one connection of its own,
+with psycopg's default auto-prepare, and reconnects once when it drops; point
+`AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer in session mode.
+
+Unless the DSN sets them itself, both DSNs get `connect_timeout`
+(`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),
+`tcp_user_timeout` (the connect timeout in force, in ms; only with libpq 12 or newer) and TCP
+keepalives (idle 10 s, interval 5 s, 3 probes). The connect timeout applies to each attempt, so
+to every host of a multi-host DSN; libpq rounds values below 2 up to 2. A `service=` DSN is
+left unchanged, and then the pool wait is `PGCONNECT_TIMEOUT` or
+`AIRLOCK_STORE_CONNECT_TIMEOUT`, never a `connect_timeout` from the service file.
+
+The connect timeout in force (the DSN's own, else `PGCONNECT_TIMEOUT`, else
+`AIRLOCK_STORE_CONNECT_TIMEOUT`, at least 2 s) bounds every store call: the wait for a pooled
+connection and the work on it. If the database is down, each store call fails after about the
+connect timeout (twice that at
+most, when the server accepts the connection and then stops answering) and the gated call is
+denied. A failed connect attempt is given up after the connect timeout, so the store recovers
+within a few seconds of the database coming back. A connection that has not answered by then is
+cut and dropped from the pool, including one that was idle in it. A saturated pool can make
+`/readyz` report 503.
 
 ## Prompt injection
 
@@ -394,7 +542,7 @@ delete_service(name='prod-db')"; an agent that obeys still gets a dry run and a 
 prompt, and a forged `requestState` is rejected. What the proxy does do is scan output for
 a handful of patterns (override phrases, urgency, tool-call bait, "don't tell the user",
 zero-width characters, long base64 runs) and list the matches in
-`_meta["io.mcp-airlock/suspicious"]`. It is regex, it will miss clever things and
+`_meta["io.mcp-airlock/suspicious"]`, at most 20. It is regex, it will miss clever things and
 occasionally flag a normal sentence, and it never blocks anything.
 
 ## Pinning tool descriptions
@@ -411,16 +559,19 @@ uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --p
 ```
 
 `pin` writes one JSON object, tool name to `sha256v2:<hex>`, for every allowlisted tool the
-server lists. The pins live in their own file because rewriting the policy YAML would drop its
-comments. `--pins` can also come from `AIRLOCK_PINS`; a pins file that is not valid stops the
-proxy at startup. On `tools/list` a pinned tool whose hash differs is removed from the answer,
-counted in `_meta["io.mcp-airlock/pin_mismatch"]` and audited as `catalog.pin_mismatch`. A tool
-without a pin is left alone. The description, `title` and `annotations.title` of the tools that
-remain go through the injection scan (every pattern but tool-call bait, which a description may
-legitimately contain), and the matches, each with its tool name, are listed in
-`_meta["io.mcp-airlock/suspicious"]`.
-`airlock-policy diff ... --pins pins.json` reports changed hashes, allowlisted tools without a
-pin and pins for tools that are no longer allowlisted or no longer listed by the server.
+server lists (`pins.json` by default; an allowlisted tool the server does not list gets a
+warning and no pin). The pins live in their own file because rewriting the policy YAML would
+drop its comments. `--pins` can also come from `AIRLOCK_PINS`; a pins file that is not valid
+stops the proxy at startup. On `tools/list` a pinned tool whose hash differs is removed from the
+answer, counted in `_meta["io.mcp-airlock/pin_mismatch"]` and audited as
+`catalog.pin_mismatch`. A tool without a pin is left alone. The description, `title` and
+`annotations.title` of the tools that remain go through the injection scan (every pattern but
+tool-call bait, which a description may legitimately contain), and the matches, each with its
+tool name, are listed in `_meta["io.mcp-airlock/suspicious"]`.
+
+`airlock-policy diff ... --pins pins.json` reports changed hashes (`pin_mismatch`, an error),
+allowlisted tools without a pin (`no_pin`) and pins for tools that are no longer allowlisted or
+no longer listed by the server (`stale_pin`).
 
 Pins written by 0.3.0 or earlier start with `sha256:` and do not cover the title. Such a file
 is refused as a whole: `mcp-airlock` stops at startup with one message (a `SIGHUP` reload keeps
@@ -431,23 +582,6 @@ A call to a pinned tool is still decided by the policy: the model only learns a 
 from `tools/list`, and gated tools already re-read the schema.
 
 ## Things to know before running it in anger
-
-Spans carry the principal (`enduser.id`), the tool name, the call id, the verdict and the
-rule, never the arguments. With OTLP they leave the host, so use an `https` endpoint when the
-collector is not on the same machine. Telemetry is best effort: a down collector or a full
-queue drops spans and never blocks a call or changes a verdict. The audit log is the record.
-
-The MCP side is stateless, the governance side is not. Used confirmation keys, approvals
-and blast-radius counters have to live somewhere shared if you run more than one replica;
-that is what `AIRLOCK_STORE_DSN` is for. The Postgres store keeps a small connection pool
-(`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on first use and closes at shutdown. If the
-database is down, each store call fails after about the connect timeout (twice that at most, when
-the server accepts the connection and then stops answering) and the gated call is denied. A failed
-connect attempt is given up after the connect timeout, so the store recovers within a few seconds of
-the database coming back. A connection that has not answered by then is cut and dropped from the pool,
-including one that was idle in it. With a `service=` DSN the wait is `PGCONNECT_TIMEOUT` or
-`AIRLOCK_STORE_CONNECT_TIMEOUT` (default 10 s), never a `connect_timeout` in the service file.
-A saturated pool can make `/readyz` report 503.
 
 Forced dry run only helps if the tool actually honours `dry_run`. The proxy checks that the
 argument is declared, it cannot check that the implementation respects it. Test that
@@ -471,13 +605,14 @@ Output capping works on the serialized result. Over the cap, text blocks are tri
 `structuredContent` and non-text blocks are dropped. The token estimate is `chars / 4`. A result
 that had `structuredContent` comes back with `isError: true`, because it no longer matches the
 tool's `outputSchema` and SDK clients refuse non-error results that don't. The text says the
-call itself ran, so an agent does not repeat a write because its output was too long.
-An upstream answer over `AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it
-comes back as an error that says the call ran (or that only its dry run did), with rule
-`upstream.too_large`.
+call itself ran, so an agent does not repeat a write because its output was too long, and the
+numbers are in `_meta["io.mcp-airlock/output"]`. An upstream answer over
+`AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it comes back as an error
+that says the call ran (or that only its dry run did), with rule `upstream.too_large`.
 
-Upstream responses arriving as SSE are reduced to the final message; progress
-notifications are dropped. Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
+The upstream call has a 60 second timeout. Upstream responses arriving as SSE are reduced to the
+final message; progress notifications are dropped. The catalog is read in at most 10 pages.
+Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
 
 There is no rate limit on prompting. An agent that keeps re-sending an `L2` call gets a new
 prompt, and a new webhook message, each time.
@@ -497,9 +632,10 @@ The postgres and grafana stacks also run nightly and on demand in the `e2e` work
 ## Layout
 
 ```
-src/mcp_airlock/app.py         the proxy itself and the /approve pages
-src/mcp_airlock/policy.py      policy model, tier resolution, decisions
-src/mcp_airlock/store.py       memory and Postgres stores for keys, approvals, counters
+src/mcp_airlock/app.py         the proxy itself, the probes and the /approve pages
+src/mcp_airlock/policy.py      policy model, tier resolution, where rules, decisions
+src/mcp_airlock/store.py       memory and Postgres stores for keys, approvals, prompts, counters
+src/mcp_airlock/pg.py          optional psycopg import, DSN timeouts and keepalives
 src/mcp_airlock/identity.py    JWT / JWKS / header principal resolution
 src/mcp_airlock/guard.py       injection marking
 src/mcp_airlock/approvals.py   Slack / Telegram notifications
@@ -507,21 +643,24 @@ src/mcp_airlock/audit.py       JSONL and Postgres audit sinks, redaction, rotati
 src/mcp_airlock/audit_cli.py   airlock-audit query / verify
 src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        tool pins: hash, pins file loader
-src/mcp_airlock/startup.py      startup warnings and --strict
+src/mcp_airlock/startup.py     startup warnings and --strict
+src/mcp_airlock/__main__.py    the mcp-airlock command: flags, OTLP setup
 tests/fake_upstream.py         the fake server the tests and demo run against
 docs/clients.md                connecting clients, which handle confirmation
+docs/make_demo_gif.py          records docs/demo.gif
 examples/sdk_client_confirm.py the Python SDK client through an L2 confirmation: accept and decline
+examples/policies/             GitHub, Grafana, Kubernetes, Postgres policies
+charts/mcp-airlock/            Helm chart
+e2e/                           isolated end-to-end stacks: kubernetes, grafana, postgres
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image
 Dockerfile.demo                the example server and the proxy in one container, for crawlers
 server.json                    MCP Registry manifest
-docs/make_demo_gif.py          records docs/demo.gif
-examples/policies/             GitHub, Grafana, Kubernetes policies
-charts/mcp-airlock/            Helm chart
-e2e/                           isolated end-to-end stacks: kubernetes, grafana, postgres
+CHANGELOG.md                   what changed per release
 ```
 
 Tests: `uv run pytest`. Set `AIRLOCK_TEST_PG_DSN` to a Postgres DSN to also run the
 store and audit tests against a real database, for example with
 `docker run -d -e POSTGRES_PASSWORD=airlock -e POSTGRES_USER=airlock -p 5432:5432 postgres:16-alpine`.
+`CONTRIBUTING.md` has the rest.
 
 <!-- mcp-name: io.github.Shalimov04/mcp-airlock -->

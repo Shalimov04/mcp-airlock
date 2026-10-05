@@ -1,23 +1,52 @@
+# Values for the mcp-airlock chart. The README section "In Kubernetes" explains the choices.
 image:
   repository: ghcr.io/shalimov04/mcp-airlock
-  tag: ""                  # empty: the chart's appVersion
+  # Empty: the chart's appVersion. The image includes the postgres and otlp extras.
+  tag: ""
   pullPolicy: IfNotPresent
+# More than 1 needs sharedStore=true and an existingSecret (see below).
 replicaCount: 1
-upstream: ""               # MCP endpoint of the server behind the proxy. Required
-environment: ""            # tier column of the policy (--env); empty: the policy's own
-policy: ""                 # policy file text, mounted at /data/policy.yaml. Required: --set-file policy=policy.yaml
-existingSecret: ""         # Secret with AIRLOCK_JWT_SECRET, AIRLOCK_UPSTREAM_AUTH, AIRLOCK_APPROVAL_WEBHOOK, AIRLOCK_AUDIT_DSN; with sharedStore also AIRLOCK_STORE_DSN and AIRLOCK_SECRET
-generateJwtSecret: true    # without existingSecret: make a random AIRLOCK_JWT_SECRET and keep it across upgrades
-sharedStore: false         # existingSecret has AIRLOCK_STORE_DSN and AIRLOCK_SECRET; needed for replicaCount > 1
-env: {}                    # non-secret settings: AIRLOCK_PUBLIC_URL, AIRLOCK_JWKS_URL, AIRLOCK_JWT_AUDIENCE, ...
-strict: true               # exit at startup on any configuration warning (--strict)
-extraArgs: []              # e.g. ["--audit-max-bytes", "104857600"]
-dataVolume:                # /data holds audit.jsonl; an emptyDir is lost with the pod. A persistent volume means strategy Recreate and replicaCount 1
+# MCP endpoint of the server behind the proxy (--upstream). Required.
+# No credentials in the URL: it lands in the pod spec.
+upstream: ""
+# Tier column of the policy (--env); empty: the policy's own `environment`.
+environment: ""
+# Policy file text, mounted at /data/policy.yaml. Required: --set-file policy=policy.yaml.
+# A change rolls the pods.
+policy: ""
+# Secret with any of AIRLOCK_JWT_SECRET, AIRLOCK_UPSTREAM_AUTH, AIRLOCK_APPROVAL_WEBHOOK,
+# AIRLOCK_AUDIT_DSN (all optional); with sharedStore also AIRLOCK_STORE_DSN and AIRLOCK_SECRET
+# (required).
+existingSecret: ""
+# Without existingSecret: make a random AIRLOCK_JWT_SECRET and keep it across upgrades.
+# Set false with JWKS or a trusted header, so no unused secret exists. Needs `lookup`: under
+# `helm template` (Argo CD) the key changes on every render, use existingSecret there.
+generateJwtSecret: true
+# existingSecret has AIRLOCK_STORE_DSN and AIRLOCK_SECRET; needed for replicaCount > 1.
+sharedStore: false
+# Non-secret settings, e.g. AIRLOCK_PUBLIC_URL, AIRLOCK_JWKS_URL, AIRLOCK_JWT_AUDIENCE,
+# AIRLOCK_TRUST_PRINCIPAL_HEADER, AIRLOCK_APPROVAL_MODE, AIRLOCK_STORE_POOL_SIZE,
+# AIRLOCK_STORE_CONNECT_TIMEOUT, OTEL_EXPORTER_OTLP_ENDPOINT. The chart refuses the credential
+# variables here (AIRLOCK_SECRET, AIRLOCK_JWT_SECRET, the DSNs, the webhook,
+# AIRLOCK_UPSTREAM_AUTH): they go in existingSecret. OTEL_EXPORTER_OTLP_HEADERS is a credential
+# too; mount it from a Secret of your own.
+env: {}
+# Exit at startup on any configuration warning (--strict); the pod log says which.
+strict: true
+# More mcp-airlock flags, e.g. ["--audit-max-bytes", "104857600", "--audit-keep", "10"].
+extraArgs: []
+# /data holds audit.jsonl. The default emptyDir is lost with the pod; keep the audit with
+# AIRLOCK_AUDIT_DSN or a persistent volume. A non-emptyDir volume (set dataVolume.emptyDir=null,
+# Helm merges maps) means strategy Recreate and replicaCount 1: one audit.jsonl has one hash
+# chain.
+dataVolume:
   emptyDir:
     sizeLimit: 1Gi
 service:
+  # /approve is on this Service too: put it behind SSO.
   type: ClusterIP
   port: 9000
+# Probes are fixed: startup and liveness on /healthz, readiness on /readyz (the store check).
 resources: {}
 nodeSelector: {}
 tolerations: []
