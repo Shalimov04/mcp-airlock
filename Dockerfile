@@ -2,7 +2,7 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable --extra postgres
+RUN uv sync --frozen --no-dev --no-editable --extra postgres --extra otlp
 
 FROM python:3.12-slim-bookworm
 COPY --from=build /app/.venv /app/.venv

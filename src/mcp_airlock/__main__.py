@@ -9,9 +9,9 @@ from collections.abc import Callable
 
 import uvicorn
 from opentelemetry import trace
-from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.resources import SERVICE_NAME, OTELResourceDetector, Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
 
 from . import approvals, pins
 from .app import build
@@ -20,11 +20,32 @@ from .pg import psycopg_module
 from .startup import startup_warnings
 
 
-def setup_otel(span_file: str | None) -> None:
-    provider = TracerProvider(resource=Resource.create({"service.name": "mcp-airlock"}))
-    if span_file:  # ponytail: file/console exporter only; add opentelemetry-exporter-otlp when you have a collector
+OTLP_ENDPOINT_VARS = ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+
+
+def otlp_requested() -> bool:
+    return any(os.environ.get(v) for v in OTLP_ENDPOINT_VARS)
+
+
+def _otlp_exporter():  # the class, or None without the otlp extra
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    except ImportError:
+        return None
+    return OTLPSpanExporter
+
+
+def setup_otel(span_file: str | None) -> TracerProvider:
+    # OTEL_SERVICE_NAME or service.name in OTEL_RESOURCE_ATTRIBUTES wins; "mcp-airlock" is only the default
+    named = OTELResourceDetector().detect().attributes.get(SERVICE_NAME)
+    provider = TracerProvider(resource=Resource.create({} if named else {SERVICE_NAME: "mcp-airlock"}))
+    if span_file:  # file/console exporter, independent of OTLP
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter(out=open(span_file, "a"))))
+    if otlp_requested() and (exporter := _otlp_exporter()) is not None:
+        # endpoint, headers, timeout, TLS come from the standard OTEL_* variables
+        provider.add_span_processor(BatchSpanProcessor(exporter()))
     trace.set_tracer_provider(provider)
+    return provider
 
 
 def _int_min(low: int) -> Callable[[str], int]:
@@ -60,7 +81,7 @@ def main() -> None:
     warnings = startup_warnings(
         IdentityConfig.from_env(), secret=os.environ.get("AIRLOCK_SECRET"),
         store_dsn=os.environ.get("AIRLOCK_STORE_DSN"), webhook=approvals.config_from_env()[0],
-        public_url=os.environ.get("AIRLOCK_PUBLIC_URL"))
+        public_url=os.environ.get("AIRLOCK_PUBLIC_URL"), otlp_missing=otlp_requested() and _otlp_exporter() is None)
     for w in warnings:
         print(f"mcp-airlock: warning: {w}", file=sys.stderr)
     if a.strict and warnings:
@@ -70,9 +91,10 @@ def main() -> None:
             psycopg_module()
         except RuntimeError as e:
             raise SystemExit(f"mcp-airlock: {e}") from None
-    setup_otel(a.otel_file)
+    provider = setup_otel(a.otel_file)
     airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
-                    audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep)
+                    audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep,
+                    on_shutdown=provider.shutdown)
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 
 

@@ -29,7 +29,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: ${{ matrix.python }}
-      - run: uv sync --frozen
+      - run: uv sync --frozen --extra otlp
       - run: uv run pytest -q
       - run: uv build
 
@@ -52,4 +52,4 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           python-version: "3.11"
-      - run: uv run --isolated --resolution ${{ matrix.resolution }} pytest -q
+      - run: uv run --isolated --resolution ${{ matrix.resolution }} --extra otlp pytest -q

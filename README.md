@@ -55,6 +55,11 @@ Postgres support (`AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit --dsn
 `uvx --from 'mcp-airlock[postgres]' mcp-airlock ...` or `pip install 'mcp-airlock[postgres]'`. Without
 it a DSN makes the proxy exit at startup with that hint. The container image includes it.
 
+OTLP span export is the `otlp` extra: `uvx --from 'mcp-airlock[otlp]' mcp-airlock ...` or
+`pip install 'mcp-airlock[otlp]'`. Extras combine: `mcp-airlock[postgres,otlp]`. The container
+image includes it. Without it an OTLP endpoint gives a startup warning and the proxy runs
+without exporting.
+
 The same as a container. The image listens on `0.0.0.0:9000`, runs as a non-root user and
 writes `audit.jsonl` into `/data`:
 
@@ -176,6 +181,12 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
 | `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. Must be a positive integer. |
 | `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. Must be a positive integer. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Turn on OTLP span export over HTTP/protobuf (needs the `otlp` extra). The base URL gets `/v1/traces` appended; the traces URL is used as it is. Only http/protobuf is supported and `OTEL_EXPORTER_OTLP_PROTOCOL` is not read: point it at the collector's HTTP port (4318), not gRPC (4317). |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Headers for the export request, for example `authorization=Bearer <token>`. Treat it as a secret. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Resource of the spans. `service.name` defaults to `mcp-airlock`. |
+
+The SDK reads the other standard variables too: the rest of `OTEL_EXPORTER_OTLP_*` (timeout,
+compression, certificate) and `OTEL_BSP_*` (batching).
 
 At startup the proxy prints a warning to stderr for each of these:
 
@@ -185,6 +196,7 @@ At startup the proxy prints a warning to stderr for each of these:
 - `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without `Authorization` is trusted on the header alone
 - `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
 - `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the approve link
+- an OTLP endpoint without the `otlp` extra: spans are not exported
 
 With `--strict` any warning stops the start with exit code 2.
 
@@ -363,8 +375,13 @@ anchored anywhere outside the host, so these are only protected by anchoring it 
 Each request also produces one OpenTelemetry span named `execute_tool <tool>` with the
 `gen_ai.*` attributes, the principal and the verdict. An incoming `traceparent` (header or
 `_meta`) is continued and a new one is put into the upstream `_meta`, so the audit's
-`trace_id` matches what the upstream sees. Spans go to a file with `--otel-file`; there is
-no OTLP exporter wired in, add one in `__main__.py` if you have a collector.
+`trace_id` matches what the upstream sees. Spans go to a file with `--otel-file`, to an
+OTLP collector when `OTEL_EXPORTER_OTLP_ENDPOINT` (or the traces variant) is set, or to both.
+Export is batched (5 seconds by default). On SIGTERM the queue is flushed before the process
+exits, which can take up to the exporter timeout if the collector is down
+(`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT`, 10 by default). The
+Python exporter reads it in seconds, although the OpenTelemetry spec says milliseconds, so do
+not set 10000. Keep the termination grace period longer than the timeout.
 
 ## Prompt injection
 
@@ -411,6 +428,11 @@ A call to a pinned tool is still decided by the policy: the model only learns a 
 from `tools/list`, and gated tools already re-read the schema.
 
 ## Things to know before running it in anger
+
+Spans carry the principal (`enduser.id`), the tool name, the call id, the verdict and the
+rule, never the arguments. With OTLP they leave the host, so use an `https` endpoint when the
+collector is not on the same machine. Telemetry is best effort: a down collector or a full
+queue drops spans and never blocks a call or changes a verdict. The audit log is the record.
 
 The MCP side is stateless, the governance side is not. Used confirmation keys, approvals
 and blast-radius counters have to live somewhere shared if you run more than one replica;

@@ -8,3 +8,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # the otlp exporter pins opentelemetry-sdk to its own minor, so these must move together
+    groups:
+      opentelemetry:
+        patterns: ["opentelemetry-*"]

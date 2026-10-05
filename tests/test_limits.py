@@ -416,6 +416,28 @@ async def test_audit_is_closed_even_when_closing_the_client_fails(tmp_path):
     assert sink.closed == 1
 
 
+async def test_shutdown_runs_the_hook_once_after_the_audit_closes():
+    sink, seen = Sink(), []
+    al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://upstream/mcp", sink,
+                 on_shutdown=lambda: seen.append(sink.closed))
+    await run_lifespan(al)
+    assert seen == [1]
+
+
+async def test_shutdown_hook_runs_even_when_closing_the_client_fails():
+    calls = []
+    al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://upstream/mcp", Sink(),
+                 on_shutdown=lambda: calls.append(1))
+
+    async def boom():
+        raise RuntimeError("close failed")
+
+    al.http.aclose = boom
+    with pytest.raises(RuntimeError):
+        await run_lifespan(al)
+    assert calls == [1]
+
+
 # ---------------------------------------------------------------- /approve
 async def approving(upstream, audit_path, resolve_threads: list[int], monkeypatch, **kw):
     posted: list[str] = []

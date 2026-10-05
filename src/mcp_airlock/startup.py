@@ -7,7 +7,7 @@ DEFAULT_PUBLIC_URL = "http://127.0.0.1:9000"
 
 
 def startup_warnings(identity: IdentityConfig, *, secret: str | None, store_dsn: str | None,
-                     webhook: str | None, public_url: str | None) -> list[str]:
+                     webhook: str | None, public_url: str | None, otlp_missing: bool = False) -> list[str]:
     """One sentence per risky setting, in a fixed order. Plain values in, so callers need no environment."""
     out = []
     has_jwt = bool(identity.jwt_secret or identity.jwks_url)
@@ -28,4 +28,7 @@ def startup_warnings(identity: IdentityConfig, *, secret: str | None, store_dsn:
     if webhook and (public_url or "").rstrip("/") in ("", DEFAULT_PUBLIC_URL):
         out.append("AIRLOCK_APPROVAL_WEBHOOK is set while AIRLOCK_PUBLIC_URL is the default "
                    f"{DEFAULT_PUBLIC_URL}: nobody but this host can open the approve link in the message.")
+    if otlp_missing:  # names the variables, never their values: an endpoint can carry credentials
+        out.append("an OTLP endpoint is set (OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) but the "
+                   "otlp extra is not installed, so spans are not exported: install it with pip install 'mcp-airlock[otlp]'.")
     return out
