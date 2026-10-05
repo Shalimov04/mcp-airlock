@@ -80,8 +80,9 @@ uv run python demo.py
 
 Перезаписать гиф: `uv run --with pillow python docs/make_demo_gif.py`.
 
-В `docs/clients.md` показано, как направить Claude Code и Cursor через прокси и что видит
-агент, когда вызов отклонён или ждёт подтверждения.
+В `docs/clients.md` показано, как направить Claude Code и Cursor через прокси, что видит
+агент, когда вызов отклонён или ждёт подтверждения, и какие клиенты проверены с запросом
+подтверждения.
 
 С настоящим сервером:
 
@@ -419,7 +420,8 @@ src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        пины тулов: хеш, загрузка файла пинов
 src/mcp_airlock/startup.py      предупреждения при запуске и --strict
 tests/fake_upstream.py         фейковый сервер для тестов и демо
-docs/clients.md                подключение Claude Code и Cursor (по-английски)
+docs/clients.md                подключение клиентов и какие из них поддерживают подтверждение (по-английски)
+examples/sdk_client_confirm.py клиент Python SDK через подтверждение L2: accept и decline
 Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock
 Dockerfile.demo                тестовый сервер и прокси в одном контейнере, для краулеров
 server.json                    манифест для MCP Registry

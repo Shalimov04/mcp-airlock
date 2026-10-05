@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+* `docs/clients.md` has a table of MCP clients and whether they handle the `input_required`
+  confirmation (#22). The Python SDK client 2.2.0 is tested (`examples/sdk_client_confirm.py`,
+  `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.
+
 ### Fixed
 
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is

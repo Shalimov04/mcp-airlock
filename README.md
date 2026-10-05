@@ -84,8 +84,9 @@ works exactly once, and a poisoned read result comes back flagged:
 
 `docs/make_demo_gif.py` re-records it (`uv run --with pillow python docs/make_demo_gif.py`).
 
-`docs/clients.md` shows how to point Claude Code and Cursor at the proxy and what the agent
-sees when a call is refused or held for confirmation.
+`docs/clients.md` shows how to point Claude Code and Cursor at the proxy, what the agent sees
+when a call is refused or held for confirmation, and which clients have been tested with the
+confirmation prompt.
 
 Against a real server:
 
@@ -422,7 +423,8 @@ src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        tool pins: hash, pins file loader
 src/mcp_airlock/startup.py      startup warnings and --strict
 tests/fake_upstream.py         the fake server the tests and demo run against
-docs/clients.md                connecting Claude Code and Cursor
+docs/clients.md                connecting clients, which handle confirmation
+examples/sdk_client_confirm.py the Python SDK client through an L2 confirmation: accept and decline
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image
 Dockerfile.demo                the example server and the proxy in one container, for crawlers
 server.json                    MCP Registry manifest
