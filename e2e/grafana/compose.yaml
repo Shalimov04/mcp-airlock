@@ -59,6 +59,7 @@ services:
 
   runner:
     image: mcp-airlock-e2e-grafana:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     entrypoint: ["python", "-u", "/e2e/scenarios.py"]
     environment:
       UPSTREAM: http://mcp-grafana:8000/mcp

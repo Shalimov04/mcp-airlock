@@ -12,6 +12,29 @@
   time (a server that stops answering cannot hang a call), and a call after shutdown is refused. A
   policy that fails validation, a bad DSN or a bad store setting exits with an error message instead
   of a traceback.
+* **Pin format.** The tool pin hash now covers `title`, and pins are written as `sha256v2:<hex>`.
+  A pins file in the old `sha256:` format is refused: `mcp-airlock` stops at startup, `airlock-policy
+  diff --pins` reports it once, and a `SIGHUP` reload keeps the current pins. Run `airlock-policy
+  pin` again to rewrite the file. The `catalog.pin_mismatch` audit detail and the `diff` message now
+  read "definition changed since it was pinned". Icons and `_meta` are deliberately not covered.
+* **Titles in the guard.** The `tools/list` scan for injection phrases now also reads the tool
+  `title` and `annotations.title`, not only the description; a hit is marked in `_meta` as before.
+
+### Added
+
+* OTLP span export over HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` or
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set. It is the `otlp` extra and the container image
+  includes it. Queued spans are flushed on shutdown, and a missing extra is a startup warning
+  (an error under `--strict`), not an exit (thanks @HarshRajSinghania, #4).
+* Helm chart in `charts/mcp-airlock/`: Deployment, Service, a ConfigMap for the policy, the keys in
+  a Secret, a hardened security context and probes on `/healthz` and `/readyz`. It refuses more
+  than one replica without a shared store, uses `Recreate` with a persistent `dataVolume` so two
+  pods never share one audit hash chain, and refuses such a volume with several replicas.
+* `docs/clients.md` has a table of MCP clients and whether they handle the `input_required`
+  confirmation (#22). The Python SDK client 2.2.0 is tested (`examples/sdk_client_confirm.py`,
+  `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.
+* `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
+  bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else disable it.
 
 ### Fixed
 
@@ -22,6 +45,8 @@
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
   stored as U+FFFD.
 * `airlock-audit query` reads the rotated files too, oldest first.
+* `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
+  default stays `mcp-airlock`.
 
 ## 0.3.0 - 2026-10-02
 

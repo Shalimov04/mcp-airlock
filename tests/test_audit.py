@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -432,7 +433,7 @@ def run_main(monkeypatch, *argv):
     monkeypatch.setattr("sys.argv", ["mcp-airlock", "--policy", "p.yaml", "--upstream", "http://x/mcp", *argv])
     monkeypatch.setattr(cli, "build", lambda *a, **kw: seen.update(kw) or type("A", (), {"app": None})())
     monkeypatch.setattr(cli.uvicorn, "run", lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "setup_otel", lambda f: None)
+    monkeypatch.setattr(cli, "setup_otel", lambda f: SimpleNamespace(shutdown=lambda: None))
     cli.main()
     return seen
 

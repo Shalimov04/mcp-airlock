@@ -16,7 +16,7 @@ from mcp_airlock import Airlock
 from mcp_airlock.app import CONFIRM_KEY, META, ReloadSource, build
 
 from .conftest import ENVELOPE, ROOT, V, audit_rows, call, make_airlock, patch_post, rpc
-from .test_pins import ZEROS, write_pins
+from .test_pins import OLD_ZEROS, ZEROS, write_pins
 
 SUCCESS = "mcp-airlock: policy reloaded: {} tools (was {})\n"
 FAILURE = "mcp-airlock: policy reload failed, keeping the current policy: "
@@ -110,6 +110,16 @@ async def test_reload_reports_the_tool_counts(upstream, audit_path, tmp_path):
     r = al.reload()
     assert (r.ok, r.tools_before, r.tools_after, r.error) == (True, 6, 5, None)
     assert al.reload().tools_before == 5  # the second one starts from the new count
+
+
+async def test_an_old_format_pins_file_keeps_the_old_pins(upstream, audit_path, tmp_path):
+    pins_path = write_pins(tmp_path, {"get_service": ZEROS})
+    al = reloadable(upstream, audit_path, tmp_path, pins_path=pins_path, pins={"get_service": ZEROS})
+    pins = al.pins
+    write_pins(tmp_path, {"get_service": OLD_ZEROS})
+    r = al.reload()
+    assert not r.ok and "old pin format" in r.error
+    assert al.pins is pins
 
 
 async def test_reload_is_reported_on_stderr_and_in_the_log_and_never_audited(upstream, audit_path, tmp_path, capsys, caplog):

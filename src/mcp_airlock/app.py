@@ -15,6 +15,7 @@ import signal
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -58,6 +59,12 @@ READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
 DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
 _tracer = trace.get_tracer("mcp-airlock")
+
+
+def _tool_texts(tool: dict[str, Any]) -> list[Any]:
+    """The text fields of a tool the model reads: description, title, annotations.title."""
+    ann = tool.get("annotations")
+    return [tool.get("description"), tool.get("title"), ann.get("title") if isinstance(ann, dict) else None]
 
 
 @dataclass(frozen=True)
@@ -120,13 +127,15 @@ class Airlock:
         notify_http: httpx.AsyncClient | None = None,
         public_url: str | None = None,
         approval_mode: str | None = None,
-        pins: dict[str, str] | None = None,  # {tool: "sha256:<hex>"}, None means off
+        pins: dict[str, str] | None = None,  # {tool: "sha256v2:<hex>"}, None means off
         max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES,
         max_upstream_bytes: int = DEFAULT_MAX_UPSTREAM_BYTES,
         reload_source: ReloadSource | None = None,  # None: reload() has nothing to read
+        on_shutdown: Callable[[], None] | None = None,  # runs last in the lifespan shutdown, e.g. a span flush
     ):
         self.engine = Engine(policy, store)
         self.reload_source = reload_source
+        self.on_shutdown = on_shutdown
         self.audit = audit
         self.secret = secret or secrets.token_bytes(32)  # random per process: restart voids pending confirmations
         self.approve_secret = hmac.new(self.secret, b"approve", hashlib.sha256).digest()
@@ -168,18 +177,23 @@ class Airlock:
         try:
             yield
         finally:
-            if hup is not None:
-                loop.remove_signal_handler(hup)
             try:
-                if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
-                    await self.http.aclose()
-            finally:
+                if hup is not None:
+                    loop.remove_signal_handler(hup)
                 try:
-                    close = getattr(self.engine.store, "aclose", None)  # an injected store may have none
-                    if close:
-                        await close()
+                    if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
+                        await self.http.aclose()
                 finally:
-                    self.audit.close()
+                    try:
+                        close = getattr(self.engine.store, "aclose", None)  # an injected store may have none
+                        if close:
+                            await close()
+                    finally:
+                        self.audit.close()
+            finally:
+                # uvicorn re-raises SIGTERM after this, so atexit never runs: flush spans here, after the audit
+                if self.on_shutdown is not None:
+                    self.on_shutdown()
 
     def reload(self) -> ReloadResult:
         """Load the policy file and the pins file, then swap both in together. Nothing changes unless both load.
@@ -573,7 +587,7 @@ class Airlock:
         result["tools"] = visible  # ttlMs / cacheScope pass through untouched
 
     def _vet_tools(self, result: dict[str, Any], base: dict[str, Any], pins: dict[str, str] | None) -> None:
-        """After the allowlist filter: drop pinned tools whose definition changed, mark suspicious descriptions."""
+        """After the allowlist filter: drop pinned tools whose definition changed, mark suspicious descriptions and titles."""
         tools = result.get("tools")
         if not isinstance(tools, list):
             return
@@ -586,12 +600,12 @@ class Airlock:
             if dropped:
                 for t in dropped:  # own call_id: the tools/list call keeps its single intent/outcome pair
                     self._audit_deny(dict(base, call_id=uuid.uuid4().hex), "catalog.pin_mismatch", None,
-                                     f"{t.get('name')}: description or schema changed since it was pinned")
+                                     f"{t.get('name')}: definition changed since it was pinned")
                 meta[META + "pin_mismatch"] = len(dropped)
                 result["tools"] = tools = kept
-        # one scan per tool: guard.scan dedupes by phrase, and the same phrase in two descriptions must name both tools
+        # one scan per tool: guard.scan dedupes by phrase, and the same phrase in two tools must name both
         findings = [{"rule": f["rule"], "tool": t.get("name"), "excerpt": f["excerpt"]} for t in tools
-                    for f in guard.scan({"content": [{"type": "text", "text": t.get("description")}]})]
+                    for f in guard.scan({"content": [{"type": "text", "text": x} for x in _tool_texts(t)]})]
         if findings:
             meta[META + "suspicious"] = findings[:guard.MAX_FINDINGS]  # marked, never removed; one cap for the whole list
 

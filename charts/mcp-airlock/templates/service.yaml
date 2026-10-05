@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mcp-airlock.fullname" . }}
+  labels:
+    {{- include "mcp-airlock.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+  selector:
+    {{- include "mcp-airlock.selectorLabels" . | nindent 4 }}
