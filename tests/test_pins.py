@@ -309,6 +309,35 @@ async def test_an_injection_phrase_in_a_description_is_marked_and_the_tool_stays
     assert by_name(res["tools"], "get_service")["description"] == INJECTION  # marked, not rewritten
 
 
+async def test_an_injection_phrase_in_a_title_is_marked_and_the_tool_stays(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+
+    def edit(tools):
+        by_name(tools, "get_service")["title"] = INJECTION
+        by_name(tools, "rotate_key")["annotations"] = {"title": INJECTION}
+
+    rewrite_list(al, edit)
+    res = await listing(al)
+    assert {"get_service", "rotate_key"} <= {t["name"] for t in res["tools"]}
+    found = res["_meta"][META + "suspicious"]
+    assert {f["tool"] for f in found} == {"get_service", "rotate_key"}
+    assert {"override_phrase", "urgent_action"} <= {f["rule"] for f in found}
+
+
+async def test_an_odd_title_or_annotations_is_skipped_not_a_crash(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+
+    def edit(tools):
+        by_name(tools, "get_service")["title"] = 42
+        by_name(tools, "rotate_key")["annotations"] = "not a dict"
+        by_name(tools, "set_replicas")["annotations"] = {"title": ["x"]}
+
+    rewrite_list(al, edit)
+    res = await listing(al)
+    assert len(res["tools"]) == 6
+    assert META + "suspicious" not in res["_meta"]
+
+
 async def test_findings_name_the_tool_each_came_from(upstream, audit_path):
     al = make_airlock(upstream, audit_path)
 

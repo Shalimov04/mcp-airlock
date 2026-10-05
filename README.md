@@ -347,9 +347,10 @@ server lists. The pins live in their own file because rewriting the policy YAML 
 comments. `--pins` can also come from `AIRLOCK_PINS`; a pins file that is not valid stops the
 proxy at startup. On `tools/list` a pinned tool whose hash differs is removed from the answer,
 counted in `_meta["io.mcp-airlock/pin_mismatch"]` and audited as `catalog.pin_mismatch`. A tool
-without a pin is left alone. The descriptions of the tools that remain go through the injection
-scan (every pattern but tool-call bait, which a description may legitimately contain), and the
-matches, each with its tool name, are listed in `_meta["io.mcp-airlock/suspicious"]`.
+without a pin is left alone. The description, `title` and `annotations.title` of the tools that
+remain go through the injection scan (every pattern but tool-call bait, which a description may
+legitimately contain), and the matches, each with its tool name, are listed in
+`_meta["io.mcp-airlock/suspicious"]`.
 `airlock-policy diff ... --pins pins.json` reports changed hashes, allowlisted tools without a
 pin and pins for tools that are no longer allowlisted or no longer listed by the server.
 
