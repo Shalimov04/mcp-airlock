@@ -134,6 +134,9 @@ class PostgresStore:
                     # Drops connections killed by a restart or failover instead of failing a gated call.
                     check=mod.AsyncConnectionPool.check_connection)
                 await pool.open(wait=False)  # the first call must not block on min_size beyond the timeout
+                if self._closed:  # aclose() ran while we were opening and saw no pool to close
+                    await pool.close()
+                    raise RuntimeError("the Postgres store is closed")
                 self._pool = pool
             return self._pool
 

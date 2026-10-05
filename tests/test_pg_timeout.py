@@ -58,7 +58,7 @@ def test_key_value_dsn_gets_defaults():
 def test_existing_connect_timeout_is_kept(dsn, monkeypatch):
     monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "7")
     d = conv(dsn)
-    assert d["connect_timeout"] == "3" and d["tcp_user_timeout"] == "7000"
+    assert d["connect_timeout"] == "3" and d["tcp_user_timeout"] == "3000"
 
 
 def test_own_keepalive_and_tcp_user_timeout_are_kept():
@@ -94,14 +94,21 @@ def test_env_overrides_default(monkeypatch):
 def test_pgconnect_timeout_in_the_environment_is_left_alone(monkeypatch):
     monkeypatch.setenv("PGCONNECT_TIMEOUT", "3")
     d = conv("postgresql://u@127.0.0.1:5432/d")
-    assert "connect_timeout" not in d and d["tcp_user_timeout"] == "10000" and d["keepalives_idle"] == "10"
+    assert "connect_timeout" not in d and d["tcp_user_timeout"] == "3000" and d["keepalives_idle"] == "10"
+
+
+def test_a_dsn_timeout_sets_tcp_user_timeout_and_a_huge_env_value_is_refused(monkeypatch):
+    assert conv("host=h connect_timeout=30")["tcp_user_timeout"] == "30000"
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2147484")  # x 1000 would overflow libpq's int
+    with pytest.raises(ValueError, match="AIRLOCK_STORE_CONNECT_TIMEOUT must be"):
+        PostgresStore("host=h")
 
 
 @pytest.mark.parametrize("bad", ["abc", "0", "-1", "1.5"])
 def test_bad_env_stops_startup(bad, monkeypatch):
     monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", bad)
     for make in (PostgresStore, PostgresAuditLog):
-        with pytest.raises(ValueError, match="AIRLOCK_STORE_CONNECT_TIMEOUT must be a positive integer"):
+        with pytest.raises(ValueError, match="AIRLOCK_STORE_CONNECT_TIMEOUT must be"):
             make("host=h")
     monkeypatch.delenv("AIRLOCK_STORE_CONNECT_TIMEOUT")
     monkeypatch.setenv("AIRLOCK_STORE_POOL_SIZE", bad)
@@ -248,6 +255,21 @@ async def test_aclose_closes_is_idempotent_and_a_later_call_is_refused(fake_pool
     with pytest.raises(RuntimeError, match="closed"):
         await store.ping()
     assert len(fake_pool.instances) == 1  # no pool is reopened after shutdown
+
+
+async def test_aclose_during_the_first_open_leaves_no_pool_behind(fake_pool, monkeypatch):
+    async def slow_open(self, wait=True):
+        await asyncio.sleep(0.05)
+        self.opened += 1
+
+    monkeypatch.setattr(fake_pool, "open", slow_open)
+    store = PostgresStore("host=h")
+    call = asyncio.ensure_future(store.ping())
+    await asyncio.sleep(0.01)
+    await store.aclose()
+    with pytest.raises(RuntimeError, match="closed"):
+        await call
+    assert fake_pool.instances[0].closed == 1
 
 
 async def test_pool_gives_up_a_failed_connect_as_fast_as_a_call_waits(fake_pool, monkeypatch):
