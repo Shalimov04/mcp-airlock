@@ -331,11 +331,11 @@ occasionally flag a normal sentence, and it never blocks anything.
 
 ## Pinning tool descriptions
 
-An upstream can change a tool's title, description or schema after you reviewed it, and the model
-reads that text. A pin is the sha256 of a tool's `name`, `title`, `description`,
-`inputSchema`, `outputSchema` and `annotations`. `icons` and `_meta` are not covered: the model does not read them and icon URLs may
-change on their own. Write the pins from the server itself (not from the proxy),
-then give the file to the proxy:
+An upstream can change a tool's title, description or schema after you reviewed it, and the
+model reads that text. A pin is the sha256 of a tool's `name`, `title`, `description`,
+`inputSchema`, `outputSchema` and `annotations`. `icons` and `_meta` are not covered: the model
+does not read them and icon URLs may change on their own. Write the pins from the server itself
+(not from the proxy), then give the file to the proxy:
 
 ```
 uv run airlock-policy pin policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
@@ -353,10 +353,10 @@ matches, each with its tool name, are listed in `_meta["io.mcp-airlock/suspiciou
 `airlock-policy diff ... --pins pins.json` reports changed hashes, allowlisted tools without a
 pin and pins for tools that are no longer allowlisted or no longer listed by the server.
 
-Pins written by 0.3.0 or earlier start with `sha256:` and do not cover the title. Such a file is refused
-as a whole: `mcp-airlock` stops at startup with one message (a `SIGHUP` reload keeps the current
-pins), and `diff --pins` reports one `pins_file` error. Run `airlock-policy pin` again against a
-server you trust to rewrite it.
+Pins written by 0.3.0 or earlier start with `sha256:` and do not cover the title. Such a file
+is refused as a whole: `mcp-airlock` stops at startup with one message (a `SIGHUP` reload keeps
+the current pins), and `diff --pins` reports one `pins_file` error. Run `airlock-policy pin`
+again against a server you trust to rewrite it.
 
 A call to a pinned tool is still decided by the policy: the model only learns a description
 from `tools/list`, and gated tools already re-read the schema.

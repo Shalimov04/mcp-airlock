@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--env", help="environment column to check (default: the policy's own)")
     d.add_argument("--principal", default="airlock-policy", help="X-Airlock-Principal to send")
     d.add_argument("--pins", help="pins file from `airlock-policy pin`: report changed, missing and stale pins")
-    n = sub.add_parser("pin", help="write a sha256 pin for every allowlisted tool the upstream lists")
+    n = sub.add_parser("pin", help="write a sha256v2 pin for every allowlisted tool the upstream lists")
     n.add_argument("policy")
     n.add_argument("--upstream", required=True, help="MCP endpoint of the server itself, not the proxy")
     n.add_argument("--env", help="environment column to read (default: the policy's own)")
