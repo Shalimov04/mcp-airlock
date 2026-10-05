@@ -59,6 +59,12 @@ docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
   ghcr.io/shalimov04/mcp-airlock:0.2 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
+В образе есть `HEALTHCHECK`: раз в 30 секунд python запрашивает `http://127.0.0.1:9000/healthz`
+(curl в образе нет). Если передаёте `--port` или `--host` с конкретным не-loopback адресом, переопределите проверку через
+`--health-cmd` или `healthcheck:` в compose. `--start-interval` требует Docker Engine 25+ (старые
+его игнорируют). Kubernetes проверку не читает: укажите `/healthz` в liveness probe и `/readyz` в
+readiness probe.
+
 Из чекаута:
 
 ```
@@ -80,8 +86,9 @@ uv run python demo.py
 
 Перезаписать гиф: `uv run --with pillow python docs/make_demo_gif.py`.
 
-В `docs/clients.md` показано, как направить Claude Code и Cursor через прокси и что видит
-агент, когда вызов отклонён или ждёт подтверждения.
+В `docs/clients.md` показано, как направить Claude Code и Cursor через прокси, что видит
+агент, когда вызов отклонён или ждёт подтверждения, и какие клиенты проверены с запросом
+подтверждения.
 
 С настоящим сервером:
 
@@ -374,26 +381,34 @@ base64) и перечисляет совпадения в `_meta["io.mcp-airlock
 
 ## Пины описаний тулов
 
-Upstream может поменять описание или схему тула уже после того, как вы их проверили, а модель
-читает этот текст. Пин: sha256 от `name`, `description`, `inputSchema`, `outputSchema` и
-`annotations` тула. Пины пишутся с самого сервера (не с прокси), затем файл отдаётся прокси:
+Upstream может поменять заголовок, описание или схему тула уже после того, как вы их проверили,
+а модель читает этот текст. Пин: sha256 от `name`, `title`, `description`, `inputSchema`,
+`outputSchema` и `annotations` тула. `icons` и `_meta` не входят в хеш: модель их не читает, а
+URL иконок могут меняться сами по себе. Пины пишутся с самого сервера (не с прокси), затем файл
+отдаётся прокси:
 
 ```
 uv run airlock-policy pin policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
 uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
 ```
 
-`pin` пишет один JSON-объект, имя тула в `sha256:<hex>`, для каждого тула из allowlist,
+`pin` пишет один JSON-объект, имя тула в `sha256v2:<hex>`, для каждого тула из allowlist,
 который отдаёт сервер. Пины лежат в отдельном файле, потому что при перезаписи YAML политики
 пропали бы комментарии. `--pins` можно задать и через `AIRLOCK_PINS`; невалидный файл пинов
 останавливает прокси при запуске. В `tools/list` запиненный тул с другим хешем убирается из
 ответа, считается в `_meta["io.mcp-airlock/pin_mismatch"]` и попадает в аудит как
-`catalog.pin_mismatch`. Тул без пина не трогается. Описания оставшихся тулов проходят проверку
-на инъекции (все паттерны, кроме приманок на вызов тулов: описание может законно упоминать
-другой тул), а совпадения, каждое с именем тула, перечисляются в
-`_meta["io.mcp-airlock/suspicious"]`. `airlock-policy diff ... --pins pins.json` показывает
+`catalog.pin_mismatch`. Тул без пина не трогается. Описание, `title` и `annotations.title`
+оставшихся тулов проходят проверку на инъекции (все паттерны, кроме приманок на вызов тулов:
+описание может законно упоминать другой тул), а совпадения, каждое с именем тула,
+перечисляются в `_meta["io.mcp-airlock/suspicious"]`. `airlock-policy diff ... --pins pins.json` показывает
 изменившиеся хеши, тулы из allowlist без пина и пины тулов, которых больше нет в allowlist или
 на сервере.
+
+Пины, записанные версией 0.3.0 и более ранними, начинаются с `sha256:` и не покрывают `title`.
+Такой файл отвергается целиком: `mcp-airlock` останавливается при запуске с одним сообщением
+(перезагрузка по `SIGHUP` оставляет текущие пины), а `diff --pins` выдаёт одну ошибку
+`pins_file`. Чтобы переписать файл, ещё раз запустите `airlock-policy pin` против доверенного
+сервера.
 
 Вызов запиненного тула по-прежнему решается политикой: модель узнаёт описание только из
 `tools/list`, а тулы с подтверждением и так перечитывают схему.
@@ -463,7 +478,8 @@ src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        пины тулов: хеш, загрузка файла пинов
 src/mcp_airlock/startup.py      предупреждения при запуске и --strict
 tests/fake_upstream.py         фейковый сервер для тестов и демо
-docs/clients.md                подключение Claude Code и Cursor (по-английски)
+docs/clients.md                подключение клиентов и какие из них поддерживают подтверждение (по-английски)
+examples/sdk_client_confirm.py клиент Python SDK через подтверждение L2: accept и decline
 Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock
 Dockerfile.demo                тестовый сервер и прокси в одном контейнере, для краулеров
 server.json                    манифест для MCP Registry
