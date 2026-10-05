@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+* `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
+  bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else disable it.
+
 ### Fixed
 
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
