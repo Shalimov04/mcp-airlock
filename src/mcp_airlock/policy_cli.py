@@ -108,7 +108,7 @@ async def diff(policy_path: str | Path, upstream: str, env: str | None = None, p
             if name not in pinned:
                 out.append(("WARN", "no_pin", f"{name} is allowlisted but has no pin"))
             elif tool_pins.changed(pinned, catalog[name]):
-                out.append(("ERROR", "pin_mismatch", f"{name}: description or schema changed since it was pinned"))
+                out.append(("ERROR", "pin_mismatch", f"{name}: definition changed since it was pinned"))
         for name in sorted(pinned.keys() - (p.tools.keys() & catalog.keys())):
             out.append(("WARN", "stale_pin", f"{name} is pinned, but the policy does not allowlist it or the upstream does not list it"))
     out.append(("INFO", "ok", f"{len(p.tools.keys() & catalog.keys())} tool(s) allowlisted and present upstream, "
@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--env", help="environment column to check (default: the policy's own)")
     d.add_argument("--principal", default="airlock-policy", help="X-Airlock-Principal to send")
     d.add_argument("--pins", help="pins file from `airlock-policy pin`: report changed, missing and stale pins")
-    n = sub.add_parser("pin", help="write a sha256 pin for every allowlisted tool the upstream lists")
+    n = sub.add_parser("pin", help="write a sha256v2 pin for every allowlisted tool the upstream lists")
     n.add_argument("policy")
     n.add_argument("--upstream", required=True, help="MCP endpoint of the server itself, not the proxy")
     n.add_argument("--env", help="environment column to read (default: the policy's own)")
