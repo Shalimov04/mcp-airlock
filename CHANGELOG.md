@@ -14,6 +14,10 @@
 
 ### Added
 
+* Helm chart in `charts/mcp-airlock/`: Deployment, Service, a ConfigMap for the policy, the keys in
+  a Secret, a hardened security context and probes on `/healthz` and `/readyz`. It refuses more
+  than one replica without a shared store, uses `Recreate` with a persistent `dataVolume` so two
+  pods never share one audit hash chain, and refuses such a volume with several replicas.
 * `docs/clients.md` has a table of MCP clients and whether they handle the `input_required`
   confirmation (#22). The Python SDK client 2.2.0 is tested (`examples/sdk_client_confirm.py`,
   `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.

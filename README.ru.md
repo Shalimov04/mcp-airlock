@@ -109,6 +109,50 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 `diff` покажет, какие тулы есть у сервера, но не упомянуты в политике, какие записи
 политики сервер больше не отдаёт, и у каких тулов уровня L1/L2 нет аргумента `dry_run`.
 
+### В Kubernetes
+
+В `charts/mcp-airlock/` лежит небольшой Helm-чарт (Deployment, Service, ConfigMap с политикой).
+Репозитория чартов нет, ставьте из чекаута:
+
+```
+helm install airlock charts/mcp-airlock \
+  --set upstream=http://my-mcp-server:8080/mcp --set environment=prod \
+  --set-file policy=policy.yaml
+```
+
+* **Идентичность.** По умолчанию чарт создаёт Secret со случайным `AIRLOCK_JWT_SECRET` и
+  сохраняет его при обновлениях. Прочитать:
+  `kubectl get secret airlock-mcp-airlock -o jsonpath='{.data.AIRLOCK_JWT_SECRET}' | base64 -d`,
+  дальше подписывайте HS256-токены с `sub` и `exp`. Кто может читать Secret'ы в namespace (или
+  Secret'ы релиза Helm), может выпустить токен на любого. Для JWKS задайте `env.AIRLOCK_JWKS_URL`
+  и `env.AIRLOCK_JWT_AUDIENCE` и `generateJwtSecret=false`, чтобы не создавался ненужный секрет.
+  Для доверенного заголовка от шлюза задайте
+  `generateJwtSecret=false` и `env.AIRLOCK_TRUST_PRINCIPAL_HEADER=1` и убедитесь, что до Service
+  достаёт только шлюз: NetworkPolicy чарт не ставит.
+* **Секреты кладите в `existingSecret`, не в `env`.** Это `AIRLOCK_UPSTREAM_AUTH`,
+  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN` и JWT-секрет; чарт не принимает их в `env`.
+  Учётные данные в URL `upstream` тоже не кладите, они попадут в спецификацию пода.
+* **Больше одной реплики.** Создайте Secret с `AIRLOCK_STORE_DSN` и `AIRLOCK_SECRET`, затем
+  `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. `AIRLOCK_SECRET`
+  задаётся только вместе с общим хранилищем: фиксированный ключ при памяти процесса позволил бы
+  повторно выполнить уже использованное подтверждение после рестарта.
+* **Аудит.** `/data` это emptyDir, так что `audit.jsonl` уходит вместе с подом. Чтобы сохранить его,
+  задайте `AIRLOCK_AUDIT_DSN` или укажите в `dataVolume` `persistentVolumeClaim` (и
+  `dataVolume.emptyDir=null`, Helm сливает словари). Постоянный `dataVolume` переключает Deployment
+  на `Recreate` (два пода на одном файле разорвали бы цепочку хешей аудита, и `airlock-audit
+  verify` показал бы `prev mismatch`), а при `replicaCount` больше 1 чарт его не принимает. Для
+  нескольких реплик берите emptyDir и `AIRLOCK_AUDIT_DSN`; цепочка хешей у каждого пода своя,
+  поэтому в таблице `airlock_audit` лежит по одной перемешанной цепочке на под. Ротация задаётся в
+  `extraArgs`.
+* **Смена политики.** Новая политика перезапускает поды; перезагрузка по SIGHUP тут не
+  используется.
+* **Строгий режим.** `strict` включён, так что любое предупреждение при старте останавливает под.
+  Причина в логе.
+* **Страница approve.** `/approve` лежит на том же Service, поэтому закройте её SSO, как сказано в
+  разделе про подтверждения.
+* **GitOps.** Argo CD и другие инструменты на `helm template` не выполняют `lookup`, и
+  сгенерированный ключ менялся бы при каждом рендере. Там используйте `existingSecret`.
+
 ### Настройка
 
 Всё через переменные окружения. Для одного процесса ни одна не обязательна.
@@ -441,6 +485,7 @@ Dockerfile.demo                тестовый сервер и прокси в 
 server.json                    манифест для MCP Registry
 docs/make_demo_gif.py          записывает docs/demo.gif
 examples/policies/             политики для GitHub, Grafana, Kubernetes
+charts/mcp-airlock/            Helm-чарт
 e2e/                           изолированные e2e-стенды: kubernetes, grafana, postgres
 ```
 
