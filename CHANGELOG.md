@@ -2,8 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+* OTLP span export over HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` or
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set. It is the `otlp` extra and the container image
+  includes it. Queued spans are flushed on shutdown, and a missing extra is a startup warning
+  (an error under `--strict`), not an exit (thanks @HarshRajSinghania, #4).
+
 ### Fixed
 
+* `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
+  default stays `mcp-airlock`.
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
   stored as U+FFFD.
 * `airlock-audit query` reads the rotated files too, oldest first.

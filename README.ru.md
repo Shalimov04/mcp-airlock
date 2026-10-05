@@ -51,6 +51,11 @@ uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env 
 `uvx --from 'mcp-airlock[postgres]' mcp-airlock ...` или `pip install 'mcp-airlock[postgres]'`. Без него
 DSN останавливает прокси при старте с этой подсказкой. В образ контейнера extra входит.
 
+Экспорт спанов по OTLP ставится как extra `otlp`: `uvx --from 'mcp-airlock[otlp]' mcp-airlock ...`
+или `pip install 'mcp-airlock[otlp]'`. Extras комбинируются: `mcp-airlock[postgres,otlp]`. В образ
+контейнера он входит. Без него OTLP-endpoint даёт предупреждение при старте, и прокси работает
+без экспорта.
+
 То же самое контейнером. Образ слушает `0.0.0.0:9000`, работает не от root и пишет
 `audit.jsonl` в `/data`:
 
@@ -124,6 +129,12 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 | `AIRLOCK_UPSTREAM_AUTH` | Значение заголовка `Authorization` для upstream. Это учётка самого прокси; личность вызывающего едет в `_meta`. |
 | `AIRLOCK_MAX_REQUEST_BYTES` | Максимальный размер тела запроса в байтах. По умолчанию `1048576` (1 МиБ). Тело больше отклоняется с HTTP 413. Должно быть целым положительным числом. |
 | `AIRLOCK_MAX_UPSTREAM_BYTES` | Максимальный размер читаемого ответа upstream в байтах. По умолчанию `8388608` (8 МиБ). На лимите прокси перестаёт читать и отбрасывает ответ. Прокси просит у upstream несжатый ответ, а сжатый отклоняет с HTTP 502. Должно быть целым положительным числом. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Включают экспорт спанов по OTLP через HTTP/protobuf (нужен extra `otlp`). К базовому URL добавляется `/v1/traces`; URL для трейсов берётся как есть. Поддерживается только http/protobuf, `OTEL_EXPORTER_OTLP_PROTOCOL` не читается: указывайте HTTP-порт коллектора (4318), а не gRPC (4317). |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Заголовки запроса экспорта, например `authorization=Bearer <token>`. Считайте это секретом. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Ресурс спанов. `service.name` по умолчанию `mcp-airlock`. |
+
+SDK читает и остальные стандартные переменные: прочие `OTEL_EXPORTER_OTLP_*` (таймаут, сжатие,
+сертификат) и `OTEL_BSP_*` (пакетная отправка).
 
 При запуске прокси пишет в stderr предупреждение по каждому из пунктов:
 
@@ -133,6 +144,7 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 - `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` вместе с настройками JWT: запрос без `Authorization` принимается по одному заголовку
 - `AIRLOCK_STORE_DSN` без `AIRLOCK_SECRET`: реплики подписывают разными ключами
 - `AIRLOCK_APPROVAL_WEBHOOK` при `AIRLOCK_PUBLIC_URL` по умолчанию: ссылку одобрения никто другой не откроет
+- OTLP-endpoint без extra `otlp`: спаны не экспортируются
 
 С `--strict` любое предупреждение прерывает запуск с кодом 2.
 
@@ -313,8 +325,14 @@ uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
 На каждый запрос создаётся один спан OpenTelemetry с именем `execute_tool <tool>`,
 атрибутами `gen_ai.*`, principal и вердиктом. Входящий `traceparent` (заголовок или
 `_meta`) продолжается, а новый кладётся в `_meta` для upstream, так что `trace_id` в
-аудите совпадает с тем, что видит сервер. Спаны пишутся в файл через `--otel-file`;
-OTLP-экспортёр не подключён, добавьте его в `__main__.py`, если есть коллектор.
+аудите совпадает с тем, что видит сервер. Спаны пишутся в файл через `--otel-file`, в
+OTLP-коллектор, если задан `OTEL_EXPORTER_OTLP_ENDPOINT` (или вариант для трейсов), или и туда, и туда.
+Отправка пакетная (по умолчанию раз в 5 секунд). На SIGTERM очередь сбрасывается до выхода
+процесса; если коллектор недоступен, это может занять до таймаута экспортёра
+(`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` или `OTEL_EXPORTER_OTLP_TIMEOUT`, по умолчанию 10).
+Python-экспортёр читает его в секундах, хотя спецификация OpenTelemetry говорит о
+миллисекундах, так что 10000 ставить не надо. Grace-период остановки должен быть длиннее
+таймаута.
 
 ## Prompt injection
 
@@ -355,6 +373,11 @@ uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --p
 `tools/list`, а тулы с подтверждением и так перечитывают схему.
 
 ## Что стоит знать перед боевым запуском
+
+Спаны содержат principal (`enduser.id`), имя тула, id вызова, вердикт и правило, но никогда
+аргументы. С OTLP они уходят с хоста, так что для коллектора на другой машине берите
+`https`. Телеметрия работает по возможности: недоступный коллектор или полная очередь
+отбрасывают спаны и никогда не блокируют вызов и не меняют вердикт. Записью остаётся аудит.
 
 Stateless только сторона MCP, сторона governance нет. Использованные ключи, одобрения и
 счётчики blast radius должны лежать где-то общем, если реплик больше одной; для этого
