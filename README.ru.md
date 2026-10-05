@@ -64,6 +64,12 @@ docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
   ghcr.io/shalimov04/mcp-airlock:0.2 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
+В образе есть `HEALTHCHECK`: раз в 30 секунд python запрашивает `http://127.0.0.1:9000/healthz`
+(curl в образе нет). Если передаёте `--port` или `--host` с конкретным не-loopback адресом, переопределите проверку через
+`--health-cmd` или `healthcheck:` в compose. `--start-interval` требует Docker Engine 25+ (старые
+его игнорируют). Kubernetes проверку не читает: укажите `/healthz` в liveness probe и `/readyz` в
+readiness probe.
+
 Из чекаута:
 
 ```
@@ -85,8 +91,9 @@ uv run python demo.py
 
 Перезаписать гиф: `uv run --with pillow python docs/make_demo_gif.py`.
 
-В `docs/clients.md` показано, как направить Claude Code и Cursor через прокси и что видит
-агент, когда вызов отклонён или ждёт подтверждения.
+В `docs/clients.md` показано, как направить Claude Code и Cursor через прокси, что видит
+агент, когда вызов отклонён или ждёт подтверждения, и какие клиенты проверены с запросом
+подтверждения.
 
 С настоящим сервером:
 
@@ -106,6 +113,50 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 
 `diff` покажет, какие тулы есть у сервера, но не упомянуты в политике, какие записи
 политики сервер больше не отдаёт, и у каких тулов уровня L1/L2 нет аргумента `dry_run`.
+
+### В Kubernetes
+
+В `charts/mcp-airlock/` лежит небольшой Helm-чарт (Deployment, Service, ConfigMap с политикой).
+Репозитория чартов нет, ставьте из чекаута:
+
+```
+helm install airlock charts/mcp-airlock \
+  --set upstream=http://my-mcp-server:8080/mcp --set environment=prod \
+  --set-file policy=policy.yaml
+```
+
+* **Идентичность.** По умолчанию чарт создаёт Secret со случайным `AIRLOCK_JWT_SECRET` и
+  сохраняет его при обновлениях. Прочитать:
+  `kubectl get secret airlock-mcp-airlock -o jsonpath='{.data.AIRLOCK_JWT_SECRET}' | base64 -d`,
+  дальше подписывайте HS256-токены с `sub` и `exp`. Кто может читать Secret'ы в namespace (или
+  Secret'ы релиза Helm), может выпустить токен на любого. Для JWKS задайте `env.AIRLOCK_JWKS_URL`
+  и `env.AIRLOCK_JWT_AUDIENCE` и `generateJwtSecret=false`, чтобы не создавался ненужный секрет.
+  Для доверенного заголовка от шлюза задайте
+  `generateJwtSecret=false` и `env.AIRLOCK_TRUST_PRINCIPAL_HEADER=1` и убедитесь, что до Service
+  достаёт только шлюз: NetworkPolicy чарт не ставит.
+* **Секреты кладите в `existingSecret`, не в `env`.** Это `AIRLOCK_UPSTREAM_AUTH`,
+  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN` и JWT-секрет; чарт не принимает их в `env`.
+  Учётные данные в URL `upstream` тоже не кладите, они попадут в спецификацию пода.
+* **Больше одной реплики.** Создайте Secret с `AIRLOCK_STORE_DSN` и `AIRLOCK_SECRET`, затем
+  `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. `AIRLOCK_SECRET`
+  задаётся только вместе с общим хранилищем: фиксированный ключ при памяти процесса позволил бы
+  повторно выполнить уже использованное подтверждение после рестарта.
+* **Аудит.** `/data` это emptyDir, так что `audit.jsonl` уходит вместе с подом. Чтобы сохранить его,
+  задайте `AIRLOCK_AUDIT_DSN` или укажите в `dataVolume` `persistentVolumeClaim` (и
+  `dataVolume.emptyDir=null`, Helm сливает словари). Постоянный `dataVolume` переключает Deployment
+  на `Recreate` (два пода на одном файле разорвали бы цепочку хешей аудита, и `airlock-audit
+  verify` показал бы `prev mismatch`), а при `replicaCount` больше 1 чарт его не принимает. Для
+  нескольких реплик берите emptyDir и `AIRLOCK_AUDIT_DSN`; цепочка хешей у каждого пода своя,
+  поэтому в таблице `airlock_audit` лежит по одной перемешанной цепочке на под. Ротация задаётся в
+  `extraArgs`.
+* **Смена политики.** Новая политика перезапускает поды; перезагрузка по SIGHUP тут не
+  используется.
+* **Строгий режим.** `strict` включён, так что любое предупреждение при старте останавливает под.
+  Причина в логе.
+* **Страница approve.** `/approve` лежит на том же Service, поэтому закройте её SSO, как сказано в
+  разделе про подтверждения.
+* **GitOps.** Argo CD и другие инструменты на `helm template` не выполняют `lookup`, и
+  сгенерированный ключ менялся бы при каждом рендере. Там используйте `existingSecret`.
 
 ### Настройка
 
@@ -348,26 +399,34 @@ base64) и перечисляет совпадения в `_meta["io.mcp-airlock
 
 ## Пины описаний тулов
 
-Upstream может поменять описание или схему тула уже после того, как вы их проверили, а модель
-читает этот текст. Пин: sha256 от `name`, `description`, `inputSchema`, `outputSchema` и
-`annotations` тула. Пины пишутся с самого сервера (не с прокси), затем файл отдаётся прокси:
+Upstream может поменять заголовок, описание или схему тула уже после того, как вы их проверили,
+а модель читает этот текст. Пин: sha256 от `name`, `title`, `description`, `inputSchema`,
+`outputSchema` и `annotations` тула. `icons` и `_meta` не входят в хеш: модель их не читает, а
+URL иконок могут меняться сами по себе. Пины пишутся с самого сервера (не с прокси), затем файл
+отдаётся прокси:
 
 ```
 uv run airlock-policy pin policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
 uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
 ```
 
-`pin` пишет один JSON-объект, имя тула в `sha256:<hex>`, для каждого тула из allowlist,
+`pin` пишет один JSON-объект, имя тула в `sha256v2:<hex>`, для каждого тула из allowlist,
 который отдаёт сервер. Пины лежат в отдельном файле, потому что при перезаписи YAML политики
 пропали бы комментарии. `--pins` можно задать и через `AIRLOCK_PINS`; невалидный файл пинов
 останавливает прокси при запуске. В `tools/list` запиненный тул с другим хешем убирается из
 ответа, считается в `_meta["io.mcp-airlock/pin_mismatch"]` и попадает в аудит как
-`catalog.pin_mismatch`. Тул без пина не трогается. Описания оставшихся тулов проходят проверку
-на инъекции (все паттерны, кроме приманок на вызов тулов: описание может законно упоминать
-другой тул), а совпадения, каждое с именем тула, перечисляются в
-`_meta["io.mcp-airlock/suspicious"]`. `airlock-policy diff ... --pins pins.json` показывает
+`catalog.pin_mismatch`. Тул без пина не трогается. Описание, `title` и `annotations.title`
+оставшихся тулов проходят проверку на инъекции (все паттерны, кроме приманок на вызов тулов:
+описание может законно упоминать другой тул), а совпадения, каждое с именем тула,
+перечисляются в `_meta["io.mcp-airlock/suspicious"]`. `airlock-policy diff ... --pins pins.json` показывает
 изменившиеся хеши, тулы из allowlist без пина и пины тулов, которых больше нет в allowlist или
 на сервере.
+
+Пины, записанные версией 0.3.0 и более ранними, начинаются с `sha256:` и не покрывают `title`.
+Такой файл отвергается целиком: `mcp-airlock` останавливается при запуске с одним сообщением
+(перезагрузка по `SIGHUP` оставляет текущие пины), а `diff --pins` выдаёт одну ошибку
+`pins_file`. Чтобы переписать файл, ещё раз запустите `airlock-policy pin` против доверенного
+сервера.
 
 Вызов запиненного тула по-прежнему решается политикой: модель узнаёт описание только из
 `tools/list`, а тулы с подтверждением и так перечитывают схему.
@@ -442,12 +501,14 @@ src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        пины тулов: хеш, загрузка файла пинов
 src/mcp_airlock/startup.py      предупреждения при запуске и --strict
 tests/fake_upstream.py         фейковый сервер для тестов и демо
-docs/clients.md                подключение Claude Code и Cursor (по-английски)
+docs/clients.md                подключение клиентов и какие из них поддерживают подтверждение (по-английски)
+examples/sdk_client_confirm.py клиент Python SDK через подтверждение L2: accept и decline
 Dockerfile                     образ ghcr.io/shalimov04/mcp-airlock
 Dockerfile.demo                тестовый сервер и прокси в одном контейнере, для краулеров
 server.json                    манифест для MCP Registry
 docs/make_demo_gif.py          записывает docs/demo.gif
 examples/policies/             политики для GitHub, Grafana, Kubernetes
+charts/mcp-airlock/            Helm-чарт
 e2e/                           изолированные e2e-стенды: kubernetes, grafana, postgres
 ```
 

@@ -1,0 +1,177 @@
+{{- if not (or (kindIs "float64" .Values.replicaCount) (kindIs "int64" .Values.replicaCount) (kindIs "int" .Values.replicaCount)) }}
+{{- fail "replicaCount must be a whole number" }}
+{{- end }}
+{{- if ne (float64 (int .Values.replicaCount)) (float64 .Values.replicaCount) }}
+{{- fail "replicaCount must be a whole number" }}
+{{- end }}
+{{- if lt (int .Values.replicaCount) 1 }}
+{{- fail "replicaCount must be at least 1" }}
+{{- end }}
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.sharedStore) }}
+{{- fail "replicaCount > 1 needs sharedStore=true and an existingSecret with AIRLOCK_STORE_DSN and AIRLOCK_SECRET: without a shared store each pod burns its own confirmation keys" }}
+{{- end }}
+{{- if not .Values.dataVolume }}
+{{- fail "dataVolume needs a volume type, e.g. emptyDir or persistentVolumeClaim" }}
+{{- end }}
+{{- $persistent := not (hasKey .Values.dataVolume "emptyDir") }}
+{{- /* Helm merges maps, so a second volume type lands next to the default emptyDir */}}
+{{- if and (hasKey .Values.dataVolume "emptyDir") (gt (len .Values.dataVolume) 1) }}
+{{- fail "dataVolume has emptyDir next to another volume type: set dataVolume.emptyDir=null to drop the default" }}
+{{- end }}
+{{- /* one audit.jsonl has one hash chain and one writer: a second writer forks the chain */}}
+{{- if and $persistent (gt (int .Values.replicaCount) 1) }}
+{{- fail "a non-emptyDir dataVolume with replicaCount > 1 would put several writers on one audit.jsonl and break the hash chain; use an emptyDir and AIRLOCK_AUDIT_DSN" }}
+{{- end }}
+{{- if and .Values.sharedStore (not .Values.existingSecret) }}
+{{- fail "sharedStore=true needs existingSecret with AIRLOCK_STORE_DSN and AIRLOCK_SECRET" }}
+{{- end }}
+{{- range $k, $_ := .Values.env }}
+{{- if has $k (list "AIRLOCK_SECRET" "AIRLOCK_JWT_SECRET" "AIRLOCK_STORE_DSN" "AIRLOCK_AUDIT_DSN" "AIRLOCK_UPSTREAM_AUTH" "AIRLOCK_APPROVAL_WEBHOOK") }}
+{{- fail (printf "%s holds a credential: put it in existingSecret, not in env" $k) }}
+{{- end }}
+{{- end }}
+{{- $secret := include "mcp-airlock.secretName" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mcp-airlock.fullname" . }}
+  labels:
+    {{- include "mcp-airlock.labels" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.replicaCount }}
+  # Always rendered: if the strategy is left out, a later switch to Recreate keeps the live
+  # rollingUpdate block and the API server rejects the upgrade
+  strategy:
+    {{- if $persistent }}
+    # RollingUpdate would run the old and the new pod on one audit.jsonl at once and fork its hash chain
+    type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "mcp-airlock.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mcp-airlock.selectorLabels" . | nindent 8 }}
+      annotations:
+        # the policy is a subPath mount, which never updates in place, so a change rolls the pods
+        checksum/policy: {{ .Values.policy | sha256sum }}
+    spec:
+      # the proxy never calls the Kubernetes API; this matters when the upstream is kubernetes-mcp-server
+      automountServiceAccountToken: false
+      # Service-link variables would land in the AIRLOCK_* namespace the proxy reads its config from
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp-airlock
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --policy
+            - /data/policy.yaml
+            - --upstream
+            - {{ required "upstream is required, e.g. --set upstream=http://my-mcp:8080/mcp" .Values.upstream | quote }}
+            - --audit
+            - /data/audit.jsonl
+            {{- if .Values.environment }}
+            - --env
+            - {{ .Values.environment | quote }}
+            {{- end }}
+            {{- if .Values.strict }}
+            - --strict
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 9000
+          env:
+            {{- range $k, $v := .Values.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- range list "AIRLOCK_JWT_SECRET" "AIRLOCK_UPSTREAM_AUTH" "AIRLOCK_APPROVAL_WEBHOOK" "AIRLOCK_AUDIT_DSN" }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ . }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.sharedStore }}
+            {{- /* required: a missing key stops the pod instead of starting it with private state */}}
+            {{- range list "AIRLOCK_STORE_DSN" "AIRLOCK_SECRET" }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ . }}
+                  optional: false
+            {{- end }}
+            {{- end }}
+          # liveness must not use /readyz, or a store outage restarts every pod
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: policy
+              mountPath: /data/policy.yaml
+              subPath: policy.yaml
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: data
+          {{- toYaml .Values.dataVolume | nindent 10 }}
+        - name: policy
+          configMap:
+            name: {{ include "mcp-airlock.fullname" . }}

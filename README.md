@@ -68,6 +68,12 @@ docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
   ghcr.io/shalimov04/mcp-airlock:0.2 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
+The image has a `HEALTHCHECK` that asks `http://127.0.0.1:9000/healthz` with python every 30 seconds
+(the image has no curl). If you pass `--port`, or a `--host` bound to a specific non-loopback address, override it with
+`--health-cmd` or a compose `healthcheck:`. The start interval needs Docker Engine 25+ (older ones
+ignore it). Kubernetes ignores the check: point a liveness probe at `/healthz` and a readiness probe
+at `/readyz`.
+
 From a checkout:
 
 ```
@@ -89,8 +95,9 @@ works exactly once, and a poisoned read result comes back flagged:
 
 `docs/make_demo_gif.py` re-records it (`uv run --with pillow python docs/make_demo_gif.py`).
 
-`docs/clients.md` shows how to point Claude Code and Cursor at the proxy and what the agent
-sees when a call is refused or held for confirmation.
+`docs/clients.md` shows how to point Claude Code and Cursor at the proxy, what the agent sees
+when a call is refused or held for confirmation, and which clients have been tested with the
+confirmation prompt.
 
 Against a real server:
 
@@ -110,6 +117,47 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 
 `diff` tells you which tools the server has that the policy doesn't mention, which policy
 entries the server no longer has, and which L1/L2 tools have no `dry_run` argument.
+
+### In Kubernetes
+
+There is a small Helm chart in `charts/mcp-airlock/` (Deployment, Service, a ConfigMap for the
+policy). There is no chart repository, so install it from a checkout:
+
+```
+helm install airlock charts/mcp-airlock \
+  --set upstream=http://my-mcp-server:8080/mcp --set environment=prod \
+  --set-file policy=policy.yaml
+```
+
+* **Identity.** By default the chart creates a Secret with a random `AIRLOCK_JWT_SECRET` and keeps
+  it across upgrades. Read it with
+  `kubectl get secret airlock-mcp-airlock -o jsonpath='{.data.AIRLOCK_JWT_SECRET}' | base64 -d`
+  and sign HS256 tokens with `sub` and `exp`. Anyone who can read Secrets in the namespace (or the
+  Helm release Secrets) can mint any principal. For JWKS set `env.AIRLOCK_JWKS_URL` and
+  `env.AIRLOCK_JWT_AUDIENCE`, and set `generateJwtSecret=false` so no unused secret is generated.
+  For a trusted gateway header set `generateJwtSecret=false` and
+  `env.AIRLOCK_TRUST_PRINCIPAL_HEADER=1`, and make sure only the gateway can reach the Service:
+  the chart ships no NetworkPolicy.
+* **Credentials go in `existingSecret`, never in `env`.** That covers `AIRLOCK_UPSTREAM_AUTH`,
+  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN` and the JWT secret; the chart refuses them in
+  `env`. Do not put credentials in the `upstream` URL either, they end up in the pod spec.
+* **More than one replica.** Create a Secret with `AIRLOCK_STORE_DSN` and `AIRLOCK_SECRET`, then
+  `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. `AIRLOCK_SECRET` is
+  only set together with the shared store: a fixed key with per-process memory would let a used
+  confirmation run again after a restart.
+* **Audit.** `/data` is an emptyDir, so `audit.jsonl` goes with the pod. Set `AIRLOCK_AUDIT_DSN`, or
+  point `dataVolume` at a `persistentVolumeClaim` (and set `dataVolume.emptyDir=null`, Helm merges
+  maps), to keep it. A persistent `dataVolume` switches the Deployment to `Recreate` (two pods on
+  one file would fork the audit hash chain, and `airlock-audit verify` would report `prev
+  mismatch`) and the chart refuses it with `replicaCount` above 1. With several replicas use an
+  emptyDir and `AIRLOCK_AUDIT_DSN`; the hash chain is per pod, so the `airlock_audit` table holds
+  one interleaved chain per pod. Rotation goes in `extraArgs`.
+* **Policy changes.** A new policy rolls the pods; SIGHUP reload is not used here.
+* **Strictness.** `strict` is on, so any startup warning stops the pod. The log says why.
+* **Approve page.** `/approve` is on the same Service, so put it behind SSO, as the Confirmations
+  section says.
+* **GitOps.** Argo CD and other `helm template` based tools do not run `lookup`, so the generated
+  key would change on every render. Use `existingSecret` there.
 
 ### Configuration
 
@@ -348,26 +396,33 @@ occasionally flag a normal sentence, and it never blocks anything.
 
 ## Pinning tool descriptions
 
-An upstream can change a tool's description or schema after you reviewed it, and the model
-reads that text. A pin is the sha256 of a tool's `name`, `description`, `inputSchema`,
-`outputSchema` and `annotations`. Write the pins from the server itself (not from the proxy),
-then give the file to the proxy:
+An upstream can change a tool's title, description or schema after you reviewed it, and the
+model reads that text. A pin is the sha256 of a tool's `name`, `title`, `description`,
+`inputSchema`, `outputSchema` and `annotations`. `icons` and `_meta` are not covered: the model
+does not read them and icon URLs may change on their own. Write the pins from the server itself
+(not from the proxy), then give the file to the proxy:
 
 ```
 uv run airlock-policy pin policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
 uv run mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:9001/mcp --pins pins.json
 ```
 
-`pin` writes one JSON object, tool name to `sha256:<hex>`, for every allowlisted tool the
+`pin` writes one JSON object, tool name to `sha256v2:<hex>`, for every allowlisted tool the
 server lists. The pins live in their own file because rewriting the policy YAML would drop its
 comments. `--pins` can also come from `AIRLOCK_PINS`; a pins file that is not valid stops the
 proxy at startup. On `tools/list` a pinned tool whose hash differs is removed from the answer,
 counted in `_meta["io.mcp-airlock/pin_mismatch"]` and audited as `catalog.pin_mismatch`. A tool
-without a pin is left alone. The descriptions of the tools that remain go through the injection
-scan (every pattern but tool-call bait, which a description may legitimately contain), and the
-matches, each with its tool name, are listed in `_meta["io.mcp-airlock/suspicious"]`.
+without a pin is left alone. The description, `title` and `annotations.title` of the tools that
+remain go through the injection scan (every pattern but tool-call bait, which a description may
+legitimately contain), and the matches, each with its tool name, are listed in
+`_meta["io.mcp-airlock/suspicious"]`.
 `airlock-policy diff ... --pins pins.json` reports changed hashes, allowlisted tools without a
 pin and pins for tools that are no longer allowlisted or no longer listed by the server.
+
+Pins written by 0.3.0 or earlier start with `sha256:` and do not cover the title. Such a file
+is refused as a whole: `mcp-airlock` stops at startup with one message (a `SIGHUP` reload keeps
+the current pins), and `diff --pins` reports one `pins_file` error. Run `airlock-policy pin`
+again against a server you trust to rewrite it.
 
 A call to a pinned tool is still decided by the policy: the model only learns a description
 from `tools/list`, and gated tools already re-read the schema.
@@ -444,12 +499,14 @@ src/mcp_airlock/policy_cli.py  airlock-policy lint / diff / pin
 src/mcp_airlock/pins.py        tool pins: hash, pins file loader
 src/mcp_airlock/startup.py      startup warnings and --strict
 tests/fake_upstream.py         the fake server the tests and demo run against
-docs/clients.md                connecting Claude Code and Cursor
+docs/clients.md                connecting clients, which handle confirmation
+examples/sdk_client_confirm.py the Python SDK client through an L2 confirmation: accept and decline
 Dockerfile                     the ghcr.io/shalimov04/mcp-airlock image
 Dockerfile.demo                the example server and the proxy in one container, for crawlers
 server.json                    MCP Registry manifest
 docs/make_demo_gif.py          records docs/demo.gif
 examples/policies/             GitHub, Grafana, Kubernetes policies
+charts/mcp-airlock/            Helm chart
 e2e/                           isolated end-to-end stacks: kubernetes, grafana, postgres
 ```
 
