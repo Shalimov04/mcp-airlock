@@ -6,7 +6,6 @@ import time
 import uuid
 
 import pytest
-from psycopg.conninfo import conninfo_to_dict
 
 from mcp_airlock.store import MemoryStore, PostgresStore, store_from_env
 
@@ -114,6 +113,8 @@ async def test_memory_store_purges_expired_on_write():
 
 
 def test_store_from_env(monkeypatch):
+    pytest.importorskip("psycopg")
+    from psycopg.conninfo import conninfo_to_dict  # here, so MemoryStore tests import without psycopg
     monkeypatch.delenv("AIRLOCK_STORE_DSN", raising=False)
     assert type(store_from_env()) is MemoryStore
     monkeypatch.setenv("AIRLOCK_STORE_DSN", "postgresql://x@localhost/y")

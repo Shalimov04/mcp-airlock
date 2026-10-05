@@ -137,6 +137,12 @@ async def test_store_fails_within_the_timeout(black_hole, monkeypatch):
         with pytest.raises(psycopg.OperationalError):  # PoolTimeout is one
             await store.ping()
         assert time.monotonic() - t < 5
+        # The pool's own background connect is bounded too, not just the caller's wait.
+        for _ in range(50):
+            if store._pool.get_stats().get("connections_errors", 0) >= 1:
+                break
+            await asyncio.sleep(0.1)
+        assert store._pool.get_stats().get("connections_errors", 0) >= 1
     finally:
         await store.aclose()
 
@@ -233,15 +239,39 @@ async def test_pool_size_comes_from_the_environment(fake_pool, monkeypatch):
     assert fake_pool.instances[1].kw["max_size"] == 2
 
 
-async def test_aclose_closes_is_idempotent_and_a_later_call_reopens(fake_pool):
+async def test_aclose_closes_is_idempotent_and_a_later_call_is_refused(fake_pool):
     store = PostgresStore("host=h")
-    await store.aclose()  # never opened: nothing to do
     await store.ping()
     await store.aclose()
     await store.aclose()
     assert fake_pool.instances[0].closed == 1
-    await store.ping()
-    assert len(fake_pool.instances) == 2 and fake_pool.instances[1].opened == 1
+    with pytest.raises(RuntimeError, match="closed"):
+        await store.ping()
+    assert len(fake_pool.instances) == 1  # no pool is reopened after shutdown
+
+
+async def test_pool_gives_up_a_failed_connect_as_fast_as_a_call_waits(fake_pool, monkeypatch):
+    # Pool default is 300 s of retries during which no new attempt starts, so recovery lagged minutes.
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "4")
+    await PostgresStore("host=h").ping()
+    kw = fake_pool.instances[0].kw
+    assert kw["reconnect_timeout"] == kw["timeout"] == 4.0
+
+
+@pytest.mark.parametrize("dsn,env,want", [
+    ("host=h connect_timeout=30", None, 30.0),
+    ("host=h", "20", 20.0),
+    ("host=h connect_timeout=1", None, 2.0),
+    ("host=h", None, 10.0),
+])
+def test_wait_follows_the_effective_connect_timeout(dsn, env, want, monkeypatch):
+    if env:
+        monkeypatch.setenv("PGCONNECT_TIMEOUT", env)
+    assert PostgresStore(dsn)._wait_s == want
+
+
+def test_a_service_dsn_is_left_alone():
+    assert with_conn_defaults("service=airlock", "X") == "service=airlock"
 
 
 # ------------------------------------------------------------------ shutdown
@@ -366,3 +396,68 @@ def test_a_bad_store_setting_exits_with_a_message_not_a_traceback(env, tmp_path)
                        capture_output=True, text=True, timeout=30, cwd=tmp_path, env={**clean, **env})
     assert r.returncode != 0
     assert r.stderr.strip().splitlines()[-1].startswith("mcp-airlock:") and "Traceback" not in r.stderr
+
+
+class Forwarder:
+    """A TCP forwarder in front of the test database that can be switched off and on."""
+
+    def __init__(self, host, port):
+        self.target, self.server, self.writers = (host, port), None, set()
+        self.port = None
+
+    async def _pipe(self, r, w):
+        try:
+            while data := await r.read(65536):
+                w.write(data)
+                await w.drain()
+        except OSError:
+            pass
+        finally:
+            w.close()
+
+    async def _handle(self, r, w):
+        try:
+            ur, uw = await asyncio.open_connection(*self.target)
+        except OSError:
+            w.close()
+            return
+        self.writers |= {w, uw}
+        await asyncio.gather(self._pipe(r, uw), self._pipe(ur, w))
+
+    async def on(self):
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", self.port or 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+
+    async def off(self):
+        self.server.close()
+        for w in self.writers:
+            w.close()
+        self.writers.clear()
+
+
+@needs_pg
+async def test_store_recovers_soon_after_the_database_is_back(monkeypatch):
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    info = conninfo_to_dict(PG)
+    fwd = Forwarder(info.get("host", "127.0.0.1"), int(info.get("port", 5432)))
+    await fwd.on()
+    store = PostgresStore(make_conninfo(PG, host="127.0.0.1", port=fwd.port, hostaddr="127.0.0.1"), pool_size=2)
+    try:
+        await store.ping()
+        await fwd.off()
+        # Long enough that an unbounded pool retry is in its 16 s backoff step (attempts at 0, 1, 3, 7, 15 s).
+        outage = time.monotonic() + 16
+        while time.monotonic() < outage:
+            with pytest.raises(psycopg.OperationalError):
+                await store.ping()
+        await fwd.on()
+        t = time.monotonic()
+        while True:
+            try:
+                await store.ping()
+                break
+            except psycopg.OperationalError:
+                assert time.monotonic() - t < 6, "the store did not recover"
+    finally:
+        await store.aclose()
+        await fwd.off()

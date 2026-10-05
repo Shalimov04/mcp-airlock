@@ -6,10 +6,14 @@
 
 * The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on first
   use and closes at shutdown, instead of a connection per call. The `postgres` extra now includes
-  psycopg-pool. A bad DSN or store setting exits with a one-line message instead of a traceback.
+  psycopg-pool. A bad policy, DSN or store setting exits with a one-line message instead of a traceback.
 
 ### Fixed
 
+* The Postgres store pool gives up a failed connect attempt after the connect timeout instead of
+  retrying for 300 s, so the store recovers within seconds of the database coming back. The pool wait
+  follows the connect timeout in the final DSN, a `service=` DSN no longer gets our connect and
+  keepalive keys, and a store call after shutdown is refused instead of opening a new pool.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, or set it in the DSN), plus `tcp_user_timeout` and TCP keepalives
   unless the DSN sets them. A black-holed database host used to stall every gated call for about two

@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from .pg import (DEFAULT_POOL_SIZE, connect_timeout_from_env, positive_int_env, psycopg_module,
+from .pg import (DEFAULT_POOL_SIZE, effective_connect_timeout, positive_int_env, psycopg_module,
                  psycopg_pool_module, with_conn_defaults)
 
 # ponytail: usage rows older than a day are garbage; raise if a policy ever uses window_s > 86400.
@@ -109,7 +109,9 @@ class PostgresStore:
         psycopg_pool_module()
         self.dsn = with_conn_defaults(dsn, "AIRLOCK_STORE_DSN")
         self.pool_size = pool_size or positive_int_env("AIRLOCK_STORE_POOL_SIZE", DEFAULT_POOL_SIZE)
-        self._wait_s = float(max(2, connect_timeout_from_env()))  # psycopg raises a connect timeout below 2 s to 2
+        # libpq raises a connect timeout below 2 s to 2; the DSN may set a larger one than our default.
+        self._wait_s = float(max(2, effective_connect_timeout(self.dsn)))
+        self._closed = False
         self._pool = None
         self._pool_lock = asyncio.Lock()  # binds no loop at construction on 3.10+
         self._ready = False
@@ -126,6 +128,9 @@ class PostgresStore:
                     kwargs={"autocommit": True, "prepare_threshold": None},
                     # A call waits for a connection no longer than a connect would take.
                     timeout=self._wait_s,
+                    # Without this a failed grow attempt retries for 300 s with backoff and blocks new attempts,
+                    # so calls keep timing out long after the database is back. Give up fast; the next call retries.
+                    reconnect_timeout=self._wait_s,
                     # Drops connections killed by a restart or failover instead of failing a gated call.
                     check=mod.AsyncConnectionPool.check_connection)
                 await pool.open(wait=False)  # the first call must not block on min_size beyond the timeout
@@ -135,6 +140,8 @@ class PostgresStore:
     @asynccontextmanager
     async def _conn(self):
         # Never take a session-level advisory lock here: the connection goes back to the pool still holding it.
+        if self._closed:  # a late request must not open a pool on a loop that is about to close
+            raise RuntimeError("the Postgres store is closed")
         pool = self._pool or await self._open_pool()
         async with pool.connection() as c:
             if not self._ready:
@@ -145,7 +152,8 @@ class PostgresStore:
             yield c
 
     async def aclose(self) -> None:
-        pool, self._pool = self._pool, None  # idempotent; a later call opens a fresh pool
+        self._closed = True
+        pool, self._pool = self._pool, None  # idempotent
         if pool is not None:
             await pool.close()
 

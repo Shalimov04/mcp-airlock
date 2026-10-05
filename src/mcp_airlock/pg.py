@@ -57,6 +57,8 @@ def with_conn_defaults(dsn: str, var: str) -> str:
     except psycopg.ProgrammingError:
         # Not libpq's message: for `password=se cret` it quotes a piece of the password.
         raise ValueError(f"{var} is not a valid Postgres connection string") from None
+    if "service" in have:
+        return dsn  # the service file is the operator's choice; our keys would override it
     add: dict = {}
     if not os.environ.get("PGCONNECT_TIMEOUT"):
         add["connect_timeout"] = timeout
@@ -65,3 +67,15 @@ def with_conn_defaults(dsn: str, var: str) -> str:
     add.update(KEEPALIVES)
     add = {k: v for k, v in add.items() if k not in have}
     return psycopg.conninfo.make_conninfo(dsn, **add) if add else dsn
+
+
+def effective_connect_timeout(dsn: str) -> int:
+    """The connect timeout libpq will use for this DSN: its own key, else PGCONNECT_TIMEOUT, else ours."""
+    have = psycopg_module().conninfo.conninfo_to_dict(dsn)
+    for raw in (have.get("connect_timeout"), os.environ.get("PGCONNECT_TIMEOUT")):
+        try:
+            if raw and int(raw) > 0:
+                return int(raw)
+        except ValueError:
+            pass  # libpq ignores junk here too
+    return connect_timeout_from_env()
