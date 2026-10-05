@@ -7,7 +7,8 @@
 * **Pin format.** The tool pin hash now covers `title`, and pins are written as `sha256v2:<hex>`.
   A pins file in the old `sha256:` format is refused: `mcp-airlock` stops at startup, `airlock-policy
   diff --pins` reports it once, and a `SIGHUP` reload keeps the current pins. Run `airlock-policy
-  pin` again to rewrite the file.
+  pin` again to rewrite the file. The `catalog.pin_mismatch` audit detail and the `diff` message now
+  read "definition changed since it was pinned". Icons and `_meta` are deliberately not covered.
 
 ### Fixed
 

@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+# what the model reads; icons and _meta are shown to users or clients, and icon URLs rotate, so they stay out
 FIELDS = ("name", "title", "description", "inputSchema", "outputSchema", "annotations")
 PIN = re.compile(r"sha256v2:[0-9a-f]{64}")
 OLD_PIN = re.compile(r"sha256:[0-9a-f]{64}")  # v1 did not cover the title

@@ -331,9 +331,10 @@ occasionally flag a normal sentence, and it never blocks anything.
 
 ## Pinning tool descriptions
 
-An upstream can change a tool's description or schema after you reviewed it, and the model
+An upstream can change a tool's title, description or schema after you reviewed it, and the model
 reads that text. A pin is the sha256 of a tool's `name`, `title`, `description`,
-`inputSchema`, `outputSchema` and `annotations`. Write the pins from the server itself (not from the proxy),
+`inputSchema`, `outputSchema` and `annotations`. `icons` and `_meta` are not covered: the model does not read them and icon URLs may
+change on their own. Write the pins from the server itself (not from the proxy),
 then give the file to the proxy:
 
 ```
