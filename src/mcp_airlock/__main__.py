@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import uvicorn
 from opentelemetry import trace
-from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.resources import SERVICE_NAME, OTELResourceDetector, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor
 
@@ -36,7 +36,9 @@ def _otlp_exporter():  # the class, or None without the otlp extra
 
 
 def setup_otel(span_file: str | None) -> TracerProvider:
-    provider = TracerProvider(resource=Resource.create({"service.name": "mcp-airlock"}))
+    # OTEL_SERVICE_NAME or service.name in OTEL_RESOURCE_ATTRIBUTES wins; "mcp-airlock" is only the default
+    named = OTELResourceDetector().detect().attributes.get(SERVICE_NAME)
+    provider = TracerProvider(resource=Resource.create({} if named else {SERVICE_NAME: "mcp-airlock"}))
     if span_file:  # file/console exporter, independent of OTLP
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter(out=open(span_file, "a"))))
     if otlp_requested() and (exporter := _otlp_exporter()) is not None:

@@ -72,6 +72,21 @@ def emit(provider, name="execute_tool x"):
     provider.force_flush()
 
 
+def test_the_service_name_defaults_to_mcp_airlock(made):
+    assert made().resource.attributes["service.name"] == "mcp-airlock"
+
+
+def test_otel_service_name_wins(monkeypatch, made):
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "airlock-prod")
+    assert made().resource.attributes["service.name"] == "airlock-prod"
+
+
+def test_service_name_in_the_resource_attributes_wins_and_the_rest_is_kept(monkeypatch, made):
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=x,deployment.environment=prod")
+    attrs = made().resource.attributes
+    assert attrs["service.name"] == "x" and attrs["deployment.environment"] == "prod"
+
+
 def test_no_otlp_without_an_endpoint(monkeypatch, made):
     monkeypatch.setattr(cli, "BatchSpanProcessor", lambda *a, **kw: pytest.fail("no endpoint, no OTLP"))
     made(None)
