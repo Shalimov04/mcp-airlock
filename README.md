@@ -106,6 +106,47 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 `diff` tells you which tools the server has that the policy doesn't mention, which policy
 entries the server no longer has, and which L1/L2 tools have no `dry_run` argument.
 
+### In Kubernetes
+
+There is a small Helm chart in `charts/mcp-airlock/` (Deployment, Service, a ConfigMap for the
+policy). There is no chart repository, so install it from a checkout:
+
+```
+helm install airlock charts/mcp-airlock \
+  --set upstream=http://my-mcp-server:8080/mcp --set environment=prod \
+  --set-file policy=policy.yaml
+```
+
+* **Identity.** By default the chart creates a Secret with a random `AIRLOCK_JWT_SECRET` and keeps
+  it across upgrades. Read it with
+  `kubectl get secret airlock-mcp-airlock -o jsonpath='{.data.AIRLOCK_JWT_SECRET}' | base64 -d`
+  and sign HS256 tokens with `sub` and `exp`. Anyone who can read Secrets in the namespace (or the
+  Helm release Secrets) can mint any principal. For JWKS set `env.AIRLOCK_JWKS_URL` and
+  `env.AIRLOCK_JWT_AUDIENCE`, and set `generateJwtSecret=false` so no unused secret is generated.
+  For a trusted gateway header set `generateJwtSecret=false` and
+  `env.AIRLOCK_TRUST_PRINCIPAL_HEADER=1`, and make sure only the gateway can reach the Service:
+  the chart ships no NetworkPolicy.
+* **Credentials go in `existingSecret`, never in `env`.** That covers `AIRLOCK_UPSTREAM_AUTH`,
+  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN` and the JWT secret; the chart refuses them in
+  `env`. Do not put credentials in the `upstream` URL either, they end up in the pod spec.
+* **More than one replica.** Create a Secret with `AIRLOCK_STORE_DSN` and `AIRLOCK_SECRET`, then
+  `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. `AIRLOCK_SECRET` is
+  only set together with the shared store: a fixed key with per-process memory would let a used
+  confirmation run again after a restart.
+* **Audit.** `/data` is an emptyDir, so `audit.jsonl` goes with the pod. Set `AIRLOCK_AUDIT_DSN`, or
+  point `dataVolume` at a `persistentVolumeClaim` (and set `dataVolume.emptyDir=null`, Helm merges
+  maps), to keep it. A persistent `dataVolume` switches the Deployment to `Recreate` (two pods on
+  one file would fork the audit hash chain, and `airlock-audit verify` would report `prev
+  mismatch`) and the chart refuses it with `replicaCount` above 1. With several replicas use an
+  emptyDir and `AIRLOCK_AUDIT_DSN`; the hash chain is per pod, so the `airlock_audit` table holds
+  one interleaved chain per pod. Rotation goes in `extraArgs`.
+* **Policy changes.** A new policy rolls the pods; SIGHUP reload is not used here.
+* **Strictness.** `strict` is on, so any startup warning stops the pod. The log says why.
+* **Approve page.** `/approve` is on the same Service, so put it behind SSO, as the Confirmations
+  section says.
+* **GitOps.** Argo CD and other `helm template` based tools do not run `lookup`, so the generated
+  key would change on every render. Use `existingSecret` there.
+
 ### Configuration
 
 Everything is environment variables. None are required for a single-process setup.
@@ -428,6 +469,7 @@ Dockerfile.demo                the example server and the proxy in one container
 server.json                    MCP Registry manifest
 docs/make_demo_gif.py          records docs/demo.gif
 examples/policies/             GitHub, Grafana, Kubernetes policies
+charts/mcp-airlock/            Helm chart
 e2e/                           isolated end-to-end stacks: kubernetes, grafana, postgres
 ```
 

@@ -1,0 +1,24 @@
+image:
+  repository: ghcr.io/shalimov04/mcp-airlock
+  tag: ""                  # empty: the chart's appVersion
+  pullPolicy: IfNotPresent
+replicaCount: 1
+upstream: ""               # MCP endpoint of the server behind the proxy. Required
+environment: ""            # tier column of the policy (--env); empty: the policy's own
+policy: ""                 # policy file text, mounted at /data/policy.yaml. Required: --set-file policy=policy.yaml
+existingSecret: ""         # Secret with AIRLOCK_JWT_SECRET, AIRLOCK_UPSTREAM_AUTH, AIRLOCK_APPROVAL_WEBHOOK, AIRLOCK_AUDIT_DSN; with sharedStore also AIRLOCK_STORE_DSN and AIRLOCK_SECRET
+generateJwtSecret: true    # without existingSecret: make a random AIRLOCK_JWT_SECRET and keep it across upgrades
+sharedStore: false         # existingSecret has AIRLOCK_STORE_DSN and AIRLOCK_SECRET; needed for replicaCount > 1
+env: {}                    # non-secret settings: AIRLOCK_PUBLIC_URL, AIRLOCK_JWKS_URL, AIRLOCK_JWT_AUDIENCE, ...
+strict: true               # exit at startup on any configuration warning (--strict)
+extraArgs: []              # e.g. ["--audit-max-bytes", "104857600"]
+dataVolume:                # /data holds audit.jsonl; an emptyDir is lost with the pod. A persistent volume means strategy Recreate and replicaCount 1
+  emptyDir:
+    sizeLimit: 1Gi
+service:
+  type: ClusterIP
+  port: 9000
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

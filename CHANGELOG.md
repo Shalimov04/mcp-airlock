@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+* Helm chart in `charts/mcp-airlock/`: Deployment, Service, a ConfigMap for the policy, the keys in
+  a Secret, a hardened security context and probes on `/healthz` and `/readyz`. It refuses more
+  than one replica without a shared store, uses `Recreate` with a persistent `dataVolume` so two
+  pods never share one audit hash chain, and refuses such a volume with several replicas.
+
 ### Fixed
 
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
