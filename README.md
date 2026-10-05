@@ -51,7 +51,8 @@ The released version, no clone needed:
 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
 ```
 
-Postgres support (`AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit --dsn`) is an extra:
+Postgres support (`AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit --dsn`) is an extra (it
+brings psycopg and psycopg-pool):
 `uvx --from 'mcp-airlock[postgres]' mcp-airlock ...` or `pip install 'mcp-airlock[postgres]'`. Without
 it a DSN makes the proxy exit at startup with that hint. The container image includes it.
 
@@ -173,6 +174,8 @@ Everything is environment variables. None are required for a single-process setu
 | `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it if you run more than one replica. |
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. |
+| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink. Default `10`. Added to the DSN only when neither the DSN nor `PGCONNECT_TIMEOUT` sets one. It applies to each connection attempt (every host of a multi-host DSN). libpq rounds values below 2 up to 2. It is also the longest a store call waits for a pooled connection, and it sets `tcp_user_timeout` (in ms). TCP keepalives (idle 10 s, interval 5 s, 3 probes) are added too. Each key is added only when the DSN does not set it, and none when it uses `service=`. Must be an integer from 1 to 86400. |
+| `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. Calls beyond it wait for a free connection, up to the connect timeout. Replicas times this size must fit the server's `max_connections`. Must be a positive integer. |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
 | `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
@@ -436,8 +439,15 @@ queue drops spans and never blocks a call or changes a verdict. The audit log is
 
 The MCP side is stateless, the governance side is not. Used confirmation keys, approvals
 and blast-radius counters have to live somewhere shared if you run more than one replica;
-that is what `AIRLOCK_STORE_DSN` is for. The Postgres store opens a connection per
-operation, which is fine at governance rates and easy to change if it isn't.
+that is what `AIRLOCK_STORE_DSN` is for. The Postgres store keeps a small connection pool
+(`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on first use and closes at shutdown. If the
+database is down, each store call fails after about the connect timeout (twice that at most, when
+the server accepts the connection and then stops answering) and the gated call is denied. A failed
+connect attempt is given up after the connect timeout, so the store recovers within a few seconds of
+the database coming back. A connection that has not answered by then is cut and dropped from the pool,
+including one that was idle in it. With a `service=` DSN the wait is `PGCONNECT_TIMEOUT` or
+`AIRLOCK_STORE_CONNECT_TIMEOUT` (default 10 s), never a `connect_timeout` in the service file.
+A saturated pool can make `/readyz` report 503.
 
 Forced dry run only helps if the tool actually honours `dry_run`. The proxy checks that the
 argument is declared, it cannot check that the implementation respects it. Test that

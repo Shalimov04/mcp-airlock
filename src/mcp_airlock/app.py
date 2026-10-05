@@ -184,7 +184,12 @@ class Airlock:
                     if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
                         await self.http.aclose()
                 finally:
-                    self.audit.close()
+                    try:
+                        close = getattr(self.engine.store, "aclose", None)  # an injected store may have none
+                        if close:
+                            await close()
+                    finally:
+                        self.audit.close()
             finally:
                 # uvicorn re-raises SIGTERM after this, so atexit never runs: flush spans here, after the audit
                 if self.on_shutdown is not None:

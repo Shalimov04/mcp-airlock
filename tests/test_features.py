@@ -17,7 +17,7 @@ from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META, TOKEN_PREFIX, _b64, _unb64
 from mcp_airlock.audit import AuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
-from mcp_airlock.store import MemoryStore, PostgresStore
+from mcp_airlock.store import MemoryStore
 
 from .conftest import ROOT, SPANS, audit_rows, call, make_airlock, patch_post, rpc
 
@@ -57,10 +57,10 @@ def spy(airlock: Airlock, ttl_ms: int | None = None) -> list[dict]:
 
 # 1. shared store: two replicas ------------------------------------------------------------------------------------
 @pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set")
-async def test_exactly_once_and_blast_radius_across_replicas(upstream, audit_path):
+async def test_exactly_once_and_blast_radius_across_replicas(upstream, audit_path, pg_store):
     secret = b"shared"
-    a = make_airlock(upstream, audit_path, secret=secret, store=PostgresStore(PG))
-    b = make_airlock(upstream, audit_path, secret=secret, store=PostgresStore(PG))
+    a = make_airlock(upstream, audit_path, secret=secret, store=pg_store(PG))
+    b = make_airlock(upstream, audit_path, secret=secret, store=pg_store(PG))
     principal = f"replica-{os.getpid()}-{id(a)}"  # unique per run: the store is shared with other tests
     async with proxy_client(a) as ca, proxy_client(b) as cb:
         token = (await call(ca, "delete_service", {"name": "x"}, principal=principal))["requestState"]
@@ -290,11 +290,11 @@ async def test_reads_do_not_consume_blast_radius(upstream, audit_path):
 
 
 @pytest.mark.parametrize("backend", ["memory", "pg"])
-async def test_blast_radius_is_atomic_under_concurrency(upstream, audit_path, backend):
+async def test_blast_radius_is_atomic_under_concurrency(upstream, audit_path, backend, pg_store):
     import asyncio
     if backend == "pg" and not PG:
         pytest.skip("AIRLOCK_TEST_PG_DSN not set")
-    dev = make_airlock(upstream, audit_path, env="dev", store=PostgresStore(PG) if backend == "pg" else None)
+    dev = make_airlock(upstream, audit_path, env="dev", store=pg_store(PG) if backend == "pg" else None)
     principal = f"burst-{backend}-{os.getpid()}-{id(dev)}"
     async with proxy_client(dev) as c:
         results = await asyncio.gather(*[call(c, "set_replicas", {"names": ["a", "b", "c"], "replicas": 1}, principal=principal) for _ in range(4)])
@@ -827,8 +827,8 @@ async def approve_page_text(upstream, audit_path, args: dict, **kw) -> tuple[str
 
 
 @pytest.mark.parametrize("kind", ["memory", pytest.param("postgres", marks=pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set"))])
-async def test_approve_page_shows_arguments_and_preview(upstream, audit_path, kind):
-    store = PostgresStore(PG) if kind == "postgres" else MemoryStore()
+async def test_approve_page_shows_arguments_and_preview(upstream, audit_path, kind, pg_store):
+    store = pg_store(PG) if kind == "postgres" else MemoryStore()
     posted, page = await approve_page_text(upstream, audit_path, {"name": "api"}, store=store)
     assert "<pre>" in page and "delete_service" in page
     assert "Arguments: {&quot;name&quot;: &quot;api&quot;}" in page and "Dry-run preview: would delete api" in page
@@ -871,9 +871,9 @@ async def test_approve_page_text_is_capped(upstream, audit_path):
 
 
 @pytest.mark.parametrize("kind", ["memory", pytest.param("postgres", marks=pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set"))])
-async def test_approve_page_text_survives_nul_in_preview(upstream, audit_path, kind):
+async def test_approve_page_text_survives_nul_in_preview(upstream, audit_path, kind, pg_store):
     # The upstream echoes the name into its preview, so the preview carries a NUL that Postgres text cannot hold.
-    store = PostgresStore(PG) if kind == "postgres" else MemoryStore()
+    store = pg_store(PG) if kind == "postgres" else MemoryStore()
     _, page = await approve_page_text(upstream, audit_path, {"name": "api\x00"}, store=store)
     assert "Dry-run preview: would delete api" in page and "\x00" not in page and "not available" not in page
 
@@ -1047,9 +1047,10 @@ async def test_readyz_keeps_a_late_failure_out_of_the_log(upstream, audit_path, 
 
 
 @pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set")
-async def test_readyz_on_postgres(upstream, audit_path):
-    async with proxy_client(make_airlock(upstream, audit_path, store=PostgresStore(PG))) as c:
+async def test_readyz_on_postgres(upstream, audit_path, pg_store, monkeypatch):
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "1")  # a refused connection waits for the pool timeout
+    async with proxy_client(make_airlock(upstream, audit_path, store=pg_store(PG))) as c:
         assert (await c.get("/readyz")).status_code == 200
-    async with proxy_client(make_airlock(upstream, audit_path, store=PostgresStore("postgresql://x:y@127.0.0.1:1/z"))) as c:
+    async with proxy_client(make_airlock(upstream, audit_path, store=pg_store("postgresql://x:y@127.0.0.1:1/z"))) as c:
         r = await c.get("/readyz")
         assert r.status_code == 503 and r.json() == {"status": "unavailable"}

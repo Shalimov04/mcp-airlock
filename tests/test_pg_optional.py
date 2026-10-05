@@ -34,3 +34,12 @@ def test_audit_query_without_psycopg_names_the_extra(no_psycopg):
 def test_memory_store_needs_no_psycopg(no_psycopg, monkeypatch):
     monkeypatch.delenv("AIRLOCK_STORE_DSN", raising=False)
     assert store_from_env() is not None
+
+
+def test_store_without_psycopg_pool_names_the_extra(monkeypatch):
+    monkeypatch.setitem(sys.modules, "psycopg_pool", None)
+    with pytest.raises(RuntimeError, match=r"mcp-airlock\[postgres\]"):
+        PostgresStore("postgresql://x/y")
+    PostgresAuditLog("postgresql://x/y")  # the audit sink does not use the pool
+    monkeypatch.delenv("AIRLOCK_STORE_DSN", raising=False)
+    assert store_from_env() is not None

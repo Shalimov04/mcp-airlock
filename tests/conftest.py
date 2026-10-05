@@ -98,3 +98,19 @@ async def call(client, tool, arguments=None, **kw) -> dict:
 
 def audit_rows(path) -> list[dict]:
     return [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
+
+
+@pytest.fixture
+async def pg_store():
+    """Factory for PostgresStore that closes every store it made: pool tasks must not outlive the test's loop."""
+    from mcp_airlock.store import PostgresStore
+    made: list = []
+
+    def make(dsn: str, **kw):
+        s = PostgresStore(dsn, **kw)
+        made.append(s)
+        return s
+
+    yield make
+    for s in made:
+        await s.aclose()
