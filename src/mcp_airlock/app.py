@@ -60,6 +60,12 @@ DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
 _tracer = trace.get_tracer("mcp-airlock")
 
 
+def _tool_texts(tool: dict[str, Any]) -> list[Any]:
+    """The text fields of a tool the model reads: description, title, annotations.title."""
+    ann = tool.get("annotations")
+    return [tool.get("description"), tool.get("title"), ann.get("title") if isinstance(ann, dict) else None]
+
+
 @dataclass(frozen=True)
 class ReloadSource:
     """Where a reload reads from: the policy file, and the pins file when one is configured."""
@@ -568,7 +574,7 @@ class Airlock:
         result["tools"] = visible  # ttlMs / cacheScope pass through untouched
 
     def _vet_tools(self, result: dict[str, Any], base: dict[str, Any], pins: dict[str, str] | None) -> None:
-        """After the allowlist filter: drop pinned tools whose definition changed, mark suspicious descriptions."""
+        """After the allowlist filter: drop pinned tools whose definition changed, mark suspicious descriptions and titles."""
         tools = result.get("tools")
         if not isinstance(tools, list):
             return
@@ -584,9 +590,9 @@ class Airlock:
                                      f"{t.get('name')}: definition changed since it was pinned")
                 meta[META + "pin_mismatch"] = len(dropped)
                 result["tools"] = tools = kept
-        # one scan per tool: guard.scan dedupes by phrase, and the same phrase in two descriptions must name both tools
+        # one scan per tool: guard.scan dedupes by phrase, and the same phrase in two tools must name both
         findings = [{"rule": f["rule"], "tool": t.get("name"), "excerpt": f["excerpt"]} for t in tools
-                    for f in guard.scan({"content": [{"type": "text", "text": t.get("description")}]})]
+                    for f in guard.scan({"content": [{"type": "text", "text": x} for x in _tool_texts(t)]})]
         if findings:
             meta[META + "suspicious"] = findings[:guard.MAX_FINDINGS]  # marked, never removed; one cap for the whole list
 

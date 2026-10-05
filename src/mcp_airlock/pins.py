@@ -36,7 +36,7 @@ def load(path: str | Path) -> dict[str, str]:
         raise ValueError(f"pins file {path}: expected a JSON object of tool name to sha256v2 pin")
     if any(isinstance(p, str) and OLD_PIN.fullmatch(p) for p in pins.values()):
         raise ValueError(f"pins file {path}: written in the old pin format (sha256:, which did not cover the tool title); "
-                         "rewrite it with `airlock-policy pin`")
+                         "re-pin with `airlock-policy pin` against a server you trust")
     for name, pin in pins.items():
         if not isinstance(pin, str) or not PIN.fullmatch(pin):
             raise ValueError(f"pins file {path}: the pin for {name!r} is not 'sha256v2:' plus 64 lowercase hex characters")

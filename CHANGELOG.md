@@ -9,6 +9,8 @@
   diff --pins` reports it once, and a `SIGHUP` reload keeps the current pins. Run `airlock-policy
   pin` again to rewrite the file. The `catalog.pin_mismatch` audit detail and the `diff` message now
   read "definition changed since it was pinned". Icons and `_meta` are deliberately not covered.
+* **Titles in the guard.** The `tools/list` scan for injection phrases now also reads the tool
+  `title` and `annotations.title`, not only the description; a hit is marked in `_meta` as before.
 
 ### Fixed
 
