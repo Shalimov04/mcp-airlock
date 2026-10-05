@@ -1,4 +1,5 @@
-"""OTLP exporter is attached when OTEL_EXPORTER_OTLP_ENDPOINT is set."""
+"""OTLP export: the exporter is wired from the standard OTEL_* variables and flushed on shutdown.
+Only the public SDK API is used here, never the processors' private lists."""
 
 from __future__ import annotations
 
@@ -15,44 +16,14 @@ import urllib.error
 import urllib.request
 
 import pytest
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor
 
-from mcp_airlock.__main__ import setup_otel
+from mcp_airlock import __main__ as cli
 
 from .conftest import ENVELOPE, ROOT, V
 
-
-def _processors(provider):
-    multi = getattr(provider, "_active_span_processor", None)
-    children = getattr(multi, "_span_processors", None)
-    if children is None:
-        return []
-    return list(children)
+EXPORTER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
 
 
-def test_no_otlp_without_endpoint(monkeypatch):
-    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-    provider = setup_otel(None)
-    assert not any(isinstance(p, BatchSpanProcessor) for p in _processors(provider))
-
-
-def test_otlp_processor_attached_when_endpoint_set(monkeypatch):
-    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
-    provider = setup_otel(None)
-    assert any(isinstance(p, BatchSpanProcessor) for p in _processors(provider))
-
-
-def test_file_and_otlp_can_both_be_on(monkeypatch, tmp_path):
-    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
-    provider = setup_otel(str(tmp_path / "spans.jsonl"))
-    kinds = {type(p) for p in _processors(provider)}
-    assert SimpleSpanProcessor in kinds
-    assert BatchSpanProcessor in kinds
-
-
-# ---------------------------------------------------------------- shutdown flush
 @pytest.fixture
 def collector():
     """A stub OTLP/HTTP collector: records (path, headers, body) of every POST."""
@@ -78,9 +49,65 @@ def collector():
         srv.server_close()
 
 
+@pytest.fixture
+def made(monkeypatch, request):
+    """setup_otel() with a clean OTEL_* environment; every provider is shut down at teardown."""
+    for k in ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
+              "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"):
+        monkeypatch.delenv(k, raising=False)
+    providers = []
+
+    def make(span_file=None):
+        provider = cli.setup_otel(span_file)
+        providers.append(provider)
+        return provider
+
+    yield make
+    for p in providers:
+        p.shutdown()
+
+
+def emit(provider, name="execute_tool x"):
+    provider.get_tracer("t").start_span(name).end()
+    provider.force_flush()
+
+
+def test_no_otlp_without_an_endpoint(monkeypatch, made):
+    monkeypatch.setattr(cli, "BatchSpanProcessor", lambda *a, **kw: pytest.fail("no endpoint, no OTLP"))
+    made(None)
+
+
+def test_empty_endpoint_is_off(monkeypatch, made):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    monkeypatch.setattr(cli, "BatchSpanProcessor", lambda *a, **kw: pytest.fail("empty endpoint, no OTLP"))
+    made(None)
+
+
+def test_spans_reach_the_endpoint_with_the_standard_headers(monkeypatch, made, collector):
+    pytest.importorskip(EXPORTER)
+    url, got = collector
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", url)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer t0k")
+    emit(made())
+    path, headers, body = got[0]
+    assert path == "/v1/traces"
+    assert headers.get("authorization") == "Bearer t0k"
+    assert b"execute_tool x" in body
+
+
+def test_file_and_otlp_together(monkeypatch, made, collector, tmp_path):
+    pytest.importorskip(EXPORTER)
+    url, got = collector
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", url)
+    emit(made(str(tmp_path / "spans.jsonl")))
+    assert "execute_tool x" in (tmp_path / "spans.jsonl").read_text()
+    assert any(b"execute_tool x" in b for _, _, b in got)
+
+
+# ---------------------------------------------------------------- shutdown flush
 @pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals")
 def test_sigterm_right_after_a_call_still_exports_the_span(collector, tmp_path):
-    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
+    pytest.importorskip(EXPORTER)
     url, got = collector
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -101,7 +128,7 @@ def test_sigterm_right_after_a_call_still_exports_the_span(collector, tmp_path):
                     break
             except OSError:
                 if time.time() > deadline or proc.poll() is not None:
-                    raise AssertionError("proxy did not start")
+                    raise AssertionError("proxy did not start") from None
                 time.sleep(0.1)
         params = {"_meta": dict(ENVELOPE), "name": "list_services", "arguments": {}}
         req = urllib.request.Request(base + "/mcp", method="POST", data=json.dumps(
