@@ -40,6 +40,7 @@ services:
 
   service:
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     entrypoint: ["python", "/e2e/service.py"]
     environment: {DATA_DSN: "postgresql://app:app@data-db:5432/app"}
     volumes: ["./:/e2e:ro"]
@@ -50,6 +51,7 @@ services:
 
   webhook:
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     entrypoint: ["python", "/e2e/webhook.py"]
     volumes: ["./:/e2e:ro"]
     networks: [e2e]
@@ -81,6 +83,7 @@ services:
 
   pin-init:  # pins the service's tools with the real command, then changes one pin the way a changed description would
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     user: root
     restart: "no"
     entrypoint: ["sh", "-c"]
@@ -135,6 +138,7 @@ services:
 
   runner:
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     user: root
     entrypoint: ["python", "-u", "/e2e/scenarios.py"]
     environment:

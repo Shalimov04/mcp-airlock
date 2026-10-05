@@ -12,6 +12,11 @@
 * **Titles in the guard.** The `tools/list` scan for injection phrases now also reads the tool
   `title` and `annotations.title`, not only the description; a hit is marked in `_meta` as before.
 
+### Added
+
+* `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
+  bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else disable it.
+
 ### Fixed
 
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
