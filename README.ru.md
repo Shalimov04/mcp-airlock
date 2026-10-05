@@ -59,6 +59,12 @@ docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
   ghcr.io/shalimov04/mcp-airlock:0.2 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
+В образе есть `HEALTHCHECK`: раз в 30 секунд python запрашивает `http://127.0.0.1:9000/healthz`
+(curl в образе нет). Если передаёте `--port` или `--host` с конкретным не-loopback адресом, переопределите проверку через
+`--health-cmd` или `healthcheck:` в compose. `--start-interval` требует Docker Engine 25+ (старые
+его игнорируют). Kubernetes проверку не читает: укажите `/healthz` в liveness probe и `/readyz` в
+readiness probe.
+
 Из чекаута:
 
 ```
