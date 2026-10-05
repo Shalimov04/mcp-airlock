@@ -2,11 +2,23 @@
 
 ## Unreleased
 
+### Changed
+
+* **Pin format.** The tool pin hash now covers `title`, and pins are written as `sha256v2:<hex>`.
+  A pins file in the old `sha256:` format is refused: `mcp-airlock` stops at startup, `airlock-policy
+  diff --pins` reports it once, and a `SIGHUP` reload keeps the current pins. Run `airlock-policy
+  pin` again to rewrite the file. The `catalog.pin_mismatch` audit detail and the `diff` message now
+  read "definition changed since it was pinned". Icons and `_meta` are deliberately not covered.
+* **Titles in the guard.** The `tools/list` scan for injection phrases now also reads the tool
+  `title` and `annotations.title`, not only the description; a hit is marked in `_meta` as before.
+
 ### Added
 
 * `docs/clients.md` has a table of MCP clients and whether they handle the `input_required`
   confirmation (#22). The Python SDK client 2.2.0 is tested (`examples/sdk_client_confirm.py`,
   `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.
+* `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
+  bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else disable it.
 
 ### Fixed
 

@@ -40,6 +40,7 @@ services:
 
   service:
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     entrypoint: ["python", "/e2e/service.py"]
     environment: {DATA_DSN: "postgresql://app:app@data-db:5432/app"}
     volumes: ["./:/e2e:ro"]
@@ -50,6 +51,7 @@ services:
 
   webhook:
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     entrypoint: ["python", "/e2e/webhook.py"]
     volumes: ["./:/e2e:ro"]
     networks: [e2e]
@@ -81,6 +83,7 @@ services:
 
   pin-init:  # pins the service's tools with the real command, then changes one pin the way a changed description would
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     user: root
     restart: "no"
     entrypoint: ["sh", "-c"]
@@ -90,7 +93,7 @@ services:
         until airlock-policy pin /e2e/policy.yaml --upstream http://service:8000/mcp --pins /pins/pins.json; do
           i=$$((i + 1)); [ $$i -lt 60 ] || exit 1; sleep 1
         done
-        python -c "import json; p = '/pins/pins.json'; d = json.load(open(p)); d['get_note'] = 'sha256:' + '0' * 64; json.dump(d, open(p, 'w'))"
+        python -c "import json; p = '/pins/pins.json'; d = json.load(open(p)); d['get_note'] = 'sha256v2:' + '0' * 64; json.dump(d, open(p, 'w'))"
     volumes: ["./:/e2e:ro", "pins:/pins"]
     networks: [e2e]
     depends_on:
@@ -135,6 +138,7 @@ services:
 
   runner:
     image: mcp-airlock-e2e:local
+    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
     user: root
     entrypoint: ["python", "-u", "/e2e/scenarios.py"]
     environment:
