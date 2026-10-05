@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -118,9 +119,17 @@ def test_several_problems_give_several_warnings_in_a_fixed_order():
     assert startup_warnings(IdentityConfig(), **WEAK)[0].startswith("no identity")  # first when present
 
 
+def test_a_missing_otlp_extra_is_one_warning_that_names_the_variables_and_the_extra():
+    ws = warn(otlp_missing=True)
+    only(ws, "mcp-airlock[otlp]")
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" in ws[0]
+    assert startup_warnings(WEAK_ID, **WEAK, otlp_missing=True)[-1] == ws[0]  # last in the fixed order
+
+
 def test_warnings_are_plain_sentences_that_avoid_the_words_the_e2e_run_greps_for():
     ws = startup_warnings(WEAK_ID, **WEAK) + startup_warnings(IdentityConfig(), **GOOD)
-    assert len(ws) == 6
+    ws += startup_warnings(GOOD_ID, **GOOD, otlp_missing=True)
+    assert len(ws) == 7
     for w in ws:
         assert "\n" not in w and w.endswith(".") and not re.search(r"error|fail|traceback", w, re.I), w
 
@@ -128,7 +137,8 @@ def test_warnings_are_plain_sentences_that_avoid_the_words_the_e2e_run_greps_for
 # ---------------------------------------------------------------- main()
 
 ENV_VARS = ["AIRLOCK_JWT_SECRET", "AIRLOCK_JWKS_URL", "AIRLOCK_JWT_ISSUER", "AIRLOCK_JWT_AUDIENCE", "AIRLOCK_TRUST_PRINCIPAL_HEADER",
-            "AIRLOCK_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK", "AIRLOCK_PUBLIC_URL", "AIRLOCK_PINS"]
+            "AIRLOCK_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK", "AIRLOCK_PUBLIC_URL", "AIRLOCK_PINS",
+            "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]
 GOOD_ENV = {"AIRLOCK_JWT_SECRET": KEY32, "AIRLOCK_SECRET": "s"}
 STUB_PROVIDER = SimpleNamespace(shutdown=lambda: None)
 
@@ -220,3 +230,25 @@ def test_main_hands_the_provider_shutdown_to_the_app(monkeypatch):
     kw = {}
     run_main(monkeypatch, GOOD_ENV, kw_out=kw)
     assert kw["on_shutdown"] is STUB_PROVIDER.shutdown
+
+
+NO_OTLP_EXTRA = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+
+
+def test_otlp_without_the_extra_warns_and_starts(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, NO_OTLP_EXTRA, None)  # makes the import raise ImportError
+    seen = run_main(monkeypatch, {**GOOD_ENV, "OTEL_EXPORTER_OTLP_ENDPOINT": "http://user:pw@collector:4318"})
+    assert seen["built"] and seen["ran"]
+    lines = warning_lines(capsys)
+    assert len(lines) == 1 and "mcp-airlock[otlp]" in lines[0], lines
+    assert "collector" not in lines[0] and "pw" not in lines[0]  # the value is never echoed
+
+
+def test_otlp_without_the_extra_stops_under_strict(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, NO_OTLP_EXTRA, None)
+    seen = {}
+    with pytest.raises(SystemExit) as e:
+        run_main(monkeypatch, {**GOOD_ENV, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://collector:4318/v1/traces"},
+                 "--strict", seen=seen)
+    assert e.value.code == 2 and not seen["built"]
+    assert "mcp-airlock[otlp]" in warning_lines(capsys)[0]

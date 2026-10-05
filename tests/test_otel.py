@@ -95,6 +95,20 @@ def test_spans_reach_the_endpoint_with_the_standard_headers(monkeypatch, made, c
     assert b"execute_tool x" in body
 
 
+def test_traces_endpoint_alone_turns_otlp_on(monkeypatch, made, collector):
+    pytest.importorskip(EXPORTER)
+    url, got = collector
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", url + "/custom/traces")
+    emit(made())
+    assert [p for p, _, _ in got] == ["/custom/traces"]  # used as-is, no /v1/traces appended
+
+
+def test_a_missing_extra_does_not_stop_setup(monkeypatch, made):
+    monkeypatch.setitem(sys.modules, EXPORTER, None)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+    emit(made())  # no SystemExit, and spans still work
+
+
 def test_file_and_otlp_together(monkeypatch, made, collector, tmp_path):
     pytest.importorskip(EXPORTER)
     url, got = collector

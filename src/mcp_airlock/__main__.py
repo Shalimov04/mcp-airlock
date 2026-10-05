@@ -20,22 +20,28 @@ from .pg import psycopg_module
 from .startup import startup_warnings
 
 
+OTLP_ENDPOINT_VARS = ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+
+
+def otlp_requested() -> bool:
+    return any(os.environ.get(v) for v in OTLP_ENDPOINT_VARS)
+
+
+def _otlp_exporter():  # the class, or None without the otlp extra
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    except ImportError:
+        return None
+    return OTLPSpanExporter
+
+
 def setup_otel(span_file: str | None) -> TracerProvider:
     provider = TracerProvider(resource=Resource.create({"service.name": "mcp-airlock"}))
-    if span_file:  # file/console exporter; OTLP is added below when OTEL_EXPORTER_OTLP_ENDPOINT is set
+    if span_file:  # file/console exporter, independent of OTLP
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter(out=open(span_file, "a"))))
-    if os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
-        try:
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-        except ImportError:
-            print(
-                "OTEL_EXPORTER_OTLP_ENDPOINT is set but opentelemetry-exporter-otlp-proto-http "
-                "is not installed. Install the optional extra: pip install 'mcp-airlock[otlp]'",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        # Endpoint, headers and protocol come from the standard OTEL_* environment variables.
-        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    if otlp_requested() and (exporter := _otlp_exporter()) is not None:
+        # endpoint, headers, timeout, TLS come from the standard OTEL_* variables
+        provider.add_span_processor(BatchSpanProcessor(exporter()))
     trace.set_tracer_provider(provider)
     return provider
 
@@ -73,7 +79,7 @@ def main() -> None:
     warnings = startup_warnings(
         IdentityConfig.from_env(), secret=os.environ.get("AIRLOCK_SECRET"),
         store_dsn=os.environ.get("AIRLOCK_STORE_DSN"), webhook=approvals.config_from_env()[0],
-        public_url=os.environ.get("AIRLOCK_PUBLIC_URL"))
+        public_url=os.environ.get("AIRLOCK_PUBLIC_URL"), otlp_missing=otlp_requested() and _otlp_exporter() is None)
     for w in warnings:
         print(f"mcp-airlock: warning: {w}", file=sys.stderr)
     if a.strict and warnings:
