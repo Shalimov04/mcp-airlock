@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .pg import psycopg_module
+from .pg import psycopg_module, with_conn_defaults
 
 log = logging.getLogger("mcp_airlock.audit")
 
@@ -212,7 +212,7 @@ class PostgresAuditLog:
 
     def __init__(self, dsn: str):
         psycopg_module()  # fail at startup, not on the first record
-        self.dsn = dsn
+        self.dsn = with_conn_defaults(dsn, "AIRLOCK_AUDIT_DSN")
         self._conn = None
         self._lock = threading.Lock()
         self._last: str | None = None  # read from the newest row at the first connect, only when this sink has to chain

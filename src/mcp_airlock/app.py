@@ -174,7 +174,12 @@ class Airlock:
                 if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
                     await self.http.aclose()
             finally:
-                self.audit.close()
+                try:
+                    close = getattr(self.engine.store, "aclose", None)  # an injected store may have none
+                    if close:
+                        await close()
+                finally:
+                    self.audit.close()
 
     def reload(self) -> ReloadResult:
         """Load the policy file and the pins file, then swap both in together. Nothing changes unless both load.

@@ -16,7 +16,7 @@ from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProces
 from . import approvals, pins
 from .app import build
 from .identity import IdentityConfig
-from .pg import psycopg_module
+from .pg import psycopg_module, psycopg_pool_module
 from .startup import startup_warnings
 
 
@@ -68,11 +68,16 @@ def main() -> None:
     if os.environ.get("AIRLOCK_STORE_DSN") or os.environ.get("AIRLOCK_AUDIT_DSN"):
         try:
             psycopg_module()
+            if os.environ.get("AIRLOCK_STORE_DSN"):
+                psycopg_pool_module()
         except RuntimeError as e:
             raise SystemExit(f"mcp-airlock: {e}") from None
     setup_otel(a.otel_file)
-    airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
-                    audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep)
+    try:
+        airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
+                        audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep)
+    except ValueError as e:
+        raise SystemExit(f"mcp-airlock: {e}") from None
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 
 

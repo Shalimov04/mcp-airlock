@@ -4,12 +4,14 @@ All timestamps are wall-clock ``time.time()`` floats supplied by the caller.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from .pg import psycopg_module
+from .pg import (DEFAULT_POOL_SIZE, connect_timeout_from_env, positive_int_env, psycopg_module,
+                 psycopg_pool_module, with_conn_defaults)
 
 # ponytail: usage rows older than a day are garbage; raise if a policy ever uses window_s > 86400.
 USAGE_RETENTION_S = 86400
@@ -31,6 +33,9 @@ class MemoryStore:
         self._prompts = {k: v for k, v in self._prompts.items() if v[0] >= now}
 
     async def ping(self) -> None:
+        return None
+
+    async def aclose(self) -> None:
         return None
 
     async def consume_once(self, key: str, exp_ts: float) -> bool:
@@ -99,21 +104,50 @@ _DDL_LOCK = 0x41524C4B  # 'ARLK': serialises first-use DDL across replicas
 
 
 class PostgresStore:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, pool_size: int | None = None) -> None:
         psycopg_module()  # fail at startup, not on the first request
-        self.dsn = dsn
+        psycopg_pool_module()
+        self.dsn = with_conn_defaults(dsn, "AIRLOCK_STORE_DSN")
+        self.pool_size = pool_size or positive_int_env("AIRLOCK_STORE_POOL_SIZE", DEFAULT_POOL_SIZE)
+        self._wait_s = float(max(2, connect_timeout_from_env()))  # psycopg raises a connect timeout below 2 s to 2
+        self._pool = None
+        self._pool_lock = asyncio.Lock()  # binds no loop at construction on 3.10+
         self._ready = False
+
+    async def _open_pool(self):
+        async with self._pool_lock:
+            if self._pool is None:  # concurrent first calls create exactly one pool
+                mod = psycopg_pool_module()
+                pool = mod.AsyncConnectionPool(
+                    self.dsn, min_size=1, max_size=self.pool_size,
+                    open=False,  # opened below: psycopg_pool warns when an async pool opens in its constructor
+                    name="airlock-store",
+                    # Pooled connections live long enough to auto-prepare, which breaks PgBouncer in transaction mode.
+                    kwargs={"autocommit": True, "prepare_threshold": None},
+                    # A call waits for a connection no longer than a connect would take.
+                    timeout=self._wait_s,
+                    # Drops connections killed by a restart or failover instead of failing a gated call.
+                    check=mod.AsyncConnectionPool.check_connection)
+                await pool.open(wait=False)  # the first call must not block on min_size beyond the timeout
+                self._pool = pool
+            return self._pool
 
     @asynccontextmanager
     async def _conn(self):
-        # ponytail: one connection per call, no pool; add psycopg_pool when p99 latency says so.
-        async with await psycopg_module().AsyncConnection.connect(self.dsn, autocommit=True) as c:
+        # Never take a session-level advisory lock here: the connection goes back to the pool still holding it.
+        pool = self._pool or await self._open_pool()
+        async with pool.connection() as c:
             if not self._ready:
                 async with c.transaction():
                     await c.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK,))
                     await c.execute(_DDL)
                 self._ready = True
             yield c
+
+    async def aclose(self) -> None:
+        pool, self._pool = self._pool, None  # idempotent; a later call opens a fresh pool
+        if pool is not None:
+            await pool.close()
 
     async def ping(self) -> None:
         async with self._conn() as c:

@@ -6,6 +6,7 @@ import time
 import uuid
 
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from mcp_airlock.store import MemoryStore, PostgresStore, store_from_env
 
@@ -15,13 +16,15 @@ PG_DSN = os.environ.get("AIRLOCK_TEST_PG_DSN")
 @pytest.fixture(params=["memory", "postgres"])
 async def store(request):
     if request.param == "memory":
-        return MemoryStore()
+        yield MemoryStore()
+        return
     if not PG_DSN:
         pytest.skip("AIRLOCK_TEST_PG_DSN not set")
     s = PostgresStore(PG_DSN)
     async with s._conn() as c:  # creates the tables; DB is shared, touch only ours
         await c.execute("TRUNCATE airlock_keys, airlock_prompts, airlock_usage")
-    return s
+    yield s
+    await s.aclose()
 
 
 def key() -> str:
@@ -115,4 +118,7 @@ def test_store_from_env(monkeypatch):
     assert type(store_from_env()) is MemoryStore
     monkeypatch.setenv("AIRLOCK_STORE_DSN", "postgresql://x@localhost/y")
     s = store_from_env()
-    assert type(s) is PostgresStore and s.dsn == "postgresql://x@localhost/y"
+    assert type(s) is PostgresStore
+    assert conninfo_to_dict(s.dsn) == {"user": "x", "host": "localhost", "dbname": "y", "connect_timeout": "10",
+                                     "tcp_user_timeout": "10000", "keepalives": "1", "keepalives_idle": "10",
+                                     "keepalives_interval": "5", "keepalives_count": "3"}

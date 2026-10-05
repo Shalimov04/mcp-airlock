@@ -2,8 +2,18 @@
 
 ## Unreleased
 
+### Changed
+
+* The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on first
+  use and closes at shutdown, instead of a connection per call. The `postgres` extra now includes
+  psycopg-pool. A bad DSN or store setting exits with a one-line message instead of a traceback.
+
 ### Fixed
 
+* The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
+  `AIRLOCK_STORE_CONNECT_TIMEOUT`, or set it in the DSN), plus `tcp_user_timeout` and TCP keepalives
+  unless the DSN sets them. A black-holed database host used to stall every gated call for about two
+  minutes.
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
   stored as U+FFFD.
 * `airlock-audit query` reads the rotated files too, oldest first.

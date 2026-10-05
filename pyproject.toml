@@ -34,14 +34,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.2"]
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2.8"]
 
 [project.urls]
 Repository = "https://github.com/Shalimov04/mcp-airlock"
 Issues = "https://github.com/Shalimov04/mcp-airlock/issues"
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "psycopg[binary]>=3.2", "ruff==0.16.10"]
+dev = ["pytest>=9.1.1", "pytest-asyncio>=1.4.0", "psycopg[binary]>=3.2", "psycopg-pool>=3.2.8", "ruff==0.16.10"]
 
 [project.scripts]
 mcp-airlock = "mcp_airlock.__main__:main"
