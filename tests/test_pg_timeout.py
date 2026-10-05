@@ -21,7 +21,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo  # noqa: E402
 import mcp_airlock.app as app_mod  # noqa: E402
 from mcp_airlock import Airlock, Policy  # noqa: E402
 from mcp_airlock.audit import AuditLog, PostgresAuditLog  # noqa: E402
-from mcp_airlock.pg import with_conn_defaults  # noqa: E402
+from mcp_airlock.pg import effective_connect_timeout, with_conn_defaults  # noqa: E402
 from mcp_airlock.store import MemoryStore, PostgresStore  # noqa: E402
 
 from .conftest import ROOT, make_airlock  # noqa: E402
@@ -102,6 +102,18 @@ def test_a_dsn_timeout_sets_tcp_user_timeout_and_a_huge_env_value_is_refused(mon
     monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2147484")  # x 1000 would overflow libpq's int
     with pytest.raises(ValueError, match="AIRLOCK_STORE_CONNECT_TIMEOUT must be"):
         PostgresStore("host=h")
+
+
+def test_a_huge_dsn_or_env_connect_timeout_cannot_overflow_tcp_user_timeout(monkeypatch):
+    assert conv("host=h connect_timeout=99999999999")["tcp_user_timeout"] == "86400000"
+    monkeypatch.setenv("PGCONNECT_TIMEOUT", "5000000")
+    assert conv("host=h")["tcp_user_timeout"] == "86400000"
+
+
+@pytest.mark.parametrize("raw,want", [("5.7", 5), ("3", 3), ("0.5", 10), ("0", 10), ("-4", 10), ("abc", 10),
+                                      ("inf", 10), ("nan", 10)])
+def test_effective_connect_timeout_parses_like_psycopg(raw, want):
+    assert effective_connect_timeout(f"host=h connect_timeout={raw}") == want
 
 
 @pytest.mark.parametrize("bad", ["abc", "0", "-1", "1.5"])
@@ -420,16 +432,30 @@ def test_a_bad_store_setting_exits_with_a_message_not_a_traceback(env, tmp_path)
     assert r.stderr.strip().splitlines()[-1].startswith("mcp-airlock:") and "Traceback" not in r.stderr
 
 
+def test_an_invalid_policy_exits_with_a_message_not_a_traceback(tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("default: nonsense\nrules: 5\n")
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("AIRLOCK_")}
+    r = subprocess.run([sys.executable, "-m", "mcp_airlock", "--policy", str(bad), "--upstream",
+                        "http://127.0.0.1:9/mcp", "--audit", str(tmp_path / "audit.jsonl")],
+                       capture_output=True, text=True, timeout=30, cwd=tmp_path, env=clean)
+    assert r.returncode != 0 and "Traceback" not in r.stderr
+    assert "mcp-airlock: " in r.stderr and "validation error" in r.stderr
+
+
 class Forwarder:
     """A TCP forwarder in front of the test database that can be switched off and on."""
 
     def __init__(self, host, port):
         self.target, self.server, self.writers = (host, port), None, set()
         self.port = None
+        self.frozen = False  # like SIGSTOP on the server: sockets stay open and ACKed, nothing is forwarded
 
     async def _pipe(self, r, w):
         try:
             while data := await r.read(65536):
+                while self.frozen:
+                    await asyncio.sleep(0.05)
                 w.write(data)
                 await w.drain()
         except OSError:
@@ -481,5 +507,42 @@ async def test_store_recovers_soon_after_the_database_is_back(monkeypatch):
             except psycopg.OperationalError:
                 assert time.monotonic() - t < 6, "the store did not recover"
     finally:
+        await store.aclose()
+        await fwd.off()
+
+
+@needs_pg
+@pytest.mark.parametrize("when", ["idle", "in_flight"])
+async def test_a_frozen_server_cannot_hang_a_store_call(when, monkeypatch):
+    # SIGSTOP on the server: the kernel still ACKs, so keepalives and tcp_user_timeout never fire.
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    info = conninfo_to_dict(PG)
+    fwd = Forwarder(info.get("host", "127.0.0.1"), int(info.get("port", 5432)))
+    await fwd.on()
+    store = PostgresStore(make_conninfo(PG, host="127.0.0.1", port=fwd.port, hostaddr="127.0.0.1"), pool_size=2)
+    try:
+        await store.ping()  # an idle connection is now parked in the pool
+        t = time.monotonic()
+        with pytest.raises(psycopg.OperationalError):  # PoolTimeout is one
+            if when == "idle":
+                fwd.frozen = True  # the pool's check of the parked connection hangs
+                await store.ping()
+            else:
+                async with store._conn() as c:  # checked out and healthy, then the server freezes
+                    fwd.frozen = True
+                    await c.execute("SELECT 1")
+        assert time.monotonic() - t < 5
+        fwd.frozen = False
+        await fwd.off()
+        await fwd.on()
+        t = time.monotonic()
+        while True:  # the cut connection is not handed out again
+            try:
+                await store.ping()
+                break
+            except psycopg.OperationalError:
+                assert time.monotonic() - t < 8, "the store did not recover"
+    finally:
+        fwd.frozen = False
         await store.aclose()
         await fwd.off()

@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import time
 from collections import defaultdict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from .pg import (DEFAULT_POOL_SIZE, effective_connect_timeout, positive_int_env, psycopg_module,
                  psycopg_pool_module, with_conn_defaults)
@@ -103,6 +104,14 @@ CREATE INDEX IF NOT EXISTS airlock_usage_pt_ts ON airlock_usage (principal, tool
 _DDL_LOCK = 0x41524C4B  # 'ARLK': serialises first-use DDL across replicas
 
 
+def _cut(conn) -> None:
+    try:
+        with socket.socket(fileno=os.dup(conn.pgconn.socket)) as s:  # a dup: the libpq fd stays open
+            s.shutdown(socket.SHUT_RDWR)
+    except Exception:  # already closed: nothing is waiting on it
+        pass
+
+
 class PostgresStore:
     def __init__(self, dsn: str, pool_size: int | None = None) -> None:
         psycopg_module()  # fail at startup, not on the first request
@@ -132,13 +141,30 @@ class PostgresStore:
                     # so calls keep timing out long after the database is back. Give up fast; the next call retries.
                     reconnect_timeout=self._wait_s,
                     # Drops connections killed by a restart or failover instead of failing a gated call.
-                    check=mod.AsyncConnectionPool.check_connection)
+                    check=self._check)
                 await pool.open(wait=False)  # the first call must not block on min_size beyond the timeout
                 if self._closed:  # aclose() ran while we were opening and saw no pool to close
                     await pool.close()
                     raise RuntimeError("the Postgres store is closed")
                 self._pool = pool
             return self._pool
+
+    @contextmanager
+    def _deadline(self, conn):
+        """Cut the connection's socket if the work on it outlasts the wait. A frozen server still ACKs at the
+        kernel, so keepalives and tcp_user_timeout never fire on a connection with nothing in flight, and
+        cancelling the call would make psycopg wait on the same silent server. Shutting our end makes the pending
+        call fail at once, and the pool discards the broken connection."""
+        timer = asyncio.get_running_loop().call_later(self._wait_s, _cut, conn)
+        try:
+            yield
+        finally:
+            timer.cancel()
+
+    async def _check(self, conn) -> None:
+        # The pool's own check has no deadline.
+        with self._deadline(conn):
+            await psycopg_pool_module().AsyncConnectionPool.check_connection(conn)
 
     @asynccontextmanager
     async def _conn(self):
@@ -147,12 +173,13 @@ class PostgresStore:
             raise RuntimeError("the Postgres store is closed")
         pool = self._pool or await self._open_pool()
         async with pool.connection() as c:
-            if not self._ready:
-                async with c.transaction():
-                    await c.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK,))
-                    await c.execute(_DDL)
-                self._ready = True
-            yield c
+            with self._deadline(c):
+                if not self._ready:
+                    async with c.transaction():
+                        await c.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK,))
+                        await c.execute(_DDL)
+                    self._ready = True
+                yield c
 
     async def aclose(self) -> None:
         self._closed = True

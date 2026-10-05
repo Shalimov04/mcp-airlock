@@ -4,18 +4,21 @@
 
 ### Changed
 
-* The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on first
-  use and closes at shutdown, instead of a connection per call. The `postgres` extra now includes
-  psycopg-pool. A failed connect is given up after the connect timeout, so the store recovers within
-  seconds of the database coming back. A store call waits for a pooled connection no longer than the
-  connect timeout in the final DSN, and is refused after shutdown. A bad policy, DSN or store setting exits with a one-line message instead of a traceback.
+* The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on
+  first use and closes at shutdown, instead of a connection per call. The `postgres` extra now
+  includes psycopg-pool. A failed connect is given up after the connect timeout, so the store
+  recovers within seconds of the database coming back. A store call waits for a pooled connection no
+  longer than the connect timeout in the final DSN, work on a connection is cut off after the same
+  time (a server that stops answering cannot hang a call), and a call after shutdown is refused. A
+  policy that fails validation, a bad DSN or a bad store setting exits with an error message instead
+  of a traceback.
 
 ### Fixed
 
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
-  `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout` (the same value) and TCP keepalives
-  unless the DSN sets them. A black-holed database host used to stall every gated call for about two
-  minutes. A `service=` DSN is left unchanged.
+  `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
+  (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to
+  stall every gated call for about two minutes. A `service=` DSN is left unchanged.
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
   stored as U+FFFD.
 * `airlock-audit query` reads the rotated files too, oldest first.

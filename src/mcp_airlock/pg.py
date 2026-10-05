@@ -69,7 +69,8 @@ def with_conn_defaults(dsn: str, var: str) -> str:
     if not os.environ.get("PGCONNECT_TIMEOUT"):
         add["connect_timeout"] = timeout
     if psycopg.pq.version() >= 120000:  # an older libpq rejects the keyword
-        add["tcp_user_timeout"] = effective_connect_timeout(dsn) * 1000  # follows the DSN's own timeout
+        # Follows the DSN's own timeout; clamped so a huge connect_timeout cannot overflow libpq's int (ms).
+        add["tcp_user_timeout"] = min(effective_connect_timeout(dsn), MAX_CONNECT_TIMEOUT) * 1000
     add.update(KEEPALIVES)
     add = {k: v for k, v in add.items() if k not in have}
     return psycopg.conninfo.make_conninfo(dsn, **add) if add else dsn
@@ -80,8 +81,8 @@ def effective_connect_timeout(dsn: str) -> int:
     have = psycopg_module().conninfo.conninfo_to_dict(dsn)
     for raw in (have.get("connect_timeout"), os.environ.get("PGCONNECT_TIMEOUT")):
         try:
-            if raw and int(raw) > 0:
-                return int(raw)
-        except ValueError:
+            if raw and int(float(raw)) > 0:  # parsed like psycopg does
+                return int(float(raw))
+        except (ValueError, OverflowError):
             pass  # libpq rejects junk at connect time; fall back to ours here
     return connect_timeout_from_env()  # also for connect_timeout=0 (unbounded in libpq): the pool wait needs a bound

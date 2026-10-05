@@ -364,9 +364,13 @@ The MCP side is stateless, the governance side is not. Used confirmation keys, a
 and blast-radius counters have to live somewhere shared if you run more than one replica;
 that is what `AIRLOCK_STORE_DSN` is for. The Postgres store keeps a small connection pool
 (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on first use and closes at shutdown. If the
-database is down, each store call fails after about the connect timeout and the gated call is
-denied. A failed connect attempt is given up after the connect timeout, so the store recovers
-within a few seconds of the database coming back. A saturated pool can make `/readyz` report 503.
+database is down, each store call fails after about the connect timeout (twice that at most, when
+the server accepts the connection and then stops answering) and the gated call is denied. A failed
+connect attempt is given up after the connect timeout, so the store recovers within a few seconds of
+the database coming back. A connection that has not answered by then is cut and dropped from the pool,
+including one that was idle in it. With a `service=` DSN the wait is `PGCONNECT_TIMEOUT` or
+`AIRLOCK_STORE_CONNECT_TIMEOUT` (default 10 s), never a `connect_timeout` in the service file.
+A saturated pool can make `/readyz` report 503.
 
 Forced dry run only helps if the tool actually honours `dry_run`. The proxy checks that the
 argument is declared, it cannot check that the implementation respects it. Test that
