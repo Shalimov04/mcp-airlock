@@ -33,12 +33,13 @@ from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import SpanKind, format_trace_id
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, Response
+from starlette.responses import JSONResponse as _JSONResponse
 from starlette.routing import Route
 
 from . import approvals, guard
 from . import pins as tool_pins
-from .audit import audit_from_env, redact, scrub
+from .audit import _wellformed, audit_from_env, redact, scrub
 from .identity import IdentityConfig, Principal, resolve
 from .policy import Engine, Policy
 from .store import store_from_env
@@ -90,6 +91,18 @@ class ReloadResult:
     tools_before: int
     tools_after: int
     error: str | None = None
+
+
+class JSONResponse(_JSONResponse):
+    """Every JSON answer the proxy sends. JSON allows a lone surrogate ("\\ud800"), and json.loads keeps it, but UTF-8
+    cannot encode it: Starlette's renderer then raises after the upstream already acted. Escaping the whole document
+    is lossless and still valid JSON, so the caller gets the result and not a bare 500."""
+
+    def render(self, content: Any) -> bytes:
+        try:
+            return super().render(content)
+        except UnicodeEncodeError:
+            return json.dumps(content, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
 
 
 class CatalogUnavailable(Exception):
@@ -687,9 +700,10 @@ class Airlock:
             preview_line = f"Dry-run preview: {text or '(empty)'}"
         ask = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
                "and declining cancels the request." if self.approval_mode == "oob" else "Confirm to execute for real.")
-        message = (f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
-                   f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
-                   f"{ask} Idempotency key: {key}")
+        # U+FFFD for a lone surrogate, as the audit does: this text is posted as UTF-8 to the webhook and saved for the page
+        message = _wellformed(f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
+                              f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
+                              f"{ask} Idempotency key: {key}")
         meta = {**((preview or {}).get("_meta") or {}), META + "idempotency_key": key, META + "verdict": "confirm",
                 META + "rule_id": "tier.L2.confirm"}
         if preview_blocks is not None:
@@ -716,7 +730,7 @@ class Airlock:
             await self.engine.store.save_prompt(claims["k"], stored, claims["exp"])
         except Exception as e:
             log.warning("saving the approval prompt text failed: %s", type(e).__name__)
-        text = f"mcp-airlock approval request from {principal}\n" + message
+        text = _wellformed(f"mcp-airlock approval request from {principal}\n") + message
         await approvals.notify(text, self.approve_link(result["requestState"]), webhook=self.webhook,
                                http=self.notify_http, telegram_chat=self.telegram_chat)
 

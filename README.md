@@ -480,7 +480,8 @@ with `[REDACTED]` (whole subtrees included), and so are values that look like be
 `sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
 approvers, including the dry-run preview. `detail` holds the output-cap numbers and the
 injection rules that fired, when any did. Free text in `detail` is scrubbed the same way as
-the arguments. A lone surrogate in client text (JSON allows `"\ud800"`) is stored as U+FFFD.
+the arguments. A lone surrogate in client text (JSON allows `"\ud800"`) is stored as U+FFFD and
+shown as U+FFFD to approvers; in a response it travels as the JSON escape.
 
 To read the log:
 

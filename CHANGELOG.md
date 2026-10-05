@@ -81,6 +81,10 @@
   stall every gated call for about two minutes. A `service=` DSN is left unchanged.
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
   stored as U+FFFD.
+* A lone surrogate in the request id, in an upstream answer (a result, an error, an SSE frame or a
+  tool description) or in the arguments of an `L2` call no longer turns the response into a bare
+  HTTP 500 after the upstream already acted. The answer is sent with the JSON escape, the approval
+  prompt and the webhook text carry U+FFFD, and the call keeps one outcome record.
 * `airlock-audit query` reads the rotated files too, oldest first.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.
