@@ -33,6 +33,10 @@
   `upstream.bad_reply`. `airlock-policy diff` refuses such a catalog too.
 * `--otel-file` writes JSON Lines, one span per line, instead of indented multi-line JSON that
   no line-by-line reader could parse. `examples/spans.jsonl` is regenerated in the new format.
+* `airlock-policy diff` and `pin` read `AIRLOCK_ENV` when `--env` is not given, as the proxy does.
+  In a shell that has `AIRLOCK_ENV` set, `diff` now checks that environment's tier column instead
+  of the policy's own, and both commands accept a policy without `environment`. The pins `pin`
+  writes do not depend on the environment.
 
 ### Added
 
@@ -119,7 +123,8 @@
   an MCP result as `ERROR upstream`, instead of a traceback; validation errors are no longer
   labelled `upstream`.
 * `airlock-policy lint` accepts a policy without `environment` when `--env` or `AIRLOCK_ENV` names
-  one, as the proxy does; `diff` and `pin` read `AIRLOCK_ENV` too when `--env` is not given.
+  one, as the proxy does. Without either, the error also lists the file's other validation errors
+  instead of hiding them until the environment is fixed.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to

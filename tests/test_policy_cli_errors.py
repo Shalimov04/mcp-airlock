@@ -147,6 +147,17 @@ def test_the_first_env_beats_airlock_env_for_a_missing_environment(tmp_path):
     assert "where_env_unknown" not in codes(policy_cli.lint(p, envs=["staging"], env="prod"))
 
 
+def test_lint_without_environment_and_without_env_still_lists_the_other_errors(tmp_path, monkeypatch):
+    # otherwise the L9 error only shows up after the user has fixed the environment
+    monkeypatch.delenv("AIRLOCK_ENV", raising=False)
+    p = tmp_path / "p.yaml"
+    p.write_text("version: 1\ntools: {x: {tiers: {prod: L9}}}\n")
+    f = policy_cli.lint(p)
+    assert [(l, c) for l, c, _ in f] == [("ERROR", "invalid")]
+    msg = f[0][2]
+    assert msg.startswith("environment is not set") and "tools.x.tiers.prod" in msg and "\n" not in msg
+
+
 def test_lint_keeps_the_other_validation_errors_when_environment_is_filled_in(tmp_path):
     p = tmp_path / "p.yaml"
     p.write_text("version: 1\ntools: {x: {tiers: {prod: L9}}}\n")

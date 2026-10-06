@@ -81,7 +81,9 @@ proxy runs without exporting.
 
 The container image `ghcr.io/shalimov04/mcp-airlock` includes both extras. It listens on
 `0.0.0.0:9000`, runs as a non-root user and has `/data` as its working directory, so
-`audit.jsonl` lands there. Each release is tagged with its version and its major.minor
+`audit.jsonl` lands there. The user is uid 65532, so a host directory bind-mounted at `/data`
+has to be writable by that uid (`chown 65532 ./data`), or the start stops with a `Permission
+denied` message for the audit file. Each release is tagged with its version and its major.minor
 (`X.Y.Z` and `X.Y`).
 
 From a checkout, `uv sync --all-extras` installs everything including the test tools.

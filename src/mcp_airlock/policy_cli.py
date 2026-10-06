@@ -48,7 +48,12 @@ def _load(policy_path: str | Path, env: str | None = None, fallback_env: str | N
                 raise
             if fallback_env:
                 return Policy.load(policy_path, fallback_env)
-            raise PolicyInvalid("environment is not set: add `environment:` to the policy or pass --env (or set AIRLOCK_ENV)") from e
+            msg = "environment is not set: add `environment:` to the policy or pass --env (or set AIRLOCK_ENV)"
+            # the other errors would otherwise only show up once the environment is fixed
+            others = [f"{'.'.join(str(k) for k in err['loc'])}: {err['msg']}" for err in e.errors() if err["loc"] != ("environment",)]
+            if others:
+                msg += "; also " + "; ".join(others)
+            raise PolicyInvalid(msg) from e
     except (OSError, yaml.YAMLError, ValidationError) as e:
         raise PolicyInvalid(str(e)) from e
 
