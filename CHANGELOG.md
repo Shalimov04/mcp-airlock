@@ -62,6 +62,10 @@
   which Docker Engine on Linux cannot resolve the upstream host.
 * `docs/clients.md`: the `claude mcp add` command gets `--scope user`; without it the server is
   registered for the current project only.
+* `AIRLOCK_SECRET` without `AIRLOCK_STORE_DSN` is a startup warning (an error under `--strict`):
+  the memory store remembers a used confirmation only in its own process, so a fixed key let a
+  confirmed call run again on a second replica or after a restart. The README told you to set
+  the key for replicas without saying that it needs the shared store.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to

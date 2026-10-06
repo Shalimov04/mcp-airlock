@@ -37,6 +37,11 @@ def startup_warnings(identity: IdentityConfig, *, secret: str | None, store_dsn:
     if store_dsn and not secret:
         out.append("AIRLOCK_STORE_DSN is set without AIRLOCK_SECRET: every replica signs confirmation tokens "
                    "with its own random key, so a token from one replica is refused by another.")
+    if secret and not store_dsn:
+        # The memory store remembers a used confirmation only in this process, while a fixed key makes the token
+        # valid in every process that has it: a second replica or a restart runs the confirmed call again.
+        out.append("AIRLOCK_SECRET is set without AIRLOCK_STORE_DSN: used confirmations are remembered only in this "
+                   "process, so a confirmed call can run again on another replica or after a restart.")
     if webhook and (public_url or "").rstrip("/") in ("", DEFAULT_PUBLIC_URL):
         out.append("AIRLOCK_APPROVAL_WEBHOOK is set while AIRLOCK_PUBLIC_URL is the default "
                    f"{DEFAULT_PUBLIC_URL}: nobody but this host can open the approve link in the message.")

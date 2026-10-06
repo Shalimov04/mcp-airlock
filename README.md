@@ -255,7 +255,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_JWKS_URL`, `AIRLOCK_JWT_ISSUER`, `AIRLOCK_JWT_AUDIENCE` | Verify bearer tokens against an OIDC provider (RS256/ES256). Takes precedence over the shared secret. Set the audience; without it any token from that provider is accepted. The issuer is checked only when set. |
 | `AIRLOCK_GROUPS_CLAIM` | Claim to read groups from. Default `groups`. A list, or a string split on commas and spaces. |
 | `AIRLOCK_TRUST_PRINCIPAL_HEADER` | Set to `1` to accept `X-Airlock-Principal` and `X-Airlock-Groups` (comma or space separated). Off by default. Only turn it on behind a gateway that sets those headers itself and strips them from clients. A bearer token that fails verification never falls back to the header. |
-| `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it if you run more than one replica. |
+| `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it only together with `AIRLOCK_STORE_DSN`: replicas need the same key, but with the memory store a fixed key would let a used confirmation run again on another replica or after a restart. |
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. Needs the `postgres` extra. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. Needs the `postgres` extra. |
 | `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
@@ -292,6 +292,8 @@ At startup the proxy prints a warning to stderr for each of these:
 - `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without
   `Authorization` is trusted on the header alone
 - `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
+- `AIRLOCK_SECRET` without `AIRLOCK_STORE_DSN`: used confirmations are remembered only in this
+  process, so a confirmed call can run again on another replica or after a restart
 - `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the
   approve link
 - `AIRLOCK_APPROVAL_WEBHOOK` that is not an `http(s)` URL with a host, or a Telegram URL without
