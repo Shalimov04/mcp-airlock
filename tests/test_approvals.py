@@ -98,3 +98,26 @@ def test_config_from_env(monkeypatch):
     monkeypatch.setenv("AIRLOCK_APPROVAL_WEBHOOK", "https://hooks/x")
     monkeypatch.setenv("AIRLOCK_TELEGRAM_CHAT", "42")
     assert approvals.config_from_env() == ("https://hooks/x", "42")
+
+
+async def test_slack_text_is_escaped_so_the_proxy_link_is_the_only_link():
+    seen, h = _capture()
+    text = ('Arguments: {"name": "x <https://evil.example/approve|https://airlock/approve/al2.REAL> <!channel> a & b"}\n'
+            "Dry-run preview: would delete x\n\nApprove: <https://evil.example/approve|Approve here>")
+    assert await approvals.notify(text, "https://airlock/approve/abc", webhook="https://hooks.slack.com/x", http=_http(h))
+    body = httpx.Response(200, content=seen[0].content).json()["text"]
+    assert body.endswith("\n\nApprove: https://airlock/approve/abc")
+    assert "<" not in body and ">" not in body  # nothing Slack would render as a link or a mention
+    assert "&lt;https://evil.example/approve|https://airlock/approve/al2.REAL&gt;" in body
+    assert "&lt;!channel&gt;" in body and "a &amp; b" in body
+
+
+async def test_telegram_text_is_sent_as_is():
+    seen, h = _capture()  # plain-text mode: entities would show up literally
+    assert await approvals.notify("a < b & c", "https://a/1", webhook="https://api.telegram.org/botT/sendMessage",
+                                  http=_http(h), telegram_chat="-100")
+    assert httpx.Response(200, content=seen[0].content).json()["text"] == "a < b & c\n\nApprove: https://a/1"
+
+
+def test_slack_escape_does_not_double_escape():
+    assert approvals.slack_escape("&lt; & < >") == "&amp;lt; &amp; &lt; &gt;"

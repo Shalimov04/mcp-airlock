@@ -397,6 +397,9 @@ means nobody can approve that prompt: a new call without `requestState` issues a
 and posts again. httpx itself logs every request URL at `INFO`, so if you configure logging,
 keep the `httpx` logger at `WARNING`.
 
+In the Slack message `&`, `<` and `>` in the arguments and the dry-run preview are escaped, so
+the only link in it is the proxy's own.
+
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
 `X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval as

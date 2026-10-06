@@ -52,6 +52,8 @@
   JWT configured used to label the header-supplied name `verified`.
 * A JWT whose `sub` is empty or blank is refused with 401 `principal.missing` instead of being
   accepted as principal `""`; a blank `X-Airlock-Principal` is refused the same way.
+* The Slack approval message escapes `&`, `<` and `>` in the arguments and the dry-run preview, so
+  an agent cannot plant a `<url|label>` link or an `<!channel>` mention in it.
 
 ## 0.3.0 - 2026-10-02
 
