@@ -68,6 +68,9 @@
 * `POST` on an approve link whose confirmation was already executed or declined answers 409 and
   records nothing; it used to say "Approved" and write `mrtr.approved_oob`. A second `POST` on an
   approved confirmation changes nothing and is not recorded again, and the page shows the state.
+* A startup warning (an error under `--strict`) for an `AIRLOCK_APPROVAL_WEBHOOK` that is not an
+  `http(s)` URL with a host, for a Telegram URL without `AIRLOCK_TELEGRAM_CHAT`, and for a chat id
+  without a webhook. Such a proxy used to start in `oob` mode with nothing able to approve.
 
 ## 0.3.0 - 2026-10-02
 

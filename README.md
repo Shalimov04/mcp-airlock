@@ -241,7 +241,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. A positive integer. See [Postgres](#postgres). |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `https://api.telegram.org/bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
-| `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
+| `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. A Telegram URL without it is a startup warning: no message can be sent. |
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_OTEL_FILE` | Path of the span file, the same as `--otel-file`. |
@@ -273,6 +273,9 @@ At startup the proxy prints a warning to stderr for each of these:
 - `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
 - `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the
   approve link
+- `AIRLOCK_APPROVAL_WEBHOOK` that is not an `http(s)` URL with a host, or a Telegram URL without
+  `AIRLOCK_TELEGRAM_CHAT`: no message can be delivered, and in `oob` mode nothing can be approved
+- `AIRLOCK_TELEGRAM_CHAT` without `AIRLOCK_APPROVAL_WEBHOOK`: it is ignored
 - an OTLP endpoint without the `otlp` extra: spans are not exported
 
 With `--strict` any warning stops the start with exit code 2.

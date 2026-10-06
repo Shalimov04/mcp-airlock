@@ -1,13 +1,25 @@
 """Configurations that start fine and are weaker than they look."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from .identity import IdentityConfig
 
 DEFAULT_PUBLIC_URL = "http://127.0.0.1:9000"
 
 
+def _usable_webhook_url(webhook: str) -> bool:
+    try:
+        u = urlsplit(webhook)
+        port = u.port  # raises ValueError on a port that is not a number, which httpx refuses too
+        return u.scheme in ("http", "https") and bool(u.hostname) and (port is None or port > 0)
+    except ValueError:
+        return False
+
+
 def startup_warnings(identity: IdentityConfig, *, secret: str | None, store_dsn: str | None,
-                     webhook: str | None, public_url: str | None, otlp_missing: bool = False) -> list[str]:
+                     webhook: str | None, public_url: str | None, otlp_missing: bool = False,
+                     telegram_chat: str | None = None) -> list[str]:
     """One sentence per risky setting, in a fixed order. Plain values in, so callers need no environment."""
     out = []
     has_jwt = bool(identity.jwt_secret or identity.jwks_url)
@@ -28,6 +40,16 @@ def startup_warnings(identity: IdentityConfig, *, secret: str | None, store_dsn:
     if webhook and (public_url or "").rstrip("/") in ("", DEFAULT_PUBLIC_URL):
         out.append("AIRLOCK_APPROVAL_WEBHOOK is set while AIRLOCK_PUBLIC_URL is the default "
                    f"{DEFAULT_PUBLIC_URL}: nobody but this host can open the approve link in the message.")
+    # A webhook that can never deliver is worse than none: with one set the default mode is oob, where only the
+    # link in the message approves, so every L2 prompt would wait for a message nobody receives.
+    if webhook and not _usable_webhook_url(webhook):
+        out.append("AIRLOCK_APPROVAL_WEBHOOK is not an http(s) URL with a host: no approval message can be delivered, "
+                   "and in oob mode nothing can be approved.")
+    elif webhook and "api.telegram.org" in webhook and not telegram_chat:
+        out.append("AIRLOCK_APPROVAL_WEBHOOK is a Telegram URL but AIRLOCK_TELEGRAM_CHAT is not set: Telegram refuses a "
+                   "message without a chat id, and in oob mode nothing can be approved.")
+    elif telegram_chat and not webhook:
+        out.append("AIRLOCK_TELEGRAM_CHAT is set without AIRLOCK_APPROVAL_WEBHOOK: it is ignored, no approval message is sent.")
     if otlp_missing:  # names the variables, never their values: an endpoint can carry credentials
         out.append("an OTLP endpoint is set (OTEL_EXPORTER_OTLP_ENDPOINT or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT) but the "
                    "otlp extra is not installed, so spans are not exported: install it with pip install 'mcp-airlock[otlp]'.")

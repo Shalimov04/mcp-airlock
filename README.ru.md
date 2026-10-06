@@ -242,7 +242,7 @@ helm install airlock charts/mcp-airlock \
 | `AIRLOCK_STORE_POOL_SIZE` | Наибольшее число соединений, которые Postgres-хранилище держит открытыми на одну реплику. По умолчанию `4`. Целое положительное. См. [Postgres](#postgres). |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-совместимый incoming webhook или Telegram-URL вида `https://api.telegram.org/bot<token>/sendMessage`. Туда уходят запросы подтверждения со ссылкой. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` или `inband`. При `oob` одобряет только ссылка; `accept` в `inputResponses` считается отсутствием ответа. При `inband` одобряет `accept` клиента; `accept` с токеном `oob` там тоже игнорируется. По умолчанию `oob`, если задан webhook, иначе `inband`. `oob` без webhook отклоняется при запуске. |
-| `AIRLOCK_TELEGRAM_CHAT` | Chat id для Telegram. |
+| `AIRLOCK_TELEGRAM_CHAT` | Chat id для Telegram. Telegram-URL без него даёт предупреждение при старте: сообщение отправить нельзя. |
 | `AIRLOCK_PUBLIC_URL` | Базовый URL для ссылок одобрения. По умолчанию `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Путь к файлу пинов тулов, то же, что `--pins`. Без него ничего не пинится. См. [Пины описаний тулов](#пины-описаний-тулов). |
 | `AIRLOCK_OTEL_FILE` | Путь к файлу спанов, то же, что `--otel-file`. |
@@ -274,6 +274,9 @@ SDK OpenTelemetry читает и остальные стандартные пе
 - `AIRLOCK_STORE_DSN` без `AIRLOCK_SECRET`: реплики подписывают разными ключами
 - `AIRLOCK_APPROVAL_WEBHOOK` при `AIRLOCK_PUBLIC_URL` по умолчанию: ссылку одобрения никто
   другой не откроет
+- `AIRLOCK_APPROVAL_WEBHOOK`, который не является `http(s)` URL с хостом, или Telegram-URL без
+  `AIRLOCK_TELEGRAM_CHAT`: сообщение доставить нельзя, и в режиме `oob` одобрить ничего не выйдет
+- `AIRLOCK_TELEGRAM_CHAT` без `AIRLOCK_APPROVAL_WEBHOOK`: значение игнорируется
 - OTLP-endpoint без extra `otlp`: спаны не экспортируются
 
 С `--strict` любое предупреждение прерывает запуск с кодом 2.

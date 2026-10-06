@@ -78,9 +78,10 @@ def main() -> None:
         tool_pins = pins.load(a.pins) if a.pins else None
     except ValueError as e:
         raise SystemExit(f"mcp-airlock: {e}") from None
+    webhook, telegram_chat = approvals.config_from_env()
     warnings = startup_warnings(
         IdentityConfig.from_env(), secret=os.environ.get("AIRLOCK_SECRET"),
-        store_dsn=os.environ.get("AIRLOCK_STORE_DSN"), webhook=approvals.config_from_env()[0],
+        store_dsn=os.environ.get("AIRLOCK_STORE_DSN"), webhook=webhook, telegram_chat=telegram_chat,
         public_url=os.environ.get("AIRLOCK_PUBLIC_URL"), otlp_missing=otlp_requested() and _otlp_exporter() is None)
     for w in warnings:
         print(f"mcp-airlock: warning: {w}", file=sys.stderr)
