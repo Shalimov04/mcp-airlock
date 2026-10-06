@@ -116,12 +116,14 @@
 * `mcp-airlock` exits with one `mcp-airlock: <message>` line instead of a traceback when the policy
   file is missing, is not YAML or is not a YAML mapping (a list or a string, which with `--env` used
   to be a `TypeError`), the audit or span file cannot be opened, or an `OTEL_*` setting is rejected
-  by the SDK; `--port` outside 0-65535 is refused by the argument parser. `AIRLOCK_DEBUG=1` keeps
-  the traceback.
+  by the SDK; `--port` outside 0-65535 is refused by the argument parser. A YAML syntax error or a
+  validation error is one line too, starting with the policy path, instead of PyYAML's caret
+  diagram or pydantic's block per error. `AIRLOCK_DEBUG=1` keeps the traceback.
 * `airlock-policy diff` and `pin` report a missing, unparsable or invalid policy (a list or a string
   at the top level included) as `ERROR invalid`, like `lint`, and a `tools/list` answer that is not
   an MCP result as `ERROR upstream`, instead of a traceback; validation errors are no longer
-  labelled `upstream`.
+  labelled `upstream`. In all three commands a YAML syntax or validation error is one `ERROR
+  invalid` line starting with the policy path, like every other finding.
 * `airlock-policy lint` accepts a policy without `environment` when `--env` or `AIRLOCK_ENV` names
   one, as the proxy does. Without either, the error also lists the file's other validation errors
   instead of hiding them until the environment is fixed.

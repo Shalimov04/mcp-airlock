@@ -33,6 +33,27 @@ class PolicyInvalid(Exception):
     """The policy file cannot be read, is not YAML or fails validation; str() is the message for `ERROR invalid`."""
 
 
+def policy_error_message(path: str | Path, e: BaseException) -> str:
+    """A policy loading error on one line, with the file name. str() of a PyYAML error is a caret diagram over several
+    lines that names "<unicode string>", and a pydantic one adds the input value and a URL per error; findings and
+    the proxy's startup message are one line each. Other errors (an OSError names the file itself) keep their str()."""
+    if isinstance(e, yaml.MarkedYAMLError):
+        mark = e.problem_mark or e.context_mark
+        where = f" (line {mark.line + 1}, column {mark.column + 1})" if mark else ""
+        return f"{path}: {': '.join(s for s in (e.context, e.problem) if s)}{where}"
+    if isinstance(e, ValidationError):
+        n = e.error_count()
+        return f"{path}: {n} validation error{'s' if n != 1 else ''} for {e.title}: {'; '.join(_detail(err) for err in e.errors())}"
+    return str(e)
+
+
+def _detail(err: dict[str, Any]) -> str:
+    """One pydantic error as `loc: msg`, plus the offending value when it is a scalar (a whole mapping would not fit)."""
+    loc = ".".join(str(k) for k in err["loc"])
+    got = f", got {err['input']!r}" if isinstance(err.get("input"), str | int | float | bool | None) else ""
+    return f"{loc}: {err['msg']}{got}" if loc else f"{err['msg']}{got}"
+
+
 def _missing_environment(e: ValidationError) -> bool:
     return any(err["loc"] == ("environment",) and err["type"] == "missing" for err in e.errors())
 
@@ -50,12 +71,12 @@ def _load(policy_path: str | Path, env: str | None = None, fallback_env: str | N
                 return Policy.load(policy_path, fallback_env)
             msg = "environment is not set: add `environment:` to the policy or pass --env (or set AIRLOCK_ENV)"
             # the other errors would otherwise only show up once the environment is fixed
-            others = [f"{'.'.join(str(k) for k in err['loc'])}: {err['msg']}" for err in e.errors() if err["loc"] != ("environment",)]
+            others = [_detail(err) for err in e.errors() if err["loc"] != ("environment",)]
             if others:
                 msg += "; also " + "; ".join(others)
             raise PolicyInvalid(msg) from e
     except (OSError, yaml.YAMLError, ValidationError) as e:
-        raise PolicyInvalid(str(e)) from e
+        raise PolicyInvalid(policy_error_message(policy_path, e)) from e
 
 
 def lint(policy_path: str | Path, envs=(), env: str | None = None) -> list[Finding]:

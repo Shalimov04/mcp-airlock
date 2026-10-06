@@ -60,6 +60,22 @@ def test_diff_and_pin_with_a_non_mapping_policy_and_an_environment_are_one_error
     assert one_line(capsys).startswith("ERROR invalid: ") and not pins.exists()
 
 
+@pytest.mark.parametrize("text, expect, noise", [
+    # PyYAML's str() is a caret diagram over several lines that names "<unicode string>", not the file
+    ("tools: [", "while parsing a flow node: expected the node content, but found '<stream end>' (line 1, column 9)", "<unicode string>"),
+    # pydantic's str() is one block per error with the input value and a documentation URL
+    ("version: 1\nenvironment: prod\ntools: {x: {tiers: {prod: L9}}}\n",
+     "1 validation error for Policy: tools.x.tiers.prod: Input should be 'L0', 'L1', 'L2' or 'L3', got 'L9'", "errors.pydantic.dev"),
+])
+@pytest.mark.parametrize("cmd", ["lint", "diff", "pin"])
+def test_a_yaml_or_validation_error_is_one_finding_line_naming_the_policy_file(tmp_path, capsys, cmd, text, expect, noise):
+    (tmp_path / "p.yaml").write_text(text)
+    extra = [] if cmd == "lint" else ["--upstream", "http://127.0.0.1:1/mcp", *(["--pins", str(tmp_path / "pins.json")] if cmd == "pin" else [])]
+    assert policy_cli.main([cmd, str(tmp_path / "p.yaml"), *extra]) == 1
+    out = one_line(capsys)
+    assert out.count("\n") == 1 and out.startswith(f"ERROR invalid: {tmp_path / 'p.yaml'}: {expect}") and noise not in out, out
+
+
 def test_diff_with_an_invalid_policy_is_invalid_not_upstream(tmp_path, capsys):
     (tmp_path / "l9.yaml").write_text("version: 1\nenvironment: prod\ntools: {x: {tiers: {prod: L9}}}\n")
     assert policy_cli.main(["diff", str(tmp_path / "l9.yaml"), "--upstream", "http://127.0.0.1:1/mcp"]) == 1

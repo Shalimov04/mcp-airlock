@@ -18,6 +18,7 @@ from . import approvals, pins
 from .app import build
 from .identity import IdentityConfig
 from .pg import psycopg_module, psycopg_pool_module
+from .policy_cli import policy_error_message
 from .startup import startup_warnings
 
 
@@ -69,11 +70,11 @@ def _port(text: str) -> int:
     return n
 
 
-def _fail(e: BaseException) -> SystemExit:
+def _fail(e: BaseException, message: str | None = None) -> SystemExit:
     """Bad input is one line on stderr and exit 1; AIRLOCK_DEBUG=1 keeps the traceback to see where it came from."""
     if os.environ.get("AIRLOCK_DEBUG") == "1":  # exactly 1, as documented: "0" or "false" must not mean debug
         raise e
-    return SystemExit(f"mcp-airlock: {e}")
+    return SystemExit(f"mcp-airlock: {message or e}")
 
 
 def main() -> None:
@@ -117,7 +118,8 @@ def main() -> None:
                         audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep,
                         on_shutdown=provider.shutdown)
     except (ValueError, OSError, yaml.YAMLError) as e:
-        raise _fail(e) from None
+        # a YAMLError or a pydantic ValidationError inside build() can only come from the policy
+        raise _fail(e, policy_error_message(a.policy, e)) from None
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 
 

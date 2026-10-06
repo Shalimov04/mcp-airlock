@@ -97,6 +97,23 @@ def test_a_policy_that_is_not_a_mapping_with_an_environment_is_a_message_not_a_t
     assert error_text(r.stderr).startswith("mcp-airlock: ") and "valid dictionary" in r.stderr, r.stderr
 
 
+@pytest.mark.parametrize("text, expect, noise", [
+    # PyYAML's str() is a caret diagram over several lines that names "<unicode string>", not the file
+    ("tools: [1,2", "while parsing a flow sequence: expected ',' or ']', but got '<stream end>' (line 1, column 12)", "<unicode string>"),
+    # pydantic's str() is one block per error with the input value and a documentation URL
+    ("version: 1\nenvironment: prod\ntools: {x: {tiers: {prod: L9}}}\n",
+     "1 validation error for Policy: tools.x.tiers.prod: Input should be 'L0', 'L1', 'L2' or 'L3', got 'L9'", "errors.pydantic.dev"),
+    ("- a\n", "1 validation error for Policy: Input should be a valid dictionary", "input_type"),
+])
+def test_a_yaml_or_validation_error_is_one_line_naming_the_policy_file(tmp_path, text, expect, noise):
+    (tmp_path / "p.yaml").write_text(text)
+    r = run_airlock("--policy", str(tmp_path / "p.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"))
+    assert r.returncode == 1 and "Traceback" not in r.stderr, r.stderr
+    err = error_text(r.stderr)
+    assert "\n" not in err and err.startswith(f"mcp-airlock: {tmp_path / 'p.yaml'}: ") and expect in err, r.stderr
+    assert noise not in err, r.stderr
+
+
 def test_a_policy_without_environment_is_a_validation_message_not_a_traceback(tmp_path):
     (tmp_path / "noenv.yaml").write_text("version: 1\ntools: {get_service: {tiers: {prod: L0}}}\n")
     r = run_airlock("--policy", str(tmp_path / "noenv.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"))
