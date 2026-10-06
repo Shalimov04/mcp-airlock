@@ -16,7 +16,11 @@ from .pg import psycopg_module, with_conn_defaults
 
 FILTERS = ("principal", "tool", "verdict", "rule_id", "phase")
 _REL = re.compile(r"^(\d+)([mhd])$")
-_QUOTED = re.compile(r'"[^"]*"|(?<!\w)\'[^\']*\'')  # a value libpq or psycopg quotes in an error message
+_QUOTED = re.compile(r'"[^"]*"|(?<!\w)\'(?:[^\'\\]|\\.)*\'')  # a value libpq quotes, or one psycopg repr()s
+# DSN keys whose value is one of libpq's own settings, not something the operator chose: left in the error text
+_SETTINGS = frozenset(("sslmode", "sslnegotiation", "gssencmode", "channel_binding", "target_session_attrs",
+                       "load_balance_hosts", "require_auth", "client_encoding", "replication", "sslsni",
+                       "ssl_min_protocol_version", "ssl_max_protocol_version"))
 _UNIT = {"m": "minutes", "h": "hours", "d": "days"}
 
 
@@ -91,15 +95,25 @@ def query_pg(dsn: str, where: dict, since: datetime | None, limit: int | None, v
         with psycopg.connect(dsn) as conn:
             return [rec for (rec,) in reversed(conn.execute(sql, params).fetchall())]
     except psycopg.Error as e:  # unreachable, refused, no table: one line for main(), libpq's text is several
-        raise RuntimeError("Postgres: " + _blanked(str(e))) from None
+        text = e.diag.message_primary or str(e)  # the server's one line, without the `LINE 1: ...` context under it
+        raise RuntimeError("Postgres: " + _blanked(text, psycopg.conninfo.conninfo_to_dict(dsn))) from None
 
 
-def _blanked(text: str) -> str:
-    """libpq's or psycopg's error text on one line, every quoted value blanked. What they quote (a host, a socket
-    path, a user, a database) comes from the DSN, and a URI whose password holds an unescaped '@' is parsed with a
-    slice of the password as the host, so the quotes are where a secret would leak. What is left still says
-    refused, timed out or no such table."""
-    return _QUOTED.sub('"..."', " ".join(text.split()))
+def _blanked(text: str, conninfo: dict) -> str:
+    """libpq's or psycopg's error text on one line with every value from the DSN blanked. What they quote (a host,
+    a socket path, a user, a database) is what the operator typed, and a URI whose password holds an unescaped '@'
+    is parsed with a slice of the password as the host, so that is where a secret would leak. The values go first,
+    longest first and in their repr() form too: libpq does not escape a '"' inside what it quotes and psycopg
+    escapes a "'", so a quote inside a value would end the quoted span early. Numbers (port, timeouts) and libpq's
+    own settings stay, and so do its words: refused, timed out or no such table."""
+    text = " ".join(text.split())
+    values = set()
+    for k, v in conninfo.items():
+        if len(v) > 1 and not v.isdigit() and k not in _SETTINGS:  # a one-character value would blank every word
+            values.update((v, repr(v)[1:-1]))
+    for v in sorted(values, key=len, reverse=True):
+        text = text.replace(v, "...")
+    return _QUOTED.sub('"..."', text)
 
 
 def default_files(live: str = "audit.jsonl") -> list[str]:

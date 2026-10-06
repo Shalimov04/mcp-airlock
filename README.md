@@ -543,8 +543,9 @@ audit.jsonl:57: not JSON` (or `not a record`, for JSON that is not an object) on
 the rest of the log is still printed. A missing file, a DSN that does not parse, a Postgres
 that does not answer or a missing `postgres` extra is one `airlock-audit: ...` line and exit
 code 1, never a traceback. A Postgres error keeps libpq's words (refused, timed out, no such
-table) but every value libpq quotes, such as the host, socket path, user or database, is
-blanked to `"..."`, so nothing from the DSN is echoed, the password included.
+table), but every value from the DSN other than a number or a setting such as `sslmode` (the
+host, socket path, user, database or password) is blanked to `"..."`, quoted by libpq or not,
+so none of them reaches the terminal or a log.
 
 The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
 it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and

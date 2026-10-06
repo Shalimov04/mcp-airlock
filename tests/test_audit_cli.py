@@ -122,17 +122,22 @@ def test_the_command_prints_no_traceback_and_no_password_for_a_bad_dsn(tmp_path,
     assert p.stderr.count("\n") == 1 and "Traceback" not in p.stderr and "hunter2" not in p.stderr and "secret" not in p.stderr
 
 
-def test_the_postgres_error_blanks_every_value_libpq_quotes(no_env, monkeypatch, capsys):
+@pytest.mark.parametrize("dsn, secrets", [
+    # libpq quotes the socket path it tried; the host, user and database are quoted the same way
+    ("host=/sockdir7/hun@ter2 port=1 user=u sslmode=disable", ["ter2", "sockdir7"]),
+    # a URI password with an unescaped '@': the tail of the password is parsed as the host and quoted as such
+    ("postgresql://u:hun@ter2@127.0.0.1:1/db?sslmode=disable", ["ter2", "hun"]),
+    # the password P@ss'w"ord1: psycopg repr()s a host that holds a quote, and escapes the ' when it holds both kinds
+    ("postgresql://user:P@ss'w\"ord1@127.0.0.1:1/airlock?sslmode=disable", ["ord1", "ss'w", "ss\\'w"]),
+    # libpq does not escape a '"' inside the socket path it quotes, so the quoted span ends early
+    ('host=/sock"SECRETD port=1 user=u sslmode=disable', ["SECRETD", 'sock"']),  # "sock" alone is in libpq's "socket"
+], ids=["socket path", "password tail as host", "quotes in the password", "quote in the socket path"])
+def test_the_postgres_error_blanks_every_value_from_the_dsn(no_env, monkeypatch, capsys, dsn, secrets):
     pytest.importorskip("psycopg")  # the DSN cases need the extra; the file cases do not
     monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
-    # libpq quotes the socket path it tried; the host, user and database are quoted the same way
-    rc, rows, err = query(capsys, "--dsn", "host=/sockdir7/hun@ter2 port=1 user=u sslmode=disable")
+    rc, rows, err = query(capsys, "--dsn", dsn)
     assert (rc, rows) == (1, []) and err.startswith("airlock-audit: Postgres: ") and err.count("\n") == 1
-    assert "ter2" not in err and "sockdir7" not in err and '"..."' in err and "failed" in err
-    # a URI password with an unescaped '@': the tail of the password is parsed as the host and quoted as such
-    rc, rows, err = query(capsys, "--dsn", "postgresql://u:hun@ter2@127.0.0.1:1/db?sslmode=disable")
-    assert (rc, rows) == (1, []) and err.startswith("airlock-audit: Postgres: ") and err.count("\n") == 1
-    assert "ter2" not in err and "hun" not in err
+    assert '"..."' in err and "failed" in err and not [s for s in secrets if s in err], err
 
 
 def test_a_dsn_nobody_listens_on_is_one_line(no_env, capsys):
@@ -164,4 +169,3 @@ def test_a_dsn_without_the_postgres_extra_names_it(no_env, monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "psycopg", None)  # makes `import psycopg` raise ImportError
     rc, rows, err = query(capsys, "--dsn", "postgresql://x/y")
     assert (rc, rows) == (1, []) and err.startswith("airlock-audit: ") and "mcp-airlock[postgres]" in err and err.count("\n") == 1
-

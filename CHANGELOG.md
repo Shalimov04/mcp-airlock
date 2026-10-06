@@ -100,12 +100,13 @@
   read.
 * `airlock-audit query` prints one `airlock-audit: ...` line and exits 1, instead of a traceback,
   for a missing file, a DSN that does not parse (the old traceback quoted part of it, password
-  included), an unreachable Postgres or a missing `postgres` extra; the Postgres connect has the
-  proxy's connect timeout; `--since 99999999999d` is a usage error instead of an OverflowError;
-  `--limit` must be positive (a negative value used to drop the oldest N records).
-* The Postgres error `airlock-audit query` prints blanks every value libpq quotes (host, socket
-  path, user, database) to `"..."`: a URI password with an unescaped `@` is parsed with the tail
-  of the password as the host, and libpq's text used to quote it.
+  included), an unreachable Postgres or a missing `postgres` extra. A Postgres error keeps
+  libpq's words, but every value from the DSN other than a number or a setting such as `sslmode`
+  (host, socket path, user, database, password) is blanked to `"..."`, quoted by libpq or not: a
+  URI password with an unescaped `@` is parsed with its tail as the host, which libpq's text used
+  to show. The Postgres connect has the proxy's connect timeout; `--since 99999999999d` is a
+  usage error instead of an OverflowError; `--limit` must be positive (a negative value used to
+  drop the oldest N records).
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to
