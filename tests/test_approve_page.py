@@ -65,3 +65,38 @@ async def test_approve_page_sends_anti_framing_referrer_and_cache_headers(upstre
         assert h["cache-control"] == "no-store" and h["x-content-type-options"] == "nosniff"
         csp = h["content-security-policy"]
         assert "frame-ancestors 'none'" in csp and "form-action 'self'" in csp and "default-src 'none'" in csp
+
+
+async def _boom(*a):
+    raise RuntimeError("db down at postgresql://user:pw@host/db")
+
+
+async def test_approve_page_keeps_the_text_when_only_the_state_read_fails(upstream, audit_path, caplog):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+        al.engine.store.is_consumed = _boom  # the text was read fine; the state is what fails
+        page = (await c.get(approve_path(posted))).text
+    assert "<pre>" in page and "would delete api" in page and "not available" not in page
+    assert "<form" in page  # unknown state: the button stays, the POST checks again
+    assert "RuntimeError" in caplog.text and "pw@host" not in caplog.text
+
+
+async def test_approve_submit_answers_503_with_the_page_headers_when_the_store_is_down(upstream, audit_path, caplog):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+        path = approve_path(posted)
+        for failing in ("is_consumed", "approve"):
+            store, saved = al.engine.store, getattr(al.engine.store, failing)
+            setattr(store, failing, _boom)
+            r = await c.post(path, headers={"x-forwarded-user": "bob"})
+            setattr(store, failing, saved)
+            assert r.status_code == 503 and "not recorded" in r.text, failing
+            assert r.headers["x-frame-options"] == "DENY" and r.headers["cache-control"] == "no-store"
+            assert "pw@host" not in r.text
+        assert (await c.post(path, headers={"x-forwarded-user": "bob"})).status_code == 200  # the store is back
+    assert len([r for r in audit_rows(audit_path) if r["rule_id"] == "mrtr.approved_oob"]) == 2  # the one real click
+    assert "pw@host" not in caplog.text

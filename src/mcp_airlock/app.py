@@ -758,10 +758,14 @@ class Airlock:
         # GET only renders (link unfurlers and prefetchers do GETs); the POST below approves.
         try:  # a store outage leaves the page without the text, like a failed save
             text = await self.engine.store.get_prompt(claims["k"])
-            state = await self._approval_state(claims["k"])
         except Exception as e:
             log.warning("reading the approval prompt text failed: %s", type(e).__name__)
-            text, state = None, "open"  # the POST checks again before it records anything
+            text = None
+        try:  # read apart from the text: a failure here must not throw away a text already read
+            state = await self._approval_state(claims["k"])
+        except Exception as e:
+            log.warning("reading the approval state failed: %s", type(e).__name__)
+            state = "open"  # the button stays: the POST checks again before it records anything
         details = (f"<pre>{html.escape(text)}</pre>" if text is not None else
                    "<p>The details of this request are not available; check the original message before approving.</p>")
         action = {"consumed": "<p>This request was already executed or declined; it can no longer be approved.</p>",
@@ -780,12 +784,17 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         tool, principal = html.escape(claims["t"]), html.escape(claims["p"])
         # A burned key (executed or declined) can never run again: approving it would only put a misleading
         # approval into the audit. A second click on an approved one changes nothing and is not recorded twice.
-        state = await self._approval_state(claims["k"])
+        try:
+            state = await self._approval_state(claims["k"])
+            if state == "open":
+                await self.engine.store.approve(claims["k"], claims["exp"])
+        except Exception as e:  # a store outage: say so with the page's headers, record nothing (a 500 would carry neither)
+            log.warning("recording the approval failed: %s", type(e).__name__)
+            return self._approve_html("The store did not answer, so the approval was not recorded. Try again later.", status_code=503)
         if state == "consumed":
             return self._approve_html(f"{tool} for {principal} was already executed or declined; nothing to approve.", status_code=409)
         if state == "approved":
             return self._approve_html(f"{tool} for {principal} is already approved. The agent can retry now.")
-        await self.engine.store.approve(claims["k"], claims["exp"])
         headers = {k.lower(): v for k, v in request.headers.items()}
         who = await self._resolve(headers)
         # Who clicked: "verified" only for a subject out of a token this process checked. Any other Authorization
