@@ -109,6 +109,10 @@
   to show. The Postgres connect has the proxy's connect timeout; `--since 99999999999d` is a
   usage error instead of an OverflowError; `--limit` must not be negative (a negative value used to
   drop the oldest N records).
+* `mcp-airlock` exits with one `mcp-airlock: <message>` line instead of a traceback when the policy
+  file is missing or not YAML, the audit or span file cannot be opened, or an `OTEL_*` setting is
+  rejected by the SDK; `--port` outside 0-65535 is refused by the argument parser. `AIRLOCK_DEBUG=1`
+  keeps the traceback.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to

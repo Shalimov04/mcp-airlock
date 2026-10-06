@@ -270,6 +270,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_OTEL_FILE` | Path of the span file, the same as `--otel-file`. |
+| `AIRLOCK_DEBUG` | Set to `1` to get the Python traceback for a startup error instead of the one-line `mcp-airlock: <message>`. |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
 | `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. A positive integer. |
 | `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one: for a tool call both are a tool error (`upstream.too_large`, `upstream.encoded`), for `tools/list` and `server/discover` an HTTP 502. A positive integer. |
@@ -283,8 +284,11 @@ The OpenTelemetry SDK reads the other standard variables too: the rest of
 [Tracing](#tracing).
 
 A bad value (a limit that is not a positive integer, a DSN that does not parse, an unknown
-approval mode, a policy that fails validation, an invalid pins file) stops the start with an
-error message on stderr and exit status 1.
+approval mode, a policy file that is missing, is not YAML or fails validation, an audit or span
+file that cannot be opened, an invalid pins file, an `OTEL_*` setting the SDK rejects) stops the
+start with a `mcp-airlock: <message>` line on stderr and exit status 1, with no traceback;
+`AIRLOCK_DEBUG=1` prints the traceback instead. A flag with a bad value (`--port 99999`) is
+refused by the argument parser with exit status 2.
 
 ### Startup warnings
 

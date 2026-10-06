@@ -1,0 +1,87 @@
+"""Bad input to mcp-airlock is one error line and a non-zero exit, never a traceback.
+The proxy is run as a process, as the bugs were found."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+
+import pytest
+
+from mcp_airlock import __main__ as cli
+
+from .conftest import ROOT
+
+EXAMPLE = ROOT / "policy.example.yaml"
+EXPORTER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
+
+
+def run_airlock(*argv, env=None):
+    clean = {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "AIRLOCK_"))}
+    return subprocess.run([sys.executable, "-m", "mcp_airlock", *argv], env={**clean, **(env or {})},
+                          capture_output=True, text=True, timeout=120)
+
+
+def error_text(stderr: str) -> str:
+    """stderr without the startup warnings (this environment configures no identity)."""
+    return "\n".join(ln for ln in stderr.splitlines() if not ln.startswith("mcp-airlock: warning: "))
+
+
+@pytest.mark.parametrize("case, env, expect", [
+    ("missing policy", {}, "nope.yaml"),
+    ("unparsable policy", {}, "flow sequence"),
+    ("audit path is a directory", {}, "Is a directory"),
+    ("span file in a missing directory", {}, "spans.jsonl"),
+    ("OTEL timeout", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_TIMEOUT": "abc"}, "abc"),
+    ("OTEL compression", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_COMPRESSION": "zstd"}, "zstd"),
+    ("OTEL batch delay", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_BSP_SCHEDULE_DELAY": "-5"}, "schedule_delay"),
+])
+def test_bad_input_is_one_message_and_exit_1_not_a_traceback(tmp_path, case, env, expect):
+    if env:
+        pytest.importorskip(EXPORTER)  # the OTEL_* settings are only read when the exporter is built
+    (tmp_path / "bad.yaml").write_text("tools: [1,2")
+    policy = {"missing policy": tmp_path / "nope.yaml", "unparsable policy": tmp_path / "bad.yaml"}.get(case, EXAMPLE)
+    audit = tmp_path if case == "audit path is a directory" else tmp_path / "audit.jsonl"
+    argv = ["--policy", str(policy), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(audit), "--port", "0"]
+    if case == "span file in a missing directory":
+        argv += ["--otel-file", str(tmp_path / "no" / "dir" / "spans.jsonl")]
+    r = run_airlock(*argv, env=env)
+    assert r.returncode == 1, r.stderr
+    err = error_text(r.stderr)
+    assert err.startswith("mcp-airlock: ") and expect in err, r.stderr
+    assert "Traceback" not in r.stderr and "mcp-airlock" not in err[len("mcp-airlock: "):], r.stderr  # one message
+
+
+def test_port_outside_0_65535_is_refused_by_the_parser(tmp_path):
+    r = run_airlock("--policy", str(EXAMPLE), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"),
+                    "--port", "99999")
+    assert r.returncode == 2 and "Traceback" not in r.stderr, r.stderr
+    assert "--port: must be between 0 and 65535" in r.stderr
+
+
+@pytest.mark.parametrize("text", ["-1", "65536", "x"])
+def test_port_type_rejects_out_of_range_and_non_integers(text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli._port(text)
+    assert cli._port("0") == 0 and cli._port("65535") == 65535
+
+
+def test_airlock_debug_keeps_the_traceback(tmp_path):
+    r = run_airlock("--policy", str(tmp_path / "nope.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit",
+                    str(tmp_path / "a.jsonl"), env={"AIRLOCK_DEBUG": "1"})
+    assert r.returncode == 1 and "Traceback" in r.stderr and "FileNotFoundError" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("value", ["0", "false", ""])
+def test_airlock_debug_other_than_1_does_not_mean_debug(tmp_path, value):
+    r = run_airlock("--policy", str(tmp_path / "nope.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit",
+                    str(tmp_path / "a.jsonl"), env={"AIRLOCK_DEBUG": value})
+    assert r.returncode == 1 and "Traceback" not in r.stderr and error_text(r.stderr).startswith("mcp-airlock: "), r.stderr
+
+
+def test_a_policy_without_environment_is_a_validation_message_not_a_traceback(tmp_path):
+    (tmp_path / "noenv.yaml").write_text("version: 1\ntools: {get_service: {tiers: {prod: L0}}}\n")
+    r = run_airlock("--policy", str(tmp_path / "noenv.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"))
+    assert r.returncode == 1 and "Traceback" not in r.stderr and "environment" in error_text(r.stderr), r.stderr

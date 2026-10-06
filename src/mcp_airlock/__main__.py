@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable
 
 import uvicorn
+import yaml
 from opentelemetry import trace
 from opentelemetry.sdk.resources import SERVICE_NAME, OTELResourceDetector, Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -61,6 +62,20 @@ def _int_min(low: int) -> Callable[[str], int]:
     return parse
 
 
+def _port(text: str) -> int:
+    n = _int_min(0)(text)
+    if n > 65535:  # otherwise the bind fails inside uvicorn with an OverflowError traceback
+        raise argparse.ArgumentTypeError("must be between 0 and 65535")
+    return n
+
+
+def _fail(e: BaseException) -> SystemExit:
+    """Bad input is one line on stderr and exit 1; AIRLOCK_DEBUG=1 keeps the traceback to see where it came from."""
+    if os.environ.get("AIRLOCK_DEBUG") == "1":  # exactly 1, as documented: "0" or "false" must not mean debug
+        raise e
+    return SystemExit(f"mcp-airlock: {e}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="mcp-airlock")
     ap.add_argument("--policy", required=True)
@@ -73,12 +88,12 @@ def main() -> None:
     ap.add_argument("--pins", default=os.environ.get("AIRLOCK_PINS"), help="tool pins file written by `airlock-policy pin`; a pinned tool whose definition changed is hidden from tools/list")
     ap.add_argument("--strict", action="store_true", help="exit with status 2 if the configuration has any startup warning")
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=9000)
+    ap.add_argument("--port", type=_port, default=9000)
     a = ap.parse_args()
     try:
         tool_pins = pins.load(a.pins) if a.pins else None
     except ValueError as e:
-        raise SystemExit(f"mcp-airlock: {e}") from None
+        raise _fail(e) from None
     webhook, telegram_chat = approvals.config_from_env()
     warnings = startup_warnings(
         IdentityConfig.from_env(), secret=os.environ.get("AIRLOCK_SECRET"),
@@ -94,14 +109,15 @@ def main() -> None:
             if os.environ.get("AIRLOCK_STORE_DSN"):
                 psycopg_pool_module()
         except RuntimeError as e:
-            raise SystemExit(f"mcp-airlock: {e}") from None
-    provider = setup_otel(a.otel_file)
+            raise _fail(e) from None
+    # OSError: the span, policy or audit file; YAMLError: the policy; ValueError: validation and the OTEL_* settings
     try:
+        provider = setup_otel(a.otel_file)
         airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
                         audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep,
                         on_shutdown=provider.shutdown)
-    except ValueError as e:
-        raise SystemExit(f"mcp-airlock: {e}") from None
+    except (ValueError, OSError, yaml.YAMLError) as e:
+        raise _fail(e) from None
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 
 
