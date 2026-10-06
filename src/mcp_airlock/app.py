@@ -55,6 +55,14 @@ CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
+# The approve page is a capability URL behind SSO: never framed (clickjacking), never cached, never sent as a referrer.
+APPROVE_PAGE_HEADERS = {
+    "content-security-policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+}
 READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
 DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
@@ -724,9 +732,12 @@ class Airlock:
         claims = self.verify_token(request.path_params["token"], APPROVE_PREFIX)  # an agent's requestState is refused here
         return claims if claims and claims["exp"] >= time.time() else None
 
+    def _approve_html(self, body: str, status_code: int = 200) -> HTMLResponse:
+        return HTMLResponse(body, status_code=status_code, headers=APPROVE_PAGE_HEADERS)
+
     async def approve_page(self, request: Request) -> Response:
         if (claims := self._approval_claims(request)) is None:
-            return HTMLResponse("Invalid or expired approval link.", status_code=400)
+            return self._approve_html("Invalid or expired approval link.", status_code=400)
         # GET only renders (link unfurlers and prefetchers do GETs); the POST below approves.
         try:  # a store outage leaves the page without the text, like a failed save
             text = await self.engine.store.get_prompt(claims["k"])
@@ -735,7 +746,7 @@ class Airlock:
             text = None
         details = (f"<pre>{html.escape(text)}</pre>" if text is not None else
                    "<p>The details of this request are not available; check the original message before approving.</p>")
-        return HTMLResponse(f"""<!doctype html><title>mcp-airlock approval</title>
+        return self._approve_html(f"""<!doctype html><title>mcp-airlock approval</title>
 <h2>Approve tool call?</h2>
 <p><b>{html.escape(claims['t'])}</b> requested by <b>{html.escape(claims['p'])}</b> in <b>{html.escape(claims['e'])}</b><br>
 idempotency key <code>{html.escape(claims['k'])}</code></p>
@@ -744,7 +755,7 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
 
     async def approve_submit(self, request: Request) -> Response:
         if (claims := self._approval_claims(request)) is None:
-            return HTMLResponse("Invalid or expired approval link.", status_code=400)
+            return self._approve_html("Invalid or expired approval link.", status_code=400)
         await self.engine.store.approve(claims["k"], claims["exp"])
         headers = {k.lower(): v for k, v in request.headers.items()}
         who = await self._resolve(headers)
@@ -758,7 +769,7 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         detail = {"key": claims["k"], "approved_by": approver, "approved_by_source": source if approver else None}
         self.audit.write(phase="intent", verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
         self._outcome(verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
-        return HTMLResponse(f"Approved {html.escape(claims['t'])} for {html.escape(claims['p'])}. The agent can retry now.")
+        return self._approve_html(f"Approved {html.escape(claims['t'])} for {html.escape(claims['p'])}. The agent can retry now.")
 
 
 def _ms(t0: float) -> int:

@@ -56,6 +56,9 @@
   an agent cannot plant a `<url|label>` link or an `<!channel>` mention in it.
 * A principal named `group:<g>` no longer gets the tier override of group `<g>`: `group:` keys in
   `principals` match group membership only.
+* The approve page responses carry `Cache-Control: no-store`, `Referrer-Policy: no-referrer`,
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a Content-Security-Policy with
+  `frame-ancestors 'none'`.
 
 ## 0.3.0 - 2026-10-02
 
