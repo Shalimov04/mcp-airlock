@@ -25,7 +25,7 @@ tools:
     tiers: {dev: L2, prod: L2}          # no staging entry, so denied in staging
     blast_radius: {max_per_call: 1, max_per_principal: 2, window_s: 86400}
   restart_service:
-    description: restart a service (the tool has no dry_run argument, so airlock refuses L1/L2 for it)
+    description: restart a service (no dry_run argument, so airlock refuses it at L1 and confirms it without a preview at L2)
     tiers: {dev: L3, prod: L2}
   rotate_key:
     description: rotate a credential (its dry_run argument is header-mirrored)
