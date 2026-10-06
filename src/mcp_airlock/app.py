@@ -374,7 +374,9 @@ class Airlock:
             trace_id = format_trace_id(span.get_span_context().trace_id)
             base = dict(call_id=uuid.uuid4().hex, principal=sub, method=method, tool=tool, args=args, trace_id=trace_id)
             if who is None:
-                self._audit_deny(base, "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
+                # args=None as for every other pre-auth denial: anyone can send these, and two records of up to the request
+                # limit each would let an unauthenticated client fill the disk or rotate the real history away
+                self._audit_deny(dict(base, args=None), "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
                 return _rpc_error(rid, PRINCIPAL_REQUIRED, "airlock: principal required", status=401)
             span.set_attribute("enduser.id", who.sub)
             try:

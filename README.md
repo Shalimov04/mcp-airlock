@@ -507,6 +507,12 @@ hash chain continues into the new file. A record bigger than `N` is still writte
 is off by default. Lowering `--audit-keep` deletes the existing `.N` files above the new
 limit at the next rotation.
 
+A request refused before it is attributed to a principal (a malformed or oversized body, no
+credentials) is audited without its arguments, so an unauthenticated client cannot write
+payloads into the log. Its two records still count toward the rotation budget: anyone who can
+reach `/mcp` can push older files out with enough requests. When the trail matters, keep the
+Postgres sink (`AIRLOCK_AUDIT_DSN`) or ship the files off the host.
+
 To check the chain:
 
 ```

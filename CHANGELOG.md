@@ -100,6 +100,9 @@
   with a parse error instead of being forwarded, written to `audit.jsonl` as non-JSON and dropped
   by the Postgres sink. A body nested deeper than 64 levels is refused with `-32600`; one too deep
   to parse at all is a parse error. Both used to be an unaudited bare 500.
+* A request without a principal is audited without its arguments, like the other pre-auth
+  denials. Two records of up to the request limit each let an unauthenticated client fill the disk
+  or, with rotation on, push the whole real history out of the kept files.
 * The `airlock.*` span attributes follow the outcome record. A blocked replay, a decline, a
   `catalog.unavailable` denial or an upstream failure used to leave the span saying what the first
   decision was (or nothing at all); a span whose verdict is `error` now also has status `ERROR`.

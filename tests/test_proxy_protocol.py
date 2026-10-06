@@ -441,3 +441,15 @@ async def test_a_missing_principal_span_names_the_rule(upstream, audit_path):
         r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}}, principal=None)
     assert r.status_code == 401
     assert last_span()[0] == {"airlock.verdict": "deny", "airlock.rule_id": "principal.missing", "airlock.tier": ""}
+
+
+# ---------------------------------------------------------------- anonymous requests carry no arguments into the audit (B16)
+async def test_an_anonymous_request_is_audited_without_its_arguments(upstream, audit_path):
+    al = make_airlock(upstream, audit_path, trust_principal_header=False, jwt_secret="s" * 32)
+    payload = "p" * 200_000
+    async with serving(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api", "pad": payload}}, principal=None)
+    assert r.status_code == 401
+    rows = audit_rows(audit_path)
+    assert [x["rule_id"] for x in rows] == ["principal.missing"] * 2 and all(x["args"] is None for x in rows)
+    assert audit_path.stat().st_size < 2000  # two small records, not two copies of the payload
