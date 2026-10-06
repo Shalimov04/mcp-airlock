@@ -65,8 +65,8 @@ def _verify(token: str, cfg: IdentityConfig) -> Principal | None:
         )
     except jwt.PyJWTError:
         return None
-    sub = claims["sub"]
-    if not isinstance(sub, str) or not sub.strip():
+    sub = claims["sub"].strip() if isinstance(claims["sub"], str) else ""  # trimmed like the header, so both paths agree
+    if not sub:
         return None  # "require" only checks presence; a blank subject would be one shared anonymous identity
     return Principal(sub, _groups(claims.get(cfg.groups_claim)), verified=True)
 

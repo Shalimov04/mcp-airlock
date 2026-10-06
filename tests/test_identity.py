@@ -136,6 +136,12 @@ def test_blank_header_principal_is_refused_and_a_padded_one_is_trimmed():
     assert resolve({"x-airlock-principal": " carol "}, IdentityConfig(trust_header=True)) == Principal("carol")
 
 
+def test_a_padded_jwt_sub_is_trimmed_like_the_header():
+    tok = jwt.encode({"sub": " carol\t", "exp": time.time() + 60}, "s3cret", algorithm="HS256")
+    assert resolve(bearer(tok), HS) == Principal("carol")  # the same name whichever path it came in by
+    assert resolve(bearer(rs(sub=" carol ")), OIDC).sub == "carol"
+
+
 def test_verified_marks_subjects_out_of_a_checked_token_only():
     assert resolve(bearer(rs()), OIDC).verified is True
     tok = jwt.encode({"sub": "bob", "exp": time.time() + 60}, "s3cret", algorithm="HS256")
