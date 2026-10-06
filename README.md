@@ -157,7 +157,7 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 `lint` needs no network. It reports a tool without tiers (`no_tiers`, an error), a write tool
 without a description (`no_description`), a `count_arg` that relies on the global blast radius
 (`blast_radius_default`), a `where` rule for an environment no tier mentions
-(`where_env_unknown`), a `where` regex with several unbounded repeats in a row
+(`where_env_unknown`), a `where` regex with two unbounded repeats in a row
 (`where_regex_cost`) and an environment no tool covers (`env_unused`); `--env` adds
 environments that must be covered. `diff` asks the server itself (not the proxy, which hides
 unlisted tools) for `tools/list` and tells you which allowlisted tools the server no longer has
@@ -376,13 +376,18 @@ A regex runs in the request path, on the event loop, so its cost is the time one
 the whole proxy. A pattern that can take exponential time on a crafted value is refused when the
 policy loads (and by `lint`): a repetition inside a repetition (`(a+)+`, `(\w+\s?)+`), an
 alternation inside a repetition whose alternatives can start alike (`(a|aa)+`) and a
-backreference. A nested repetition is fine when the outer count is fixed (`(\d{1,3}\.){3}`) or
-every iteration starts with a character the rest of the group cannot consume
-(`(\.[a-z]{1,63})*`), and so is an alternation whose alternatives start apart (`(foo|bar)+`). The
-remaining patterns are at most polynomial, so a regex is tried only on strings up to 1024
-characters: a longer value fails the rule, with a message saying so. `lint` warns about two or
-more unbounded repeats in a row (`.*-.*-prod`, `where_regex_cost`), which can take quadratic or
-worse time within that cap.
+backreference. A fixed outer count does not make these safe: `(.*a){12}` has about 1024^12 ways
+to split a value and is refused too. A nested repetition is fine when every iteration starts or
+ends with a character the rest of the group cannot consume (`(\.[a-z]{1,63})*`,
+`(\d{1,3}\.){3}`) or the group has a fixed width (`((ab){2})+`), and so is an alternation whose
+alternatives start apart (`(foo|bar)+`). The remaining patterns are polynomial, of a degree set
+by the unbounded repeats that run one after another and can take each other's characters
+(`.*-.*-prod` has two: `.*` can take a dash). A regex is tried only on strings up to 1024
+characters, and a longer value fails the rule with a message saying so, but that cap bounds only
+the quadratic case, at about a second per call: three or more such repeats (`.*-.*-.*-prod`,
+`.*.*.*.*x`) run for minutes within it and are refused as well. `lint` warns about the quadratic
+patterns (`where_regex_cost`); a repeat that must stop at a character it cannot match
+(`[^/]+/[^/]+/[^/]+`) is not counted.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,

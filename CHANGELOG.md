@@ -92,6 +92,7 @@
   stall every gated call for about two minutes. A `service=` DSN is left unchanged.
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
   stored as U+FFFD.
+* `airlock-audit query` reads the rotated files too, oldest first.
 * A lone surrogate in the request id, in an upstream answer (a result, an error, an SSE frame or a
   tool description) or in the arguments of an `L2` call no longer turns the response into a bare
   HTTP 500 after the upstream already acted. The answer is sent with the JSON escape, the approval
@@ -117,10 +118,12 @@
   and an outcome record saying `deny` with the store's error in `detail`, and one warning line in
   the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record.
 * A `where` regex can no longer freeze the proxy. A pattern that can take exponential time on a
-  crafted value (a repetition inside a repetition such as `(a+)+`, an alternation inside a
-  repetition whose alternatives can start alike, a backreference) is refused when the policy
-  loads and by `airlock-policy lint`; a regex is tried only on strings up to 1024 characters, and
-  a longer value fails the rule. `lint` warns about two or more unbounded repeats in a row
+  crafted value (a repetition inside a repetition such as `(a+)+` or `(.*a){12}`, an alternation
+  inside a repetition whose alternatives can start alike, a backreference) is refused when the
+  policy loads and by `airlock-policy lint`, and so is one with three or more unbounded repeats
+  in a row that can take each other's characters (`.*-.*-.*-prod`), which runs for minutes on a
+  1024-character value; a regex is tried only on strings up to 1024 characters, and a longer value
+  fails the rule. `lint` warns about the quadratic patterns, two such repeats in a row
   (`where_regex_cost`). One `get_service` call with a 32-character name used to block the event
   loop, `/healthz` and `SIGTERM` for over a minute.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the

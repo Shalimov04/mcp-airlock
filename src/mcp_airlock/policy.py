@@ -17,9 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .store import USAGE_RETENTION_S, MemoryStore
 
 # A where regex runs on the event loop with the GIL held, so its cost bounds how long one request can stall the
-# whole proxy. Patterns that can go exponential are refused at load (regex_risk); for the polynomial ones the value
-# length is capped, and a longer value fails the rule.
+# whole proxy. Patterns that can go exponential are refused at load (regex_risk), and so are those whose polynomial
+# degree the value cap below does not bound (regex_unbounded_repeats); for the rest the value length is capped,
+# and a longer value fails the rule.
 REGEX_MAX_CHARS = 1024
+REGEX_MAX_UNBOUNDED = 2  # unbounded repeats in a row a pattern may have: two is about a second at the cap, three is minutes
 
 Tier = Literal["L0", "L1", "L2", "L3"]
 GROUP_PREFIX = "group:"  # a `principals` key for a group; never matched against the caller's own name
@@ -70,8 +72,13 @@ class WhereRule(BaseModel):
             except re.error as e:
                 raise ValueError(f"invalid regex: {e}") from e
             if (why := regex_risk(self.regex)) is not None:
-                raise ValueError(f"regex {self.regex!r} has {why}: it can take exponential time on a crafted value "
-                                 "and freeze the proxy; use a character class or a fixed count instead")
+                raise ValueError(f"regex {self.regex!r} has {why}: it can take exponential time on a crafted value and "
+                                 "freeze the proxy; use a single character class, or make each iteration start or end "
+                                 "with a character the group cannot match elsewhere")
+            if (n := regex_unbounded_repeats(self.regex)) > REGEX_MAX_UNBOUNDED:
+                raise ValueError(f"regex {self.regex!r} has {n} unbounded repeats in a row: on a {REGEX_MAX_CHARS}-character "
+                                 f"value it can run for minutes and freeze the proxy; use at most {REGEX_MAX_UNBOUNDED}, "
+                                 "or separate them with a character the repeats cannot match")
         return self
 
     def kind(self) -> str:
@@ -139,10 +146,13 @@ _WHY = {"equals": "does not equal the required value", "in": "is not in the allo
 # ---------------------------------------------------------------- regex cost
 # Backtracking goes exponential when the engine can split the same characters between iterations of a repetition
 # in many ways: a repetition inside a repetition ((a+)+), an alternation inside a repetition whose alternatives can
-# start alike ((a|aa)+) or a backreference. These are refused when the policy loads. A nested repetition is harmless
-# when every iteration starts with a character the rest of the group never consumes ((\.[a-z]{1,63})*): the
-# iteration boundaries are then fixed and nothing can shift between them. Everything else is at worst polynomial in
-# the value length, which REGEX_MAX_CHARS bounds.
+# start alike ((a|aa)+) or a backreference. A fixed outer count does not help: (.*a){12} has about 1024^12 splits
+# to try on a 1024-character value. These are refused when the policy loads. A nested repetition is harmless when
+# the group has a fixed width (((ab){2})+) or when every iteration starts or ends with a character the rest of the
+# group never consumes ((\.[a-z]{1,63})*, (\d{1,3}\.){3}): the iteration boundaries are then fixed and nothing can
+# shift between them. Everything else is polynomial in the value length, of a degree given by the unbounded repeats
+# that run one after another and can take each other's characters: REGEX_MAX_CHARS bounds the quadratic case to
+# about a second, the cubic one already runs for minutes, so three or more are refused as well.
 
 _REPEATS = (_sre.MAX_REPEAT, _sre.MIN_REPEAT, _sre.POSSESSIVE_REPEAT)
 _ATOMS = (_sre.LITERAL, _sre.NOT_LITERAL, _sre.IN, _sre.ANY)
@@ -156,9 +166,11 @@ def regex_risk(pattern: str) -> str | None:
 
 
 def regex_unbounded_repeats(pattern: str) -> int:
-    """How many unbounded repeats (`*`, `+`, `{n,}`) the pattern runs one after another: two can take quadratic
-    time in the value length, three cubic, and so on. A repeat inside another one is not counted."""
-    return _unbounded(_sre_parser.parse(pattern))
+    """How many unbounded repeats (`*`, `+`, `{n,}`) the pattern runs one after another that can take each other's
+    characters: two can take quadratic time in the value length, three cubic, and so on. A repeat that must be
+    followed by a character its body cannot match ([^/]+/) has one place to stop and is not counted, nor is a
+    repeat inside another one."""
+    return _unbounded(_sre_parser.parse(pattern), top=True)
 
 
 def _risk(seq: Any, nested: bool) -> str | None:
@@ -169,13 +181,16 @@ def _risk(seq: Any, nested: bool) -> str | None:
             found = "a backreference"
         elif op in _REPEATS:
             mn, mx, body = av
-            loops = mx > mn and mx > 1  # a fixed count ((ab){3}) splits only one way; `?` never iterates
+            # `?` never iterates; any repeat that can run twice has splits to try, a fixed count ((.*a){12}) as
+            # much as an unbounded one. A group of fixed width splits one way, unless two alternatives in it can
+            # match the same characters.
+            repeats = mx > 1
             if nested and mx > mn:  # an optional item inside a loop splits too: (a?a)+ is (a|aa)+
                 found = "a repetition inside a repetition"
-            elif loops and any(op2 is _sre.BRANCH and _overlapping(av2[1]) for op2, av2 in _walk(body)):
+            elif repeats and any(op2 is _sre.BRANCH and _overlapping(av2[1]) for op2, av2 in _walk(body)):
                 found = "an alternation inside a repetition"
             else:
-                found = _risk(body, nested or (loops and not _separated(body)))
+                found = _risk(body, nested or (repeats and _width(body) is None and not _separated(body)))
         elif op is _sre.SUBPATTERN:
             found = _risk(av[3], nested)
         elif op is _sre.BRANCH:
@@ -211,11 +226,42 @@ def _walk(seq: Any, lookarounds: bool = True):
                     yield from _walk(alt, lookarounds)
 
 
+def _width(seq: Any) -> int | None:
+    """How many characters the sequence always matches, None when that varies."""
+    total = 0
+    for op, av in seq:
+        w: int | None
+        if op in _ATOMS:
+            w = 1
+        elif op is _sre.AT or op in (_sre.ASSERT, _sre.ASSERT_NOT):
+            w = 0  # anchors and lookarounds consume nothing
+        elif op in _REPEATS:
+            mn, mx, body = av
+            bw = _width(body)
+            w = mn * bw if mn == mx and bw is not None else None
+        elif op is _sre.SUBPATTERN:
+            w = _width(av[3])
+        elif op is _sre.ATOMIC_GROUP:
+            w = _width(av)
+        elif op is _sre.BRANCH:
+            widths = {_width(alt) for alt in av[1]}
+            w = widths.pop() if len(widths) == 1 else None
+        else:
+            w = None  # a backreference, or an opcode this check does not model
+        if w is None:
+            return None
+        total += w
+    return total
+
+
 def _separated(body: Any) -> bool:
-    """Every iteration of the repeated group starts with a character that the rest of the group never consumes."""
-    head, rest = _head(body)
-    chars = _chars(head)
-    return chars is not None and not any(_consumes(rest, c) for c in chars)
+    """Every iteration of the repeated group starts, or ends, with a character that the rest of the group never
+    consumes: the iteration boundaries are then fixed."""
+    for edge, rest in (_head(body), _tail(body)):
+        chars = _chars(edge)
+        if chars is not None and not any(_consumes(rest, c) for c in chars):
+            return True
+    return False
 
 
 def _overlapping(alts: list) -> bool:
@@ -233,6 +279,14 @@ def _head(seq: Any) -> tuple[Any, list]:
     while items and items[0][0] is _sre.SUBPATTERN:
         items = list(items[0][1][3]) + items[1:]
     return (items[0], items[1:]) if items else (None, [])
+
+
+def _tail(seq: Any) -> tuple[Any, list]:
+    """The last item of the sequence, looking through trailing groups, and everything before it."""
+    items = list(seq)
+    while items and items[-1][0] is _sre.SUBPATTERN:
+        items = items[:-1] + list(items[-1][1][3])
+    return (items[-1], items[:-1]) if items else (None, [])
 
 
 def _chars(item: Any) -> set[int] | None:
@@ -283,11 +337,16 @@ def _atom_matches(op: Any, av: Any, c: int) -> bool:
     return hit != negate
 
 
-def _unbounded(seq: Any) -> int:
+def _unbounded(seq: Any, top: bool = False) -> int:
+    """`top`: the sequence is the whole pattern, so its end is the end of the value (a full match)."""
+    items = list(seq)
     n = 0
-    for op, av in seq:
+    for i, (op, av) in enumerate(items):
         if op in _REPEATS:
-            n += 1 if av[1] == _sre.MAXREPEAT else _unbounded(av[2])
+            if av[1] != _sre.MAXREPEAT:
+                n += _unbounded(av[2])
+            elif not _stops_at(av[2], items[i + 1:], end=top and all(op2 is _sre.AT for op2, _ in items[i + 1:])):
+                n += 1
         elif op is _sre.SUBPATTERN:
             n += _unbounded(av[3])
         elif op is _sre.BRANCH:
@@ -297,6 +356,18 @@ def _unbounded(seq: Any) -> int:
         elif op is _sre.ATOMIC_GROUP:
             n += _unbounded(av)
     return n
+
+
+def _stops_at(body: Any, after: Any, end: bool) -> bool:
+    """Has the repeat one place to stop: the end of the value (`end`), or a character its body can never match
+    at the start of what follows (`after`)?"""
+    if end:
+        return True
+    nxt = _head(after)[0]
+    while nxt is not None and nxt[0] in _REPEATS and nxt[1][0] >= 1:  # a mandatory repeat starts with its body's head
+        nxt = _head(nxt[1][2])[0]
+    chars = _chars(nxt)
+    return chars is not None and not any(_consumes(body, c) for c in chars)
 
 
 class ToolRule(BaseModel):
