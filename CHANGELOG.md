@@ -31,6 +31,8 @@
   notifications, a server-to-client request or a response to another id used to be passed back as
   the answer (HTTP 200, `id: null`), on which the official SDK client hangs; it is now
   `upstream.bad_reply`. `airlock-policy diff` refuses such a catalog too.
+* `--otel-file` writes JSON Lines, one span per line, instead of indented multi-line JSON that
+  no line-by-line reader could parse. `examples/spans.jsonl` is regenerated in the new format.
 
 ### Added
 

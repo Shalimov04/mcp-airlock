@@ -242,7 +242,7 @@ The values are documented in `charts/mcp-airlock/values.yaml`. The points that m
 | `--audit PATH` | The JSONL audit file. Default `audit.jsonl` in the working directory. |
 | `--audit-max-bytes N` | Rotate the audit file before a write would take it past `N` bytes. `0` or unset: never. |
 | `--audit-keep N` | Rotated audit files to keep. Default `5`, at least `1`. |
-| `--otel-file PATH` | Append spans as JSON to this file. The same as `AIRLOCK_OTEL_FILE`. |
+| `--otel-file PATH` | Append spans to this file as JSON Lines, one span per line. The same as `AIRLOCK_OTEL_FILE`. |
 | `--pins PATH` | Tool pins file written by `airlock-policy pin`. The same as `AIRLOCK_PINS`. |
 | `--strict` | Exit with status 2 if the configuration has any startup warning. |
 | `--host ADDR` | Listen address. Default `127.0.0.1`; the container image passes `0.0.0.0`. |
@@ -601,7 +601,8 @@ not a string is ignored, and a bad `traceparent` starts a new trace.
 
 Spans go to a file with `--otel-file` (or `AIRLOCK_OTEL_FILE`), to an OTLP collector when
 `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, or to both. The
-file is written span by span; the collector export is batched (5 seconds by default) and needs
+file is written span by span as JSON Lines (one JSON object per line, see
+`examples/spans.jsonl`); the collector export is batched (5 seconds by default) and needs
 the `otlp` extra, which the container image has. On SIGTERM the queue is flushed before the
 process exits, which can take up to the exporter timeout if the collector is down
 (`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT`, 10 by default). The

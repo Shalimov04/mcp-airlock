@@ -175,3 +175,24 @@ def test_sigterm_right_after_a_call_still_exports_the_span(collector, tmp_path):
         proc.kill()
         proc.wait()
         proc.stderr.close()
+
+
+# ---------------------------------------------------------------- --otel-file is JSON Lines
+def test_otel_file_is_json_lines(made, tmp_path):
+    path = tmp_path / "spans.jsonl"
+    provider = made(str(path))
+    tracer = provider.get_tracer("t")
+    for name in ("server/discover", "tools/list", "execute_tool get_service"):
+        tracer.start_span(name).end()
+    provider.force_flush()
+    lines = path.read_text().splitlines()  # the SDK's default formatter indents each span over many lines
+    assert [json.loads(ln)["name"] for ln in lines] == ["server/discover", "tools/list", "execute_tool get_service"]
+    assert path.read_text().endswith("\n")
+
+
+def test_example_spans_file_is_json_lines():
+    lines = (ROOT / "examples" / "spans.jsonl").read_text().splitlines()
+    assert lines, "examples/spans.jsonl is empty"
+    for ln in lines:  # a torn or indented line would fail here
+        span = json.loads(ln)
+        assert isinstance(span, dict) and span["name"] and span["context"]["trace_id"]

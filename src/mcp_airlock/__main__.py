@@ -39,8 +39,9 @@ def setup_otel(span_file: str | None) -> TracerProvider:
     # OTEL_SERVICE_NAME or service.name in OTEL_RESOURCE_ATTRIBUTES wins; "mcp-airlock" is only the default
     named = OTELResourceDetector().detect().attributes.get(SERVICE_NAME)
     provider = TracerProvider(resource=Resource.create({} if named else {SERVICE_NAME: "mcp-airlock"}))
-    if span_file:  # file/console exporter, independent of OTLP
-        provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter(out=open(span_file, "a"))))
+    if span_file:  # file/console exporter, independent of OTLP; JSON Lines, the default formatter indents over many lines
+        exporter = ConsoleSpanExporter(out=open(span_file, "a"), formatter=lambda s: s.to_json(indent=None) + "\n")
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
     if otlp_requested() and (exporter := _otlp_exporter()) is not None:
         # endpoint, headers, timeout, TLS come from the standard OTEL_* variables
         provider.add_span_processor(BatchSpanProcessor(exporter()))
@@ -68,7 +69,7 @@ def main() -> None:
     ap.add_argument("--audit", default="audit.jsonl")
     ap.add_argument("--audit-max-bytes", type=_int_min(0), default=None, help="rotate the audit file before a write would pass this size; 0 or unset: never")
     ap.add_argument("--audit-keep", type=_int_min(1), default=5, help="rotated audit files to keep (audit.jsonl.1 ...); default 5")
-    ap.add_argument("--otel-file", default=os.environ.get("AIRLOCK_OTEL_FILE"), help="write spans (JSON) to this file")
+    ap.add_argument("--otel-file", default=os.environ.get("AIRLOCK_OTEL_FILE"), help="append spans to this file as JSON Lines, one span per line")
     ap.add_argument("--pins", default=os.environ.get("AIRLOCK_PINS"), help="tool pins file written by `airlock-policy pin`; a pinned tool whose definition changed is hidden from tools/list")
     ap.add_argument("--strict", action="store_true", help="exit with status 2 if the configuration has any startup warning")
     ap.add_argument("--host", default="127.0.0.1")
