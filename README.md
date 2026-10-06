@@ -508,6 +508,13 @@ empty audit file) and `hash` is the sha256 of the record's canonical JSON withou
 (keys sorted, no spaces, UTF-8, non-ASCII not escaped). The Postgres sink stores the same two
 values in `rec`.
 
+A crash or a full disk can leave the last line torn: part of a record, with no newline. Such
+a fragment can never be chained. The proxy cuts it off rather than keep it: at startup it
+appends the fragment to `audit.jsonl.torn`, cuts `audit.jsonl` back to the last newline and
+logs a warning naming both; a short write it notices itself is cut back at once. The chain
+goes on from the last whole record, so `verify` still passes. A fragment that cannot be cut
+(an append-only file, say) stays where it is, and `verify` reports that line as `not JSON`.
+
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
 `sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to

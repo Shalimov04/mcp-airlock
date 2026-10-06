@@ -639,25 +639,89 @@ def test_a_short_write_is_an_error_and_leaves_the_chain_where_it_was(tmp_path, c
         write_n(sink, 1, start=1)
     write_n(sink, 1, start=2)
     sink.close()
-    first, torn, c002 = lines_of(path)  # the half of c001 that reached the disk got its newline before c002 was appended
-    assert torn.startswith('{"ts"') and not torn.endswith("}") and json.loads(c002)["call_id"] == "c002"
-    assert json.loads(c002)["prev"] == json.loads(first)["hash"]
-    assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:2: not JSON")  # the torn line is reported, not hidden
+    first, c002 = lines_of(path)  # the half of c001 that reached the disk was cut back off before c002 was appended
+    assert json.loads(c002)["call_id"] == "c002" and json.loads(c002)["prev"] == json.loads(first)["hash"]
+    assert ids_in(path) == ["c000", "c002"] and not path.with_name("a.jsonl.torn").exists()
+    assert verify_cli(capsys, path)[0] == 0  # the file the proxy left behind passes, with no torn line in the way
 
 
-def test_reopening_after_a_torn_tail_continues_from_the_record_before_it(tmp_path, capsys):
+def test_a_short_write_that_cannot_be_cut_back_gives_the_torn_line_its_newline(tmp_path, capsys, monkeypatch):
+    path = chained(tmp_path / "a.jsonl", 1)
+    sink = AuditLog(path)
+    sink._f.close()
+    sink._f = ShortFile(path)
+    monkeypatch.setattr(os, "ftruncate", boom)  # an append-only file, say
+    with pytest.raises(OSError, match="short write"):
+        write_n(sink, 1, start=1)
+    write_n(sink, 1, start=2)
+    sink.close()
+    first, torn, c002 = lines_of(path)  # the old way: the fragment on a line of its own, reported rather than hidden
+    assert torn.startswith('{"ts"') and not torn.endswith("}") and json.loads(c002)["prev"] == json.loads(first)["hash"]
+    assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:2: not JSON")
+
+
+TORN = b'{"ts": "2026-09-14T06:54:08.340+00:00", "ph'  # a crash in the middle of a record
+
+
+@pytest.mark.parametrize("fragment", [TORN, TORN[:-3] + b"x" * 70000 + b'"'], ids=["short", "longer than a read block"])
+def test_reopening_after_a_torn_tail_cuts_it_off_and_continues_from_the_record_before_it(tmp_path, capsys, caplog, fragment):
     path = chained(tmp_path / "a.jsonl", 2)
     rows = jsonl_rows(path)
     with path.open("ab") as f:
-        f.write(b'{"ts": "2026-09-14T06:54:08.340+00:00", "ph')  # a crash in the middle of the third record
+        f.write(fragment)
     sink = AuditLog(path)
     write_n(sink, 1, start=2)
     sink.close()
     ls = lines_of(path)
-    assert len(ls) == 4 and path.read_bytes().endswith(b"}\n")  # three clean lines and the fragment on a line of its own
-    assert [json.loads(ln)["call_id"] for ln in ls[:2] + ls[3:]] == ["c000", "c001", "c002"]
-    assert json.loads(ls[3])["prev"] == rows[1]["hash"]  # not GENESIS, not the .1 file: the last whole record
+    assert [json.loads(ln)["call_id"] for ln in ls] == ["c000", "c001", "c002"]  # three clean lines, nothing else
+    assert json.loads(ls[2])["prev"] == rows[1]["hash"]  # not GENESIS, not the .1 file: the last whole record
+    assert path.with_name("a.jsonl.torn").read_bytes() == fragment + b"\n"  # kept aside, not lost
+    assert verify_cli(capsys, path)[:2] == (0, f"OK: 3 records in 1 files, chain from {GENESIS} to {json.loads(ls[2])['hash']}")
+    assert f"ended in a torn line of {len(fragment)} bytes" in caplog.text and str(path.with_name("a.jsonl.torn")) in caplog.text
+
+
+def test_a_second_torn_tail_is_added_to_the_same_torn_file(tmp_path, capsys):
+    path = chained(tmp_path / "a.jsonl", 1)
+    for _ in (1, 2):
+        with path.open("ab") as f:
+            f.write(TORN)
+        AuditLog(path).close()
+    assert path.with_name("a.jsonl.torn").read_bytes() == (TORN + b"\n") * 2 and ids_in(path) == ["c000"]
+    assert verify_cli(capsys, path)[0] == 0
+
+
+def test_a_whole_last_record_without_its_newline_is_kept_and_gets_one(tmp_path, capsys):
+    path = chained(tmp_path / "a.jsonl", 2)
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))  # only the newline was lost
+    sink = AuditLog(path)
+    write_n(sink, 1, start=2)
+    sink.close()
+    assert ids_in(path) == ["c000", "c001", "c002"] and not path.with_name("a.jsonl.torn").exists()
+    assert verify_cli(capsys, path)[0] == 0
+
+
+def test_a_torn_tail_that_cannot_be_cut_is_reported_by_verify(tmp_path, capsys, caplog, monkeypatch):
+    path = chained(tmp_path / "a.jsonl", 2)
+    with path.open("ab") as f:
+        f.write(TORN)
+    monkeypatch.setattr(os, "truncate", boom)
+    sink = AuditLog(path)
+    write_n(sink, 1, start=2)
+    sink.close()
+    ls = lines_of(path)
+    assert len(ls) == 4 and json.loads(ls[3])["call_id"] == "c002"  # the old way: the fragment on a line of its own
     assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:3: not JSON")
+    assert "could not be cut" in caplog.text
+
+
+def test_a_torn_tail_is_cut_even_when_it_cannot_be_kept_aside(tmp_path, capsys, caplog):
+    path = chained(tmp_path / "a.jsonl", 1)
+    with path.open("ab") as f:
+        f.write(TORN)
+    path.with_name("a.jsonl.torn").mkdir()  # the .torn file cannot be opened
+    AuditLog(path).close()
+    assert ids_in(path) == ["c000"] and verify_cli(capsys, path)[0] == 0
+    assert "not kept:" in caplog.text
 
 
 def test_concurrent_writers_keep_one_chain_through_rotations(tmp_path, capsys):

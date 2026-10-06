@@ -87,6 +87,12 @@
   instead of failing every gated call with 500 until a restart, and `/readyz` checks that they
   exist and reports 503 while they cannot be created. Confirmation keys already used are
   forgotten when the tables are recreated.
+* A torn last line in `audit.jsonl` (a crash or a full disk cut a record short) no longer makes
+  every later `airlock-audit verify` fail with `not JSON`: at startup the proxy moves the fragment
+  to `audit.jsonl.torn`, cuts the file back to the last newline and logs a warning, and a short
+  write it notices itself is cut back at once. A line an older version already kept this way still
+  fails `verify`; deleting that line by hand restores the chain, since the record after it chains
+  to the one before.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to
