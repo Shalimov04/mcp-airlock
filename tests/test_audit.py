@@ -715,6 +715,19 @@ def test_a_whole_last_record_without_its_newline_is_kept_and_gets_one(tmp_path, 
     assert verify_cli(capsys, path)[0] == 0
 
 
+def test_a_legacy_record_without_its_newline_is_a_record_not_a_torn_line(tmp_path, capsys):
+    path = tmp_path / "a.jsonl"
+    path.write_bytes(b'{"ts":"old","phase":"intent"}\n{"ts":"old","phase":"outcome"}')  # written before the chain existed
+    sink = AuditLog(path)
+    write_n(sink, 1)
+    sink.close()
+    ls = lines_of(path)
+    assert len(ls) == 3 and json.loads(ls[1]) == {"ts": "old", "phase": "outcome"}  # it has no hash, but it is whole
+    assert not path.with_name("a.jsonl.torn").exists()
+    assert verify_cli(capsys, path)[:2] == (0, f"OK: 1 records in 1 files, chain from {GENESIS} to {json.loads(ls[2])['hash']}, "
+                                              "2 unchained records skipped")
+
+
 def test_a_torn_tail_that_cannot_be_cut_is_reported_by_verify(tmp_path, capsys, caplog, monkeypatch):
     path = chained(tmp_path / "a.jsonl", 2)
     with path.open("ab") as f:

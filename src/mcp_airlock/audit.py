@@ -107,11 +107,17 @@ def seal(row: dict[str, Any], prev: str) -> None:
     row["hash"] = row_hash(row)
 
 
-def _hash_of(line: bytes) -> str | None:
+def _parsed(line: bytes) -> dict | None:
+    """The line as a record; None when it is torn, garbage or JSON that is not an object."""
     try:
-        h = json.loads(line).get("hash")
-    except (ValueError, AttributeError):  # torn or not a record
+        rec = json.loads(line)
+    except ValueError:
         return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _hash_of(line: bytes) -> str | None:
+    h = (_parsed(line) or {}).get("hash")
     return h if isinstance(h, str) and h else None
 
 
@@ -121,9 +127,10 @@ def _lines(buf: bytes) -> list[bytes]:
 
 def _tail(path: Path) -> tuple[list[bytes], bytes, int]:
     """The last non-blank lines of an existing file, read from the end, and the torn fragment after them: a last line
-    without its newline that is not a chained record (a crash or a short write left it) counts for nothing and is
-    returned apart with the file offset it starts at (the byte after the last newline), so the caller can cut it
-    off. ([], b"", 0) for a missing, empty or unreadable file."""
+    without its newline that does not parse as a record (a crash or a short write left it) counts for nothing and
+    is returned apart with the file offset it starts at (the byte after the last newline), so the caller can cut
+    it off. A whole record that lost only its newline, chained or not, is a line like any other and just gets one.
+    ([], b"", 0) for a missing, empty or unreadable file."""
     try:
         with path.open("rb") as f:
             buf, pos = b"", f.seek(0, os.SEEK_END)
@@ -135,7 +142,7 @@ def _tail(path: Path) -> tuple[list[bytes], bytes, int]:
     except OSError:  # missing or unreadable
         return [], b"", 0
     lines = _lines(buf)
-    if lines and not buf.endswith(b"\n") and _hash_of(lines[-1]) is None:
+    if lines and not buf.endswith(b"\n") and _parsed(lines[-1]) is None:
         return lines[:-1], lines[-1], pos + buf.rfind(b"\n") + 1  # rfind is -1 when buf is the whole file
     return lines, b"", 0
 
