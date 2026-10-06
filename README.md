@@ -181,8 +181,12 @@ The values are documented in `charts/mcp-airlock/values.yaml`. The points that m
   `env.AIRLOCK_TRUST_PRINCIPAL_HEADER=1`, and make sure only the gateway can reach the Service:
   the chart ships no NetworkPolicy.
 * **Credentials go in `existingSecret`, never in `env`.** That covers `AIRLOCK_UPSTREAM_AUTH`,
-  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN` and the JWT secret; the chart refuses them in
-  `env`. Do not put credentials in the `upstream` URL either, they end up in the pod spec.
+  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN`, `OTEL_EXPORTER_OTLP_HEADERS` and the JWT
+  secret; the chart refuses them in `env`. A credential that lives in another Secret or a
+  ConfigMap goes in `extraEnv` as a plain Kubernetes env entry with a `valueFrom` (or in
+  `envFrom`). Do not put credentials in the `upstream` URL either, they end up in the pod spec.
+  Whole numbers in a values file, such as the byte limits in `env` or `extraArgs`, may be left
+  unquoted.
 * **More than one replica.** Create a Secret with `AIRLOCK_STORE_DSN` and `AIRLOCK_SECRET`, then
   `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. The chart refuses
   more replicas without `sharedStore`. `AIRLOCK_SECRET` is only set together with the shared
@@ -195,13 +199,18 @@ The values are documented in `charts/mcp-airlock/values.yaml`. The points that m
   mismatch`) and the chart refuses it with `replicaCount` above 1. With several replicas use an
   emptyDir and `AIRLOCK_AUDIT_DSN`; the hash chain is per pod, so the `airlock_audit` table holds
   one interleaved chain per pod. Rotation flags go in `extraArgs`.
-* **Policy changes.** A new policy rolls the pods; SIGHUP reload is not used here.
+* **Policy changes.** A new policy rolls the pods; SIGHUP reload is not used here. A pod that
+  is told to stop keeps serving for `preStopSeconds` (5) first, so kube-proxy has dropped it from
+  the Service before the listener closes and a rolling update refuses no connections; the native
+  `sleep` hook needs Kubernetes 1.30+. `terminationGracePeriodSeconds` (30) covers that sleep,
+  the open calls and the OTLP flush.
 * **Strictness.** `strict` is on, so any [startup warning](#startup-warnings) stops the pod. The
   log says why.
 * **Approve page.** `/approve` is on the same Service, so put it behind SSO, as the
   [Confirmations](#confirmations-in-detail) section says.
 * **Tracing.** Set `env.OTEL_EXPORTER_OTLP_ENDPOINT` to export spans; the image has the extra.
-  `OTEL_EXPORTER_OTLP_HEADERS` is a credential and belongs in a Secret you mount yourself.
+  `OTEL_EXPORTER_OTLP_HEADERS` is a credential: put it in `existingSecret`, or in `extraEnv` with
+  a `secretKeyRef` to a Secret of your own.
 * **GitOps.** Argo CD and other `helm template` based tools do not run `lookup`, so the generated
   key would change on every render. Use `existingSecret` there.
 

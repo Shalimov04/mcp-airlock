@@ -38,6 +38,14 @@
 
 ### Fixed
 
+* Helm: a whole number from a values file (`env.AIRLOCK_MAX_REQUEST_BYTES: 104857600`, or in
+  `extraArgs`) rendered as `1.048576e+08` and crash-looped the pod; it now renders as `104857600`.
+* Helm: `OTEL_EXPORTER_OTLP_HEADERS` is read from `existingSecret` like the other credentials and
+  refused in `env`; new `extraEnv` (with `valueFrom`) and `envFrom` values take entries from a
+  Secret or ConfigMap of your own.
+* Helm: the pod sleeps `preStopSeconds` (5) before shutting down, so a rolling update, including
+  every policy change, no longer refuses connections; `terminationGracePeriodSeconds` (30) is set
+  for the sleep, the open calls and the OTLP flush.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to

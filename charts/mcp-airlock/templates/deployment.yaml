@@ -25,10 +25,19 @@
 {{- if and .Values.sharedStore (not .Values.existingSecret) }}
 {{- fail "sharedStore=true needs existingSecret with AIRLOCK_STORE_DSN and AIRLOCK_SECRET" }}
 {{- end }}
+{{- $credentials := list "AIRLOCK_SECRET" "AIRLOCK_JWT_SECRET" "AIRLOCK_STORE_DSN" "AIRLOCK_AUDIT_DSN" "AIRLOCK_UPSTREAM_AUTH" "AIRLOCK_APPROVAL_WEBHOOK" "OTEL_EXPORTER_OTLP_HEADERS" }}
 {{- range $k, $_ := .Values.env }}
-{{- if has $k (list "AIRLOCK_SECRET" "AIRLOCK_JWT_SECRET" "AIRLOCK_STORE_DSN" "AIRLOCK_AUDIT_DSN" "AIRLOCK_UPSTREAM_AUTH" "AIRLOCK_APPROVAL_WEBHOOK") }}
+{{- if has $k $credentials }}
 {{- fail (printf "%s holds a credential: put it in existingSecret, not in env" $k) }}
 {{- end }}
+{{- end }}
+{{- range .Values.extraEnv }}
+{{- if and (has .name $credentials) (hasKey . "value") }}
+{{- fail (printf "%s holds a credential: put it in existingSecret, or give extraEnv a valueFrom, not a value" .name) }}
+{{- end }}
+{{- end }}
+{{- if le (int .Values.terminationGracePeriodSeconds) (int .Values.preStopSeconds) }}
+{{- fail "terminationGracePeriodSeconds must exceed preStopSeconds, or the shutdown and the OTLP flush get no time" }}
 {{- end }}
 {{- $secret := include "mcp-airlock.secretName" . }}
 apiVersion: apps/v1
@@ -66,6 +75,8 @@ spec:
       automountServiceAccountToken: false
       # Service-link variables would land in the AIRLOCK_* namespace the proxy reads its config from
       enableServiceLinks: false
+      # the preStop sleep, then uvicorn drains the open calls and the OTLP queue is flushed
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -92,7 +103,7 @@ spec:
             - --strict
             {{- end }}
             {{- range .Values.extraArgs }}
-            - {{ . | quote }}
+            - {{ include "mcp-airlock.scalar" . }}
             {{- end }}
           ports:
             - name: http
@@ -100,15 +111,20 @@ spec:
           env:
             {{- range $k, $v := .Values.env }}
             - name: {{ $k }}
-              value: {{ $v | quote }}
+              value: {{ include "mcp-airlock.scalar" $v }}
             {{- end }}
-            {{- range list "AIRLOCK_JWT_SECRET" "AIRLOCK_UPSTREAM_AUTH" "AIRLOCK_APPROVAL_WEBHOOK" "AIRLOCK_AUDIT_DSN" }}
+            {{- $own := list }}
+            {{- range .Values.extraEnv }}{{ $own = append $own .name }}{{ end }}
+            {{- /* an extraEnv entry of the same name replaces the optional existingSecret key */}}
+            {{- range list "AIRLOCK_JWT_SECRET" "AIRLOCK_UPSTREAM_AUTH" "AIRLOCK_APPROVAL_WEBHOOK" "AIRLOCK_AUDIT_DSN" "OTEL_EXPORTER_OTLP_HEADERS" }}
+            {{- if not (has . $own) }}
             - name: {{ . }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $secret }}
                   key: {{ . }}
                   optional: true
+            {{- end }}
             {{- end }}
             {{- if .Values.sharedStore }}
             {{- /* required: a missing key stops the pod instead of starting it with private state */}}
@@ -121,6 +137,22 @@ spec:
                   optional: false
             {{- end }}
             {{- end }}
+            {{- /* last, so a $(VAR) in it can refer to the entries above */}}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.preStopSeconds }}
+          # kube-proxy drops the endpoint after the pod is marked terminating; keep the listener
+          # open until it has, or connects during a rollout are refused
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: {{ int .Values.preStopSeconds }}
+          {{- end }}
           # liveness must not use /readyz, or a store outage restarts every pod
           startupProbe:
             httpGet:
