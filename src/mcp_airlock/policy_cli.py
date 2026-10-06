@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
 from pydantic import ValidationError
 
 from . import pins as tool_pins
@@ -27,10 +29,36 @@ ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotoc
 WRITE_TIERS = {"L1", "L2", "L3"}
 
 
-def lint(policy_path: str | Path, envs=()) -> list[Finding]:
+class PolicyInvalid(Exception):
+    """The policy file cannot be read, is not YAML or fails validation; str() is the message for `ERROR invalid`."""
+
+
+def _missing_environment(e: ValidationError) -> bool:
+    return any(err["loc"] == ("environment",) and err["type"] == "missing" for err in e.errors())
+
+
+def _load(policy_path: str | Path, env: str | None = None, fallback_env: str | None = None) -> Policy:
+    """Policy.load with every loader error turned into PolicyInvalid.
+    env overrides the policy's environment as the proxy's --env does; fallback_env only fills in a missing one."""
     try:
-        p = Policy.load(policy_path)
-    except Exception as e:  # yaml.YAMLError, OSError, pydantic ValidationError
+        try:
+            return Policy.load(policy_path, env)
+        except ValidationError as e:
+            if not _missing_environment(e):
+                raise
+            if fallback_env:
+                return Policy.load(policy_path, fallback_env)
+            raise PolicyInvalid("environment is not set: add `environment:` to the policy or pass --env (or set AIRLOCK_ENV)") from e
+    except (OSError, yaml.YAMLError, ValidationError) as e:
+        raise PolicyInvalid(str(e)) from e
+
+
+def lint(policy_path: str | Path, envs=(), env: str | None = None) -> list[Finding]:
+    """env (AIRLOCK_ENV) and the first of envs stand in for a missing `environment`, as the proxy would run the policy."""
+    envs = list(envs)
+    try:
+        p = _load(policy_path, fallback_env=envs[0] if envs else env)
+    except PolicyInvalid as e:
         return [("ERROR", "invalid", str(e))]
     out: list[Finding] = []
     known_envs = {p.environment} | {e for r in p.tools.values() for e in r.tiers} \
@@ -72,10 +100,18 @@ async def _catalog(http: httpx.AsyncClient, upstream: str, principal: str) -> di
         body = _last_sse_message(r.text, i) if r.headers.get("content-type", "").startswith("text/event-stream") else r.json()
         if body is None:
             raise RuntimeError("tools/list failed: the SSE stream ended without a response")
-        if "error" in body:
+        if isinstance(body, dict) and "error" in body:
             raise RuntimeError(f"tools/list failed: {body['error']}")
-        tools.update((t["name"], t) for t in body["result"].get("tools") or [])
-        cursor = body["result"].get("nextCursor")
+        # a non-MCP endpoint answers with anything: say so instead of failing on a key or attribute
+        result = body.get("result") if isinstance(body, dict) else None
+        listed = result.get("tools") if isinstance(result, dict) else None
+        if not isinstance(result, dict) or not isinstance(listed, list | None):
+            raise RuntimeError(f"tools/list: {upstream} did not answer with a JSON-RPC result holding a tools list; is it an MCP endpoint?")
+        for t in listed or []:
+            if not isinstance(t, dict) or not isinstance(t.get("name"), str):
+                raise RuntimeError(f"tools/list: {upstream} listed a tool without a name")
+            tools[t["name"]] = t
+        cursor = result.get("nextCursor")
         if not isinstance(cursor, str):
             break
     return tools
@@ -83,7 +119,10 @@ async def _catalog(http: httpx.AsyncClient, upstream: str, principal: str) -> di
 
 async def diff(policy_path: str | Path, upstream: str, env: str | None = None, principal: str = "airlock-policy",
                http: httpx.AsyncClient | None = None, pins: str | Path | None = None) -> list[Finding]:
-    p = Policy.load(policy_path, env)
+    try:
+        p = _load(policy_path, env)
+    except PolicyInvalid as e:
+        return [("ERROR", "invalid", str(e))]
     pinned: dict[str, str] | None = None
     if pins is not None:
         try:
@@ -125,7 +164,10 @@ async def diff(policy_path: str | Path, upstream: str, env: str | None = None, p
 
 async def pin(policy_path: str | Path, upstream: str, env: str | None = None, principal: str = "airlock-policy",
               pins: str | Path = "pins.json", http: httpx.AsyncClient | None = None) -> list[Finding]:
-    p = Policy.load(policy_path, env)
+    try:
+        p = _load(policy_path, env)
+    except PolicyInvalid as e:
+        return [("ERROR", "invalid", str(e))]
     client = http or httpx.AsyncClient(timeout=10, trust_env=False)
     try:
         catalog = await _catalog(client, upstream, principal)
@@ -148,27 +190,28 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     l = sub.add_parser("lint", help="static checks, no network")
     l.add_argument("policy")
-    l.add_argument("--env", action="append", default=[], help="environment(s) that must be covered (repeatable)")
+    l.add_argument("--env", action="append", default=[], help="environment(s) that must be covered (repeatable); the first one also stands in for a missing `environment`, as does AIRLOCK_ENV")
     d = sub.add_parser("diff", help="compare the policy with the upstream's live tools/list")
     d.add_argument("policy")
     d.add_argument("--upstream", required=True, help="MCP endpoint, e.g. http://127.0.0.1:9001/mcp. Point it at the server, not the proxy: the proxy hides tools the policy does not list")
-    d.add_argument("--env", help="environment column to check (default: the policy's own)")
+    d.add_argument("--env", help="environment column to check (default: AIRLOCK_ENV, then the policy's own)")
     d.add_argument("--principal", default="airlock-policy", help="X-Airlock-Principal to send")
     d.add_argument("--pins", help="pins file from `airlock-policy pin`: report changed, missing and stale pins")
     n = sub.add_parser("pin", help="write a sha256v2 pin for every allowlisted tool the upstream lists")
     n.add_argument("policy")
     n.add_argument("--upstream", required=True, help="MCP endpoint of the server itself, not the proxy")
-    n.add_argument("--env", help="environment column to read (default: the policy's own)")
+    n.add_argument("--env", help="environment column to read (default: AIRLOCK_ENV, then the policy's own)")
     n.add_argument("--principal", default="airlock-policy", help="X-Airlock-Principal to send")
     n.add_argument("--pins", default="pins.json", help="file to write (default: pins.json)")
     a = ap.parse_args(argv)
+    env_var = os.environ.get("AIRLOCK_ENV") or None  # the proxy reads it too, so the commands see the same column
     if a.cmd == "lint":
-        findings = lint(a.policy, a.env)
+        findings = lint(a.policy, a.env, env=env_var)
     else:
         try:
-            findings = asyncio.run(diff(a.policy, a.upstream, a.env, a.principal, pins=a.pins) if a.cmd == "diff"
-                                   else pin(a.policy, a.upstream, a.env, a.principal, a.pins))
-        except (httpx.HTTPError, RuntimeError, ValidationError, ValueError) as e:  # ValueError: not JSON
+            findings = asyncio.run(diff(a.policy, a.upstream, a.env or env_var, a.principal, pins=a.pins) if a.cmd == "diff"
+                                   else pin(a.policy, a.upstream, a.env or env_var, a.principal, a.pins))
+        except (httpx.HTTPError, RuntimeError, ValueError, OSError) as e:  # ValueError: not JSON; a net for the rest
             findings = [("ERROR", "upstream", str(e))]
     for level, code, msg in findings:
         print(f"{level} {code}: {msg}")

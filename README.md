@@ -160,7 +160,12 @@ without a description (`no_description`), a `count_arg` that relies on the globa
 (`blast_radius_default`), a `where` rule for an environment no tier mentions
 (`where_env_unknown`), a `where` regex with two unbounded repeats in a row
 (`where_regex_cost`) and an environment no tool covers (`env_unused`); `--env` adds
-environments that must be covered. `diff` asks the server itself (not the proxy, which hides
+environments that must be covered. A policy without `environment` lints with the first `--env`
+(or `AIRLOCK_ENV`) as its environment, the way the proxy would run it; without either it is an
+error. `diff` and `pin` take `--env`, then `AIRLOCK_ENV`, then the policy's own `environment`.
+A policy that cannot be read or does not validate is `ERROR invalid` in all three commands, and
+an upstream that does not answer `tools/list` like an MCP server is `ERROR upstream`.
+`diff` asks the server itself (not the proxy, which hides
 unlisted tools) for `tools/list` and tells you which allowlisted tools the server no longer has
 (`missing_upstream`, an error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`),
 which `where` rules name an argument that is not in the schema (`where_unknown_arg`) and which

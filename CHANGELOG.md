@@ -113,6 +113,11 @@
   file is missing or not YAML, the audit or span file cannot be opened, or an `OTEL_*` setting is
   rejected by the SDK; `--port` outside 0-65535 is refused by the argument parser. `AIRLOCK_DEBUG=1`
   keeps the traceback.
+* `airlock-policy diff` and `pin` report a missing, unparsable or invalid policy as `ERROR invalid`,
+  like `lint`, and a `tools/list` answer that is not an MCP result as `ERROR upstream`, instead of
+  a traceback; validation errors are no longer labelled `upstream`.
+* `airlock-policy lint` accepts a policy without `environment` when `--env` or `AIRLOCK_ENV` names
+  one, as the proxy does; `diff` and `pin` read `AIRLOCK_ENV` too when `--env` is not given.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to
