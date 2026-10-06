@@ -43,7 +43,9 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
 
 Refusals come back as tool results with `isError: true`, not as protocol errors, so the
 model sees why and can do something else. Every `tools/call` result, a pending one included,
-carries the verdict and the rule that produced it in `_meta`.
+carries the verdict and the rule that produced it in `_meta`. The `io.mcp-airlock/` keys there
+are the proxy's alone: any the upstream puts into a result or a `tools/list` answer are removed
+before the proxy adds its own, and any the client sends are removed before the call is forwarded.
 
 The proxy accepts three methods: `tools/call` as above, `tools/list` and `server/discover`.
 A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of

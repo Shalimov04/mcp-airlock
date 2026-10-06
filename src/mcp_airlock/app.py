@@ -426,9 +426,12 @@ class Airlock:
         except UpstreamFailed as e:
             self._outcome(verdict="error", rule_id=e.rule, upstream_status=e.status, latency_ms=_ms(t0), detail=e.detail, **base)
             return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: {e.detail}", status=502)
-        if method == "tools/list" and isinstance(reply.get("result"), dict):
-            self._filter_tools(reply["result"], who, policy)
-            self._vet_tools(reply["result"], base, pins)
+        result = reply.get("result")
+        if isinstance(result, dict) and "_meta" in result:
+            result["_meta"] = _upstream_meta(result)
+        if method == "tools/list" and isinstance(result, dict):
+            self._filter_tools(result, who, policy)
+            self._vet_tools(result, base, pins)
         self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
         return JSONResponse(reply, status_code=status)
 
@@ -527,7 +530,7 @@ class Airlock:
             return _tool_error(rid, f"airlock: denied ({rule}): {msg}", rule)
         detail: dict[str, Any] = {}
         if isinstance(result, dict):
-            result.setdefault("_meta", {}).update({META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run})
+            result["_meta"] = {**_upstream_meta(result), META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run}
             try:  # the upstream already acted: a malformed result must reach the caller, not become a 500
                 if truncated := self._cap_output(tool, result, policy):  # after the _meta additions so the cap covers the final size
                     detail.update(truncated)
@@ -924,6 +927,13 @@ def _last_sse_message(text: str, rid: Any) -> dict[str, Any] | None:
         if isinstance(msg, dict) and "method" not in msg and ("result" in msg or "error" in msg) and msg.get("id") == rid:
             found = msg
     return found
+
+
+def _upstream_meta(result: dict[str, Any]) -> dict[str, Any]:
+    """An upstream result's `_meta` without the proxy's namespace. Those keys are the proxy's word to the client: a
+    server could otherwise claim `status: approved`, an empty `suspicious` list or another principal."""
+    meta = result.get("_meta")
+    return {k: v for k, v in meta.items() if not k.startswith(META)} if isinstance(meta, dict) else {}
 
 
 def _trace_carrier(params: Any) -> dict[str, str]:
