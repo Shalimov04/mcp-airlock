@@ -740,6 +740,12 @@ class Airlock:
         claims = self.verify_token(request.path_params["token"], APPROVE_PREFIX)  # an agent's requestState is refused here
         return claims if claims and claims["exp"] >= time.time() else None
 
+    async def _approval_state(self, key: str) -> str:
+        """'consumed' (executed or declined, nothing to approve any more), 'approved' or 'open'."""
+        if await self.engine.store.is_consumed(key):
+            return "consumed"
+        return "approved" if await self.engine.store.is_approved(key) else "open"
+
     def _approve_html(self, body: str, status_code: int = 200) -> HTMLResponse:
         return HTMLResponse(body, status_code=status_code, headers=APPROVE_PAGE_HEADERS)
 
@@ -749,21 +755,33 @@ class Airlock:
         # GET only renders (link unfurlers and prefetchers do GETs); the POST below approves.
         try:  # a store outage leaves the page without the text, like a failed save
             text = await self.engine.store.get_prompt(claims["k"])
+            state = await self._approval_state(claims["k"])
         except Exception as e:
             log.warning("reading the approval prompt text failed: %s", type(e).__name__)
-            text = None
+            text, state = None, "open"  # the POST checks again before it records anything
         details = (f"<pre>{html.escape(text)}</pre>" if text is not None else
                    "<p>The details of this request are not available; check the original message before approving.</p>")
+        action = {"consumed": "<p>This request was already executed or declined; it can no longer be approved.</p>",
+                  "approved": "<p>Already approved. The agent can retry now.</p>",
+                  "open": '<form method="post"><button type="submit">Approve</button></form>'}[state]
         return self._approve_html(f"""<!doctype html><title>mcp-airlock approval</title>
 <h2>Approve tool call?</h2>
 <p><b>{html.escape(claims['t'])}</b> requested by <b>{html.escape(claims['p'])}</b> in <b>{html.escape(claims['e'])}</b><br>
 idempotency key <code>{html.escape(claims['k'])}</code></p>
 {details}
-<form method="post"><button type="submit">Approve</button></form>""")
+{action}""")
 
     async def approve_submit(self, request: Request) -> Response:
         if (claims := self._approval_claims(request)) is None:
             return self._approve_html("Invalid or expired approval link.", status_code=400)
+        tool, principal = html.escape(claims["t"]), html.escape(claims["p"])
+        # A burned key (executed or declined) can never run again: approving it would only put a misleading
+        # approval into the audit. A second click on an approved one changes nothing and is not recorded twice.
+        state = await self._approval_state(claims["k"])
+        if state == "consumed":
+            return self._approve_html(f"{tool} for {principal} was already executed or declined; nothing to approve.", status_code=409)
+        if state == "approved":
+            return self._approve_html(f"{tool} for {principal} is already approved. The agent can retry now.")
         await self.engine.store.approve(claims["k"], claims["exp"])
         headers = {k.lower(): v for k, v in request.headers.items()}
         who = await self._resolve(headers)
@@ -777,7 +795,7 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         detail = {"key": claims["k"], "approved_by": approver, "approved_by_source": source if approver else None}
         self.audit.write(phase="intent", verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
         self._outcome(verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
-        return self._approve_html(f"Approved {html.escape(claims['t'])} for {html.escape(claims['p'])}. The agent can retry now.")
+        return self._approve_html(f"Approved {tool} for {principal}. The agent can retry now.")
 
 
 def _ms(t0: float) -> int:

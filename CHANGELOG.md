@@ -65,6 +65,9 @@
   `requestState`, since there is nothing to wait for.
 * The `pending` result carries `verdict: confirm` and `rule_id: mrtr.pending` in `_meta`, like
   every other `tools/call` result, and its message says when an in-band accept was ignored.
+* `POST` on an approve link whose confirmation was already executed or declined answers 409 and
+  records nothing; it used to say "Approved" and write `mrtr.approved_oob`. A second `POST` on an
+  approved confirmation changes nothing and is not recorded again, and the page shows the state.
 
 ## 0.3.0 - 2026-10-02
 

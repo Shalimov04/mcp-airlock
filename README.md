@@ -412,10 +412,12 @@ The approve page is a capability URL. Anyone holding it can press the button. Pu
 token the proxy itself checked (a JWT secret or JWKS URL is configured); any other
 `Authorization` header, `Basic` included, does not change that. The page shows the prompt
 text (the redacted arguments and up to 2000 characters of the dry-run preview), cut at 8000
-characters with a note, kept in the store until the prompt expires. The responses are sent with
-`Cache-Control: no-store`, `Referrer-Policy: no-referrer` and a Content-Security-Policy that
-forbids framing. The approval itself is audited with `method: approve` and rule
-`mrtr.approved_oob`.
+characters with a note, kept in the store until the prompt expires, and the state of the
+request: once it has been executed or declined there is no button, and a `POST` answers 409
+without recording anything; a second `POST` on an approved request changes nothing and is not
+recorded again. The responses are sent with `Cache-Control: no-store`, `Referrer-Policy:
+no-referrer` and a Content-Security-Policy that forbids framing. The approval itself is
+audited with `method: approve` and rule `mrtr.approved_oob`.
 
 ## Audit
 

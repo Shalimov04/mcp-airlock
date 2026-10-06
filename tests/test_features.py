@@ -717,7 +717,7 @@ async def test_oob_decline_cancel_and_malformed_answers_still_burn_the_key(upstr
         token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
         res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": token, "inputResponses": {CONFIRM_KEY: answer}})
         assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.declined"
-        assert (await c.post(approve_path(posted))).status_code == 200  # approving afterwards does not revive it
+        assert (await c.post(approve_path(posted))).status_code == 409  # a burned key cannot be approved any more
         res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
         assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.replay"
     assert real_deletes(upstream) == []
