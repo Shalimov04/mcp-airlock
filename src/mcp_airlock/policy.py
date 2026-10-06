@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from re import _constants as _sre, _parser as _sre_parser  # the stdlib's own parse tree; re has no public one
 from typing import Any, Literal
@@ -456,6 +456,7 @@ class Decision:
     objects: int = 1
     message: str = ""
     preview: bool = True  # False: L2 tool without dry_run, prompt the human without a dry-run preview
+    reserved_ts: float | None = None  # when `reserve` charged the window for this decision; None: not charged
 
 
 class Engine:
@@ -537,11 +538,12 @@ class Engine:
         blast = self.policy.blast(tool)
         now = time.time()
         if await self.store.usage_reserve(principal, tool, d.objects, now, now - blast.window_s, blast.max_per_principal):
-            return d
+            return replace(d, reserved_ts=now)
         return self._over(d.tier, d.objects, await self.store.usage_sum(principal, tool, now - blast.window_s), blast)
 
     async def refund(self, principal: str, tool: str, d: Decision) -> None:
-        """Give back what `reserve` charged for `d`, when nothing reached the upstream. A negative usage row: the
-        window sum nets it out, and it leaves the window together with the charge."""
-        if d.verdict == "allow" and self._counts(d):
-            await self.store.usage_add(principal, tool, -d.objects, time.time())
+        """Give back what `reserve` charged for `d`, when nothing reached the upstream. A negative usage row at the
+        charge's own timestamp: the window sum nets the two out, and they leave the window together (a row stamped
+        now would understate the sum for as long as the connect attempt took once the charge has left)."""
+        if d.reserved_ts is not None:
+            await self.store.usage_add(principal, tool, -d.objects, d.reserved_ts)

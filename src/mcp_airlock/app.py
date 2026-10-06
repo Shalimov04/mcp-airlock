@@ -54,6 +54,7 @@ TOKEN_PREFIX = "al1."  # requestState: held by the agent
 APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derived key the agent never sees
 CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
+NAME_MAX = 128  # chars of a client-chosen method or tool name kept in a pre-auth audit record
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 # The message is cut shorter still (approvals.TEXT_MAX), so the rest is not there:
 # the audit intent record has it.
@@ -117,8 +118,10 @@ class StoreUnavailable(Exception):
 
 
 def _is_store_error(e: BaseException) -> bool:
+    """A store that did not answer, as opposed to one that answered with a complaint: a DataError (a NUL in a
+    principal), an IntegrityError or a missing table is a bug or a broken schema, which a retry never cures."""
     pg = sys.modules.get("psycopg")  # imported only when a Postgres store or sink is configured
-    if pg is not None and isinstance(e, pg.Error):  # psycopg_pool's PoolTimeout and PoolClosed are OperationalErrors
+    if pg is not None and isinstance(e, (pg.OperationalError, pg.InterfaceError)):  # the pool's PoolTimeout and PoolClosed are OperationalErrors
         return True
     return isinstance(e, RuntimeError) and "store is closed" in str(e)  # PostgresStore after aclose()
 
@@ -357,7 +360,7 @@ class Airlock:
             # NaN/Infinity are not JSON and 1e400 overflows to inf: both would be forwarded, written to the audit file
             # as non-JSON and refused by the Postgres sink. A body nested past the interpreter's limit raises
             # RecursionError, which is not a ValueError.
-            body = json.loads(raw, parse_constant=_no_constant, parse_float=_finite_float)
+            body = _loads(raw)
         except (ValueError, RecursionError):
             return self._reject(None, PARSE_ERROR, "Parse error", sub, None, None)
         if not isinstance(body, dict) or "id" not in body or not isinstance(body.get("method"), str):
@@ -390,9 +393,11 @@ class Airlock:
             trace_id = format_trace_id(span.get_span_context().trace_id)
             base = dict(call_id=uuid.uuid4().hex, principal=sub, method=method, tool=tool, args=args, trace_id=trace_id)
             if who is None:
-                # args=None as for every other pre-auth denial: anyone can send these, and two records of up to the request
-                # limit each would let an unauthenticated client fill the disk or rotate the real history away
-                self._audit_deny(dict(base, args=None), "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
+                # args=None and clipped names as for every other pre-auth denial: anyone can send these, and two records
+                # of up to the request limit each would let an unauthenticated client fill the disk or rotate the real
+                # history away
+                self._audit_deny(dict(base, args=None, method=_clip_name(method), tool=_clip_name(tool)),
+                                 "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
                 return _rpc_error(rid, PRINCIPAL_REQUIRED, "airlock: principal required", status=401)
             span.set_attribute("enduser.id", who.sub)
             try:
@@ -448,9 +453,12 @@ class Airlock:
             self._outcome(verdict="error", rule_id=e.rule, upstream_status=e.status, latency_ms=_ms(t0), detail=e.detail, **base)
             return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: {e.detail}", status=502)
         result = reply.get("result")
-        if isinstance(result, dict) and "_meta" in result:
-            result["_meta"] = _upstream_meta(result)
+        if isinstance(result, dict):
+            _strip_meta(result)
         if method == "tools/list" and isinstance(result, dict):
+            for t in result.get("tools") if isinstance(result.get("tools"), list) else ():
+                if isinstance(t, dict):
+                    _strip_meta(t)  # each tool has its own _meta; the pins leave it out, so this changes no hash
             self._filter_tools(result, who, policy)
             self._vet_tools(result, base, pins)
         self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
@@ -523,7 +531,8 @@ class Airlock:
             ran = "the dry run itself ran, nothing was executed" if d.dry_run else "the call itself ran"
             if d.verdict == "confirm":  # the preview is gone: no prompt without it, and a retry costs nothing
                 ran += " and no confirmation was issued"
-            return _tool_error(rid, f"airlock: the upstream response exceeded {e.limit} bytes and was dropped; {ran}", "upstream.too_large")
+            return _tool_error(rid, f"airlock: the upstream response exceeded {e.limit} bytes and was dropped; {ran}",
+                               "upstream.too_large", verdict="error")
         except UpstreamFailed as e:
             self._outcome(verdict="error", rule_id=e.rule, tier=d.tier, dry_run=d.dry_run, upstream_status=e.status,
                           latency_ms=_ms(t0), detail=e.detail, **base)
@@ -539,7 +548,7 @@ class Airlock:
                 ran += " and no confirmation was issued"
             elif d.rule_id == "tier.L2.confirmed" and not e.sent:  # the key was burned before forwarding and stays so
                 ran += "; the confirmation is spent, start again without requestState"
-            return _tool_error(rid, f"airlock: {e.detail}; {ran}", e.rule)
+            return _tool_error(rid, f"airlock: {e.detail}; {ran}", e.rule, verdict="error")
         result = reply.get("result")
         gated = d.verdict == "confirm" or d.rule_id == "tier.L2.confirmed"
         if gated and isinstance(result, dict) and result.get("resultType") == "input_required":
@@ -552,6 +561,9 @@ class Airlock:
         detail: dict[str, Any] = {}
         if isinstance(result, dict):
             result["_meta"] = {**_upstream_meta(result), META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run}
+            for block in result.get("content") if isinstance(result.get("content"), list) else ():
+                if isinstance(block, dict):
+                    _strip_meta(block)  # a content block has its own _meta, and the dry-run preview copies the blocks
             try:  # the upstream already acted: a malformed result must reach the caller, not become a 500
                 if truncated := self._cap_output(tool, result, policy):  # after the _meta additions so the cap covers the final size
                     detail.update(truncated)
@@ -595,7 +607,9 @@ class Airlock:
             log.exception("audit outcome write failed for call %s", rec.get("call_id"))
 
     def _reject(self, rid, code, message, principal, method, tool, data=None) -> JSONResponse:
-        base = dict(call_id=uuid.uuid4().hex, principal=principal, method=method, tool=tool, args=None, trace_id=None)
+        # A protocol denial is written for anyone who can reach /mcp: no arguments, and names cut to NAME_MAX, or a
+        # megabyte-long `method` would be written twice per unauthenticated request
+        base = dict(call_id=uuid.uuid4().hex, principal=principal, method=_clip_name(method), tool=_clip_name(tool), args=None, trace_id=None)
         self._audit_deny(base, f"protocol.{code}", None, message)
         return _rpc_error(rid, code, message, data)
 
@@ -653,8 +667,11 @@ class Airlock:
 
     async def forward(self, body: dict[str, Any], headers: dict[str, str], who: Principal) -> tuple[int, dict[str, Any]]:
         params = dict(body["params"])
+        # traceparent and tracestate are rebuilt below from the span's context. baggage is not part of that context
+        # (the span continues the parent, it does not carry its baggage), so the client's string goes on as sent;
+        # a non-string would crash the propagator and is dropped.
         meta = {k: v for k, v in (params.get("_meta") or {}).items()
-                if not k.startswith(META) and k not in W3C_META}  # re-injected below from the span's context
+                if not k.startswith(META) and (k not in W3C_META or (k == "baggage" and isinstance(v, str)))}
         meta[META + "principal"] = who.sub  # identity travels in _meta; upstream auth is the proxy's own
         if who.groups:
             meta[META + "groups"] = list(who.groups)
@@ -690,9 +707,12 @@ class Airlock:
                 raise UpstreamFailed("upstream.bad_reply", "upstream SSE stream ended without a response", sent=True, status=r.status_code)
             return r.status_code, reply
         try:
-            reply = json.loads(raw)
-        except ValueError:
-            raise UpstreamFailed("upstream.bad_reply", f"upstream returned non-JSON (HTTP {r.status_code})", sent=True, status=r.status_code) from None
+            # The same strictness as for the request: NaN (what Python's json.dumps emits for float('nan')) or a reply
+            # nested past the parser's limit would otherwise surface after the call ran, as a 500 with a second outcome
+            reply = _loads(raw)
+        except (ValueError, RecursionError) as e:
+            raise UpstreamFailed("upstream.bad_reply", f"upstream returned non-JSON (HTTP {r.status_code}): {_exc_text(e)}",
+                                 sent=True, status=r.status_code) from None
         if not isinstance(reply, dict):
             raise UpstreamFailed("upstream.bad_reply", "upstream returned a non-object", sent=True, status=r.status_code)
         return r.status_code, reply
@@ -935,11 +955,12 @@ def _rpc_error(rid: Any, code: int, message: str, data: Any = None, status: int 
     return JSONResponse({"jsonrpc": "2.0", "id": rid, "error": err}, status_code=status or ERROR_CODE_HTTP_STATUS.get(code, 500))
 
 
-def _tool_error(rid: Any, text: str, rule_id: str) -> JSONResponse:
-    # Policy denials are tool results with isError so the model sees them and can adapt (MCP guidance).
+def _tool_error(rid: Any, text: str, rule_id: str, verdict: str = "deny") -> JSONResponse:
+    # Policy denials are tool results with isError so the model sees them and can adapt (MCP guidance). An upstream
+    # failure is one too, with verdict "error" as in the audit: the call may have run, nothing was refused.
     return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
         "resultType": "complete", "isError": True, "content": [{"type": "text", "text": text}],
-        "_meta": {META + "verdict": "deny", META + "rule_id": rule_id}}})
+        "_meta": {META + "verdict": verdict, META + "rule_id": rule_id}}})
 
 
 def _last_sse_message(text: str, rid: Any) -> dict[str, Any] | None:
@@ -952,8 +973,8 @@ def _last_sse_message(text: str, rid: Any) -> dict[str, Any] | None:
         if not data:
             continue
         try:
-            msg = json.loads(data)
-        except ValueError:
+            msg = _loads(data)
+        except (ValueError, RecursionError):  # not JSON, NaN, or nested past the parser: no response we can use
             continue
         if isinstance(msg, dict) and "method" not in msg and ("result" in msg or "error" in msg) and msg.get("id") == rid:
             found = msg
@@ -965,6 +986,25 @@ def _upstream_meta(result: dict[str, Any]) -> dict[str, Any]:
     server could otherwise claim `status: approved`, an empty `suspicious` list or another principal."""
     meta = result.get("_meta")
     return {k: v for k, v in meta.items() if not k.startswith(META)} if isinstance(meta, dict) else {}
+
+
+def _strip_meta(obj: dict[str, Any]) -> None:
+    """Remove the proxy's namespace from `obj["_meta"]` in place, when there is one: a result, a tool in a
+    tools/list answer or a content block, each of which carries its own `_meta`."""
+    if "_meta" in obj:
+        obj["_meta"] = _upstream_meta(obj)
+
+
+def _clip_name(name: Any) -> Any:
+    """A method or tool name as kept in a pre-auth audit record: the client chose it, so it is cut at NAME_MAX."""
+    if isinstance(name, str) and len(name) > NAME_MAX:
+        return name[:NAME_MAX] + f"[cut at {NAME_MAX} characters]"
+    return name
+
+
+def _loads(raw: bytes | str) -> Any:
+    """json.loads that refuses NaN, Infinity and numbers that overflow a double, from either side of the proxy."""
+    return json.loads(raw, parse_constant=_no_constant, parse_float=_finite_float)
 
 
 def _trace_carrier(params: Any) -> dict[str, str]:

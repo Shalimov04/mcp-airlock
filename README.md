@@ -44,8 +44,9 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
 Refusals come back as tool results with `isError: true`, not as protocol errors, so the
 model sees why and can do something else. Every `tools/call` result, a pending one included,
 carries the verdict and the rule that produced it in `_meta`. The `io.mcp-airlock/` keys there
-are the proxy's alone: any the upstream puts into a result or a `tools/list` answer are removed
-before the proxy adds its own, and any the client sends are removed before the call is forwarded.
+are the proxy's alone: any the upstream puts into a result, one of its content blocks, a
+`tools/list` answer or a tool in it are removed before the proxy adds its own, and any the
+client sends are removed before the call is forwarded.
 
 The proxy accepts three methods: `tools/call` as above, `tools/list` and `server/discover`.
 A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of
@@ -271,7 +272,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_OTEL_FILE` | Path of the span file, the same as `--otel-file`. |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
 | `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. A positive integer. |
-| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. A positive integer. |
+| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one: for a tool call both are a tool error (`upstream.too_large`, `upstream.encoded`), for `tools/list` and `server/discover` an HTTP 502. A positive integer. |
 | `PGCONNECT_TIMEOUT` | libpq's own connect timeout. When set, the proxy adds no `connect_timeout` of its own to the DSNs. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Turn on OTLP span export over HTTP/protobuf (needs the `otlp` extra). The base URL gets `/v1/traces` appended; the traces URL is used as it is. Only http/protobuf is supported and `OTEL_EXPORTER_OTLP_PROTOCOL` is not read: point it at the collector's HTTP port (4318), not gRPC (4317). |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Headers for the export request, for example `authorization=Bearer <token>`. Treat it as a secret. |
@@ -528,8 +529,9 @@ is off by default. Lowering `--audit-keep` deletes the existing `.N` files above
 limit at the next rotation.
 
 A request refused before it is attributed to a principal (a malformed or oversized body, no
-credentials) is audited without its arguments, so an unauthenticated client cannot write
-payloads into the log. Its two records still count toward the rotation budget: anyone who can
+credentials) is audited without its arguments, and its `method` and `tool` are cut at 128
+characters, so an unauthenticated client cannot write payloads into the log; the same cut
+applies to every protocol denial. Its two records still count toward the rotation budget: anyone who can
 reach `/mcp` can push older files out with enough requests. When the trail matters, keep the
 Postgres sink (`AIRLOCK_AUDIT_DSN`) or ship the files off the host.
 
@@ -565,8 +567,9 @@ as `airlock.*`, and the number of injection findings. The `airlock.*` attributes
 the outcome record, so a replay or a denial after the first decision shows as such, and a span
 whose verdict is `error` has status `ERROR`. Never the arguments. An incoming
 `traceparent` (header or `_meta`) is continued and a new one is put into the upstream `_meta`,
-so the audit's `trace_id` matches what the upstream sees. `tracestate` and `baggage` travel the
-same way; a value of these three that is not a string is ignored and a new trace starts.
+so the audit's `trace_id` matches what the upstream sees. `tracestate` is rebuilt with it; a
+string `baggage` in `_meta` is passed on as the client sent it. A value of these three that is
+not a string is ignored, and a bad `traceparent` starts a new trace.
 
 Spans go to a file with `--otel-file` (or `AIRLOCK_OTEL_FILE`), to an OTLP collector when
 `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, or to both. The
@@ -624,7 +627,9 @@ connection and the work on it. If the database is down, each store call fails af
 connect timeout (twice that at most, when the server accepts the connection and then stops
 answering) and the gated call is denied with `store.unavailable`: a tool error carrying the rule,
 audited as a denial like `catalog.unavailable`, with the store's error in `detail` and a one-line
-warning in the log. A `tools/list` does not touch the store and is not affected. A failed connect
+warning in the log. Only a store that does not answer is treated this way; one that answers with a
+complaint (a bad value, a missing table) is an internal error, since retrying does not cure it.
+A `tools/list` does not touch the store and is not affected. A failed connect
 attempt is given up after the connect timeout, so the store recovers within a few seconds of the
 database coming back. A connection that has not answered by then is cut and dropped from the
 pool, including one that was idle in it. A saturated pool can make `/readyz` report 503.
@@ -706,10 +711,12 @@ numbers are in `_meta["io.mcp-airlock/output"]`. An upstream answer over
 that says the call ran (or that only its dry run did), with rule `upstream.too_large`.
 
 An upstream that cannot be reached (`upstream.unreachable`), answers with compressed content
-(`upstream.encoded`) or sends something that is not a JSON-RPC response (`upstream.bad_reply`) is
-reported the same way: a tool error carrying the rule, audited as verdict `error` with the reason
-in `detail`. When the connection itself failed, nothing reached the upstream: the error says so and
-the blast-radius charge is given back. After anything else (a timeout, a torn read, a bad answer)
+(`upstream.encoded`) or sends something that is not a JSON-RPC response (`upstream.bad_reply`:
+not JSON, not an object, `NaN` or a number that does not fit a double, nesting too deep to parse,
+an SSE stream without the call's response) is reported the same way: a tool error carrying the
+rule and verdict `error` in `_meta`, audited as verdict `error` with the reason in `detail`. When
+the connection itself failed, nothing reached the upstream: the error says so and the
+blast-radius charge is given back. After anything else (a timeout, a torn read, a bad answer)
 the call may have run; the error says that too, and the charge stays. For `tools/list` and
 `server/discover` these failures are an HTTP 502.
 

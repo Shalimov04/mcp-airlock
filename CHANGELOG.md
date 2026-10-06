@@ -22,10 +22,11 @@
 * **Upstream failures.** An unreachable upstream, a compressed answer or a reply that is not a
   JSON-RPC object used to come back as a synthetic 502 audited as `allow` with no detail. A tool
   call now gets a tool error with rule `upstream.unreachable`, `upstream.encoded` or
-  `upstream.bad_reply`, saying whether the call may have run, and the outcome record says
-  `error` with the reason. When the connection itself failed, the blast-radius charge is given
-  back; the key of a confirmed `L2` call stays burned and the error says to ask again. `tools/list`
-  and `server/discover` still answer 502.
+  `upstream.bad_reply`, saying whether the call may have run, with verdict `error` in `_meta`
+  (`upstream.too_large` too), and the outcome record says `error` with the reason. When the
+  connection itself failed, the blast-radius charge is given back, stamped with the charge's own
+  time so the two leave the window together; the key of a confirmed `L2` call stays burned and
+  the error says to ask again. `tools/list` and `server/discover` still answer 502.
 * An SSE answer is reduced to the response carrying the call's id. A stream with only
   notifications, a server-to-client request or a response to another id used to be passed back as
   the answer (HTTP 200, `id: null`), on which the official SDK client hangs; it is now
@@ -101,22 +102,31 @@
   with a parse error instead of being forwarded, written to `audit.jsonl` as non-JSON and dropped
   by the Postgres sink. A body nested deeper than 64 levels is refused with `-32600`; one too deep
   to parse at all is a parse error. Both used to be an unaudited bare 500.
-* `io.mcp-airlock/*` keys that the upstream puts into a result's `_meta`, into the dry-run preview
-  or into a `tools/list` answer are removed before the proxy adds its own. An upstream could
-  otherwise show the client `status: approved`, an empty `suspicious` list or another principal.
-* A request without a principal is audited without its arguments, like the other pre-auth
-  denials. Two records of up to the request limit each let an unauthenticated client fill the disk
-  or, with rotation on, push the whole real history out of the kept files.
+* The upstream's answer is read with the same strictness: a reply or an SSE frame holding `NaN`
+  (what Python's `json.dumps` emits for a NaN float), `Infinity` or `1e400`, or nested too deep to
+  parse, is `upstream.bad_reply`. It used to be an HTTP 500 after the call ran, with a second
+  outcome record `internal.error` next to the `allow`.
+* `io.mcp-airlock/*` keys that the upstream puts into a result's `_meta`, into a content block's,
+  into the dry-run preview or into a `tools/list` answer and each tool in it are removed before
+  the proxy adds its own. An upstream could otherwise show the client `status: approved`, an
+  empty `suspicious` list or another principal.
+* A request refused before it has a principal is audited without its arguments, and its `method`
+  and `tool` are cut at 128 characters. Two records of up to the request limit each let an
+  unauthenticated client fill the disk or, with rotation on, push the whole real history out of
+  the kept files; a 900 KB tool name did the same through the two name fields.
 * The `airlock.*` span attributes follow the outcome record. A blocked replay, a decline, a
   `catalog.unavailable` denial or an upstream failure used to leave the span saying what the first
   decision was (or nothing at all); a span whose verdict is `error` now also has status `ERROR`.
 * A `traceparent`, `tracestate` or `baggage` in `_meta` that is not a string is ignored and a new
-  trace is started, instead of an unaudited bare 500 for any caller. The three are rebuilt from the
-  span's context before the call is forwarded, so a bad value never reaches the upstream.
+  trace is started, instead of an unaudited bare 500 for any caller. `traceparent` and
+  `tracestate` are rebuilt from the span's context before the call is forwarded; a string
+  `baggage` is passed on as the client sent it.
 * A store that does not answer (a pool timeout, a cut connection, a closed store) now denies the
   gated call with rule `store.unavailable`, as the README said it would: a tool error, an intent
   and an outcome record saying `deny` with the store's error in `detail`, and one warning line in
-  the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record.
+  the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record. A
+  store that answers with a complaint (a bad value, a missing table) is still an internal error,
+  since retrying does not cure it.
 * A `where` regex can no longer freeze the proxy. A pattern that can take exponential time on a
   crafted value (a repetition inside a repetition such as `(a+)+` or `(.*a){12}`, an alternation
   inside a repetition whose alternatives can start alike, a backreference) is refused when the
