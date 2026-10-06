@@ -75,6 +75,18 @@ def test_build_stage_compiles_bytecode(name):
     assert text.index("ENV UV_COMPILE_BYTECODE=1") < text.index("RUN uv sync")
 
 
+def test_readme_docker_run_example_reaches_a_host_upstream_on_linux():
+    # Docker Engine on Linux has no host.docker.internal without --add-host; Desktop adds it itself.
+    lines = {}
+    for name in ("README.md", "README.ru.md"):
+        text = (ROOT / name).read_text().replace("\\\n", " ")
+        m = re.search(r"^docker run --rm .*ghcr\.io/shalimov04/mcp-airlock:\S+ .*$", text, re.M)
+        assert m, f"no docker run example in {name}"
+        lines[name] = re.sub(r"\s+", " ", m.group(0))
+        assert "--add-host=host.docker.internal:host-gateway" in lines[name], name
+    assert lines["README.md"] == lines["README.ru.md"]
+
+
 @pytest.mark.parametrize("name", FILES)
 def test_both_images_probe_healthz_on_the_exposed_port(name):
     text = (ROOT / name).read_text()

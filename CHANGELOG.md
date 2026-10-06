@@ -50,6 +50,10 @@
   read-only at run time, so no `.pyc` could ever be written and every start paid the import cost.
 * `policy.example.yaml` no longer tells approvers that `restart_service` is refused at L2: a tool
   without `dry_run` is refused at L1 and confirmed without a preview at L2.
+* The README `docker run` example adds `--add-host=host.docker.internal:host-gateway`, without
+  which Docker Engine on Linux cannot resolve the upstream host.
+* `docs/clients.md`: the `claude mcp add` command gets `--scope user`; without it the server is
+  registered for the current project only.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to

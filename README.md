@@ -95,8 +95,14 @@ The same as a container:
 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
+  --add-host=host.docker.internal:host-gateway \
   ghcr.io/shalimov04/mcp-airlock:0.3 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
+
+`--add-host` gives Docker Engine on Linux the `host.docker.internal` name that Docker Desktop
+provides by itself. The upstream has to listen on an address the container can reach, not only
+on `127.0.0.1`, and a host firewall may need to allow traffic from `docker0`; `--network host`
+with `--upstream http://127.0.0.1:8080/mcp` sidesteps both.
 
 The image has a `HEALTHCHECK` that asks `http://127.0.0.1:9000/healthz` with python every 30
 seconds (the image has no curl), ignoring any `HTTP_PROXY`. If you pass `--port`, or a `--host`

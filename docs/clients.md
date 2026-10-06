@@ -19,10 +19,11 @@ the README's "Environment variables" table).
 
 ## Claude Code
 
-One command, user scope:
+One command, user scope (without `--scope user` Claude Code registers the server for the current
+project only):
 
 ```
-claude mcp add --transport http github-airlocked http://127.0.0.1:9000/mcp \
+claude mcp add --transport http --scope user github-airlocked http://127.0.0.1:9000/mcp \
   --header "X-Airlock-Principal: alice"
 ```
 

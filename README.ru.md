@@ -92,8 +92,14 @@ uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env 
 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
+  --add-host=host.docker.internal:host-gateway \
   ghcr.io/shalimov04/mcp-airlock:0.3 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
+
+`--add-host` даёт Docker Engine на Linux имя `host.docker.internal`, которое Docker Desktop
+заводит сам. Upstream должен слушать адрес, доступный из контейнера, а не только `127.0.0.1`,
+и файрвол хоста может потребовать разрешить трафик с `docker0`; `--network host` вместе с
+`--upstream http://127.0.0.1:8080/mcp` снимает оба вопроса.
 
 В образе есть `HEALTHCHECK`: раз в 30 секунд python запрашивает `http://127.0.0.1:9000/healthz`
 (curl в образе нет), не обращая внимания на `HTTP_PROXY`. Если передаёте `--port` или `--host`
