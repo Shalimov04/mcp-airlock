@@ -539,9 +539,12 @@ ISO 8601 time); `--limit` keeps the newest N (a positive number); `--stats` prin
 verdict and rule instead. The same filters work against Postgres with `--dsn` or
 `AIRLOCK_AUDIT_DSN`, with the same connect timeout as the proxy. A line that is not a record
 (a torn line left by an older version, say) is skipped with `airlock-audit: skipped
-audit.jsonl:57: not JSON` on stderr and the rest of the log is still printed. A missing file,
-a DSN that does not parse, a Postgres that does not answer or a missing `postgres` extra is
-one `airlock-audit: ...` line and exit code 1, never a traceback; the DSN is not quoted.
+audit.jsonl:57: not JSON` (or `not a record`, for JSON that is not an object) on stderr and
+the rest of the log is still printed. A missing file, a DSN that does not parse, a Postgres
+that does not answer or a missing `postgres` extra is one `airlock-audit: ...` line and exit
+code 1, never a traceback. A Postgres error keeps libpq's words (refused, timed out, no such
+table) but every value libpq quotes, such as the host, socket path, user or database, is
+blanked to `"..."`, so nothing from the DSN is echoed, the password included.
 
 The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
 it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and

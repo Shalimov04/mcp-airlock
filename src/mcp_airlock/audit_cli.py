@@ -16,6 +16,7 @@ from .pg import psycopg_module, with_conn_defaults
 
 FILTERS = ("principal", "tool", "verdict", "rule_id", "phase")
 _REL = re.compile(r"^(\d+)([mhd])$")
+_QUOTED = re.compile(r'"[^"]*"|(?<!\w)\'[^\']*\'')  # a value libpq or psycopg quotes in an error message
 _UNIT = {"m": "minutes", "h": "hours", "d": "days"}
 
 
@@ -57,10 +58,11 @@ def query_jsonl(path: str, where: dict, since: datetime | None, limit: int | Non
                     continue
                 try:
                     r = json.loads(line)
-                    if not isinstance(r, dict):
-                        raise ValueError("not an object")
-                except ValueError:  # a torn line, or one that is not a record: the rest of the log is still readable
+                except ValueError:  # a torn line, or garbage: the rest of the log is still readable
                     _skip(f, n, "not JSON")
+                    continue
+                if not isinstance(r, dict):
+                    _skip(f, n, "not a record")
                     continue
                 if not all(r.get(k) == v for k, v in where.items()):
                     continue
@@ -89,7 +91,15 @@ def query_pg(dsn: str, where: dict, since: datetime | None, limit: int | None, v
         with psycopg.connect(dsn) as conn:
             return [rec for (rec,) in reversed(conn.execute(sql, params).fetchall())]
     except psycopg.Error as e:  # unreachable, refused, no table: one line for main(), libpq's text is several
-        raise RuntimeError("Postgres: " + " ".join(str(e).split())) from None
+        raise RuntimeError("Postgres: " + _blanked(str(e))) from None
+
+
+def _blanked(text: str) -> str:
+    """libpq's or psycopg's error text on one line, every quoted value blanked. What they quote (a host, a socket
+    path, a user, a database) comes from the DSN, and a URI whose password holds an unescaped '@' is parsed with a
+    slice of the password as the host, so the quotes are where a secret would leak. What is left still says
+    refused, timed out or no such table."""
+    return _QUOTED.sub('"..."', " ".join(text.split()))
 
 
 def default_files(live: str = "audit.jsonl") -> list[str]:

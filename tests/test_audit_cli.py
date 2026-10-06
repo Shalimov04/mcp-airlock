@@ -16,7 +16,7 @@ from mcp_airlock.audit_cli import main
 
 from .conftest import call, rpc
 
-LINE_BREAKS = "a b c\u0085d\x0be\x0cf\x1cg\x1dh\x1ei"  # str.splitlines() splits on every one of these
+LINE_BREAKS = "a\u2028b\u2029c\u0085d\x0be\x0cf\x1cg\x1dh\x1ei"  # str.splitlines() splits on every one of these
 
 
 def query(capsys, *argv) -> tuple[int, list[dict], str]:
@@ -53,7 +53,7 @@ def test_query_skips_a_torn_line_and_reads_the_records_after_it(tmp_path, capsys
     write_n(path, 2, start=2)
     rc, rows, err = query(capsys, "--jsonl", str(path))
     assert rc == 0 and [r["call_id"] for r in rows] == ["c000", "c001", "c002", "c003"]
-    assert err == f"airlock-audit: skipped {path}:3: not JSON\nairlock-audit: skipped {path}:4: not JSON\n"
+    assert err == f"airlock-audit: skipped {path}:3: not JSON\nairlock-audit: skipped {path}:4: not a record\n"
     rc, rows, err = query(capsys, "--jsonl", str(path), "--stats")
     assert rc == 0 and rows == [{"verdict": "allow", "rule_id": "r", "count": 4}]
     rc, rows, _ = query(capsys, "--jsonl", str(path), "--limit", "1")
@@ -120,6 +120,19 @@ def test_the_command_prints_no_traceback_and_no_password_for_a_bad_dsn(tmp_path,
                        capture_output=True, text=True, timeout=60)
     assert p.returncode == 1 and p.stdout == ""
     assert p.stderr.count("\n") == 1 and "Traceback" not in p.stderr and "hunter2" not in p.stderr and "secret" not in p.stderr
+
+
+def test_the_postgres_error_blanks_every_value_libpq_quotes(no_env, monkeypatch, capsys):
+    pytest.importorskip("psycopg")  # the DSN cases need the extra; the file cases do not
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    # libpq quotes the socket path it tried; the host, user and database are quoted the same way
+    rc, rows, err = query(capsys, "--dsn", "host=/sockdir7/hun@ter2 port=1 user=u sslmode=disable")
+    assert (rc, rows) == (1, []) and err.startswith("airlock-audit: Postgres: ") and err.count("\n") == 1
+    assert "ter2" not in err and "sockdir7" not in err and '"..."' in err and "failed" in err
+    # a URI password with an unescaped '@': the tail of the password is parsed as the host and quoted as such
+    rc, rows, err = query(capsys, "--dsn", "postgresql://u:hun@ter2@127.0.0.1:1/db?sslmode=disable")
+    assert (rc, rows) == (1, []) and err.startswith("airlock-audit: Postgres: ") and err.count("\n") == 1
+    assert "ter2" not in err and "hun" not in err
 
 
 def test_a_dsn_nobody_listens_on_is_one_line(no_env, capsys):
