@@ -93,6 +93,15 @@
   write it notices itself is cut back at once. A line an older version already kept this way still
   fails `verify`; deleting that line by hand restores the chain, since the record after it chains
   to the one before.
+* `airlock-audit query` no longer dies with a JSONDecodeError on a record whose argument holds
+  U+2028, U+2029, U+0085 or a few control characters (it split the file the way `str.splitlines`
+  does), nor on a torn line: such a line is skipped with `airlock-audit: skipped <file>:<n>: not
+  JSON` on stderr and the rest of the log is read.
+* `airlock-audit query` prints one `airlock-audit: ...` line and exits 1, instead of a traceback,
+  for a missing file, a DSN that does not parse (the old traceback quoted part of it, password
+  included), an unreachable Postgres or a missing `postgres` extra; the Postgres connect has the
+  proxy's connect timeout; `--since 99999999999d` is a usage error instead of an OverflowError;
+  `--limit` must be positive (a negative value used to drop the oldest N records).
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to

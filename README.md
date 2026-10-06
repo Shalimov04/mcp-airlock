@@ -535,8 +535,13 @@ uv run airlock-audit query --stats
 `query` reads `audit.jsonl` and its rotated files, oldest first, and prints matching records
 as JSONL, newest last. `--jsonl` names another file. The filters are `--principal`, `--tool`,
 `--verdict`, `--rule`, `--phase` (`intent` or `outcome`) and `--since` (`30m`, `2h`, `7d` or an
-ISO 8601 time); `--limit` keeps the newest N; `--stats` prints counts by verdict and rule
-instead. The same filters work against Postgres with `--dsn` or `AIRLOCK_AUDIT_DSN`.
+ISO 8601 time); `--limit` keeps the newest N (a positive number); `--stats` prints counts by
+verdict and rule instead. The same filters work against Postgres with `--dsn` or
+`AIRLOCK_AUDIT_DSN`, with the same connect timeout as the proxy. A line that is not a record
+(a torn line left by an older version, say) is skipped with `airlock-audit: skipped
+audit.jsonl:57: not JSON` on stderr and the rest of the log is still printed. A missing file,
+a DSN that does not parse, a Postgres that does not answer or a missing `postgres` extra is
+one `airlock-audit: ...` line and exit code 1, never a traceback; the DSN is not quoted.
 
 The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
 it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and
