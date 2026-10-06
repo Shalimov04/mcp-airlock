@@ -76,7 +76,7 @@ async def test_a_connection_whose_deadline_fired_is_dropped_even_when_it_answere
     # the socket is shut. Returned to the pool as healthy, it failed the next caller's check and cost a 1 s backoff.
     monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
     cuts: list = []
-    monkeypatch.setattr(store_mod, "_cut", lambda conn, timeout, fired: (cuts.append(conn), fired.append(True)))
+    monkeypatch.setattr(store_mod, "_cut", lambda conn, timeout, fired, cancels: (cuts.append(conn), fired.append(True)))
     store = pg_store(PG, pool_size=1)
     async with store._conn() as c:
         await asyncio.sleep(2.3)  # the deadline fires with the socket untouched: the answer below arrives as usual

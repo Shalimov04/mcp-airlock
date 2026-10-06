@@ -109,9 +109,12 @@ _TABLES = ("airlock_keys", "airlock_prompts", "airlock_usage")
 # The server-side timeouts end this much before the client deadline, so a slow statement normally fails with a
 # clean server error on a connection that stays usable; the cut is for a server that does not answer at all.
 _SERVER_HEAD_START_S = 0.2
+# How long aclose() waits for cancel requests still in flight: one normally takes a round trip, and one to a server
+# that does not answer is not worth holding a shutdown for.
+_CANCEL_DRAIN_S = 1.0
 
 
-def _cut(conn, cancel_timeout: float, fired: list) -> None:
+def _cut(conn, cancel_timeout: float, fired: list, cancels: set) -> None:
     """Cut the socket so the pending call fails now, and ask the server to drop the work.
 
     Shutting our end alone leaves the backend where it was: one waiting on a lock does not notice a gone client,
@@ -120,7 +123,11 @@ def _cut(conn, cancel_timeout: float, fired: list) -> None:
     fired.append(True)
     if psycopg_module().capabilities.has_cancel_safe():  # older libpq cancels in a blocking thread: not worth a hang
         # Its first step, which copies the cancel key, runs before the waiter sees the cut and the pool drops the connection.
-        asyncio.ensure_future(_cancel(conn, cancel_timeout))
+        task = asyncio.ensure_future(_cancel(conn, cancel_timeout))
+        # The loop keeps only a weak reference to a task; the store holds it until it is done and drains the set at
+        # shutdown, else a shutdown right after a cut logs "Task was destroyed but it is pending".
+        cancels.add(task)
+        task.add_done_callback(cancels.discard)
     try:
         with socket.socket(fileno=os.dup(conn.pgconn.socket)) as s:  # a dup: the libpq fd stays open
             s.shutdown(socket.SHUT_RDWR)
@@ -147,6 +154,7 @@ class PostgresStore:
         self._pool = None
         self._pool_lock = asyncio.Lock()  # binds no loop at construction on 3.10+
         self._ready = False
+        self._cancels: set = set()  # cancel requests in flight after a cut
 
     async def _open_pool(self):
         async with self._pool_lock:
@@ -180,7 +188,7 @@ class PostgresStore:
         cancelling the call would make psycopg wait on the same silent server. Shutting our end makes the pending
         call fail at once, and the pool discards the broken connection."""
         fired: list = []
-        timer = asyncio.get_running_loop().call_later(self._wait_s, _cut, conn, self._wait_s, fired)
+        timer = asyncio.get_running_loop().call_later(self._wait_s, _cut, conn, self._wait_s, fired, self._cancels)
         try:
             yield
         finally:
@@ -198,8 +206,9 @@ class PostgresStore:
 
     async def _configure(self, conn) -> None:
         """Once per new connection: the server gives a statement or a lock wait up just before the client would,
-        so a backend never outlives the call it served. Session settings, so PgBouncer in transaction mode may
-        hand them to another airlock replica or lose them; the cancel on a cut covers that case."""
+        so a backend never outlives the call it served. Session settings: PgBouncer in transaction mode leaves them
+        on the server connection, where any other client of the same pool inherits them, and may hand this client
+        a connection without them; the cancel on a cut covers the latter, the README asks for a role of our own."""
         ms = str(int((self._wait_s - _SERVER_HEAD_START_S) * 1000))
         async with self._deadline(conn):
             await conn.execute("SELECT set_config('statement_timeout', %s, false), set_config('lock_timeout', %s, false)",
@@ -237,6 +246,11 @@ class PostgresStore:
         pool, self._pool = self._pool, None  # idempotent
         if pool is not None:
             await pool.close()
+        if self._cancels:
+            _, pending = await asyncio.wait(set(self._cancels), timeout=_CANCEL_DRAIN_S)
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def ping(self) -> None:
         """Readiness: the database answers and the tables exist, else they are created again here, so /readyz
