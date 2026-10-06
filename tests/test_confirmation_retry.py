@@ -3,10 +3,16 @@ approval channel, and a pending result that names its verdict and rule. HTTP lev
 
 from __future__ import annotations
 
+import json
+
+import httpx
+
+from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META
+from mcp_airlock.audit import AuditLog
 
 from .conftest import audit_rows, call
-from .test_features import accept, proxy_client, real_deletes, webhook_airlock
+from .test_features import PRINCIPAL_POLICY, accept, proxy_client, real_deletes, webhook_airlock
 
 DECLINE = {CONFIRM_KEY: {"action": "decline"}}
 
@@ -60,3 +66,22 @@ async def test_pending_result_carries_verdict_rule_and_the_ignored_note(upstream
         assert meta[META + "verdict"] == "confirm" and meta[META + "rule_id"] == "mrtr.pending"
         assert "in-band accept was ignored" in meta[META + "message"]
     assert real_deletes(upstream) == []
+
+
+async def test_a_retry_whose_tier_dropped_below_l2_runs_without_the_proxy_token(upstream, audit_path, tmp_path):
+    """The proxy's requestState must never reach the upstream, whatever the tier is at the retry: under the MCP SDK
+    an unknown requestState is an invalid-params error, and the token carries this proxy's signed claims."""
+    p = tmp_path / "p.yaml"
+    p.write_text(PRINCIPAL_POLICY)  # set_replicas is L2, L3 for the oncall group; no webhook, so inband
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
+    al = Airlock(Policy.load(p), "http://localhost:9001/mcp", AuditLog(audit_path), http=http, trust_principal_header=True)
+    args = {"names": ["api"], "replicas": 1}
+    async with proxy_client(al) as c:
+        first = await call(c, "set_replicas", args, principal="carol")
+        assert first["_meta"][META + "rule_id"] == "tier.L2.confirm"
+        res = await call(c, "set_replicas", args, principal="carol", headers={"x-airlock-groups": "oncall"},
+                         extra={"requestState": first["requestState"]})
+        assert not res.get("isError"), res
+        assert res["_meta"][META + "rule_id"] == "tier.L3.auto"
+    ran = [x for x in upstream.CALLS if x["tool"] == "set_replicas" and not x["args"].get("dry_run")]
+    assert len(ran) == 1 and not any("requestState" in json.dumps(x) for x in upstream.CALLS)

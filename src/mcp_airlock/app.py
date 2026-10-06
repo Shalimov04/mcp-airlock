@@ -265,8 +265,9 @@ class Airlock:
 
     async def verify_confirmation(self, params: dict[str, Any], principal: str, tool: str, args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Returns (mode, claims): mode is 'none' (no airlock token), 'accepted', 'pending' (token but no answer yet),
-        'pending:ignored' (pending, and an in-band accept was ignored in oob mode of the token or the replica) or 'deny:<rule>'.
-        Never consumes the key on accept; `_call` does that right before forwarding."""
+        'pending:ignored' (pending, and an in-band accept was ignored in oob mode of the token or the replica),
+        'reissue' (an airlock token that nothing can approve but the client, and no answer: the call is evaluated
+        as new) or 'deny:<rule>'. Never consumes the key on accept; `_call` does that right before forwarding."""
         state = params.get("requestState")
         if not isinstance(state, str) or not state.startswith(TOKEN_PREFIX):
             return "none", None  # plain call, or an upstream-owned requestState (forwarded untouched)
@@ -291,8 +292,10 @@ class Airlock:
                 return "accepted", claims
             if not strict and not self.webhook:
                 # No approval channel but the client itself, and it sent no answer: nothing to wait for, so the
-                # call is treated as new and the question is asked again (a fresh token; this one stays unused).
-                return "none", None
+                # call is evaluated as new and the question is asked again (a fresh token; this one stays unused).
+                # Not "none": the airlock requestState is still in params and must be stripped before forwarding,
+                # whatever tier the retry lands on.
+                return "reissue", None
             return ("pending" if answer is None else "pending:ignored"), claims
         if in_band:
             return "accepted", claims
