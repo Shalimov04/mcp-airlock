@@ -58,7 +58,7 @@
         },
         {
           "name": "AIRLOCK_SECRET",
-          "description": "Key for signing confirmation tokens; set it when running more than one replica",
+          "description": "Key for signing confirmation tokens; set it only together with AIRLOCK_STORE_DSN (replicas need one key, and with the memory store a fixed key lets a used confirmation run again)",
           "isSecret": true
         }
       ]

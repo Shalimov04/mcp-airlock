@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from types import SimpleNamespace
@@ -97,6 +98,16 @@ def test_secret_without_store_dsn_warns():
     only(warn(secret="s", store_dsn=None), "AIRLOCK_SECRET is set without AIRLOCK_STORE_DSN")
     only(warn(secret="s", store_dsn=""), "AIRLOCK_SECRET is set without AIRLOCK_STORE_DSN")
     assert warn(secret="s", store_dsn="postgresql://x") == []
+
+
+def test_the_registry_manifest_gives_the_same_advice_about_the_secret():
+    # server.json is what an MCP registry shows. It used to say "set it when running more than one replica":
+    # the advice the AIRLOCK_SECRET warning exists to correct.
+    from .conftest import ROOT
+    manifest = json.loads((ROOT / "server.json").read_text())
+    (var,) = [v for p in manifest["packages"] for v in p["environmentVariables"] if v["name"] == "AIRLOCK_SECRET"]
+    assert "AIRLOCK_STORE_DSN" in var["description"]
+    assert "more than one replica" not in var["description"]
 
 
 @pytest.mark.parametrize("public_url", [None, "", "http://127.0.0.1:9000", "http://127.0.0.1:9000/"])
