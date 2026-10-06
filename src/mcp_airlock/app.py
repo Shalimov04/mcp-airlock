@@ -30,7 +30,7 @@ from mcp.shared.inbound import (
 from mcp_types.jsonrpc import INVALID_PARAMS, INVALID_REQUEST, INTERNAL_ERROR, METHOD_NOT_FOUND, PARSE_ERROR
 from opentelemetry import trace
 from opentelemetry.propagate import extract, inject
-from opentelemetry.trace import SpanKind, format_trace_id
+from opentelemetry.trace import SpanKind, StatusCode, format_trace_id
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
@@ -375,7 +375,6 @@ class Airlock:
             base = dict(call_id=uuid.uuid4().hex, principal=sub, method=method, tool=tool, args=args, trace_id=trace_id)
             if who is None:
                 self._audit_deny(base, "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
-                span.set_attribute("airlock.verdict", "deny")
                 return _rpc_error(rid, PRINCIPAL_REQUIRED, "airlock: principal required", status=401)
             span.set_attribute("enduser.id", who.sub)
             try:
@@ -437,7 +436,6 @@ class Airlock:
         if mode.startswith("deny:"):
             rule = mode[5:]
             self._audit_deny(base, rule, policy.tier(tool, who.sub, who.groups), "confirmation rejected")
-            span.set_attribute("airlock.verdict", "deny")
             return _tool_error(rid, f"airlock: denied ({rule})", rule)
         tier = policy.tier(tool, who.sub, who.groups)
         dry_run_prop: dict[str, Any] | None = None
@@ -547,7 +545,14 @@ class Airlock:
 
     # ---------- audit helpers ----------
     def _outcome(self, **rec: Any) -> None:
-        """Outcome records are written after the upstream acted: a failing log must not hide the result from the caller."""
+        """Outcome records are written after the upstream acted: a failing log must not hide the result from the caller.
+        The span takes the same verdict, rule and tier, so a trace never shows the first decision when a later one
+        (a replay, a window denial, an upstream failure) is what the caller and the audit got."""
+        span = trace.get_current_span()  # the request span; a no-op one outside a request, e.g. on the approve page
+        span.set_attributes({"airlock.verdict": rec.get("verdict") or "", "airlock.rule_id": rec.get("rule_id") or "",
+                             "airlock.tier": rec.get("tier") or ""})
+        if rec.get("verdict") == "error":
+            span.set_status(StatusCode.ERROR, rec.get("rule_id"))
         try:
             self.audit.write(phase="outcome", **rec)
         except Exception:

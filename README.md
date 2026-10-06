@@ -535,7 +535,9 @@ the method name otherwise. A request rejected before that (a parse error, an ove
 method the proxy does not forward) produces none. The span carries the `gen_ai.*` attributes
 (`gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`), `rpc.method` and the
 principal as `enduser.id`; a `tools/call` span also carries the verdict, the rule and the tier
-as `airlock.*`, and the number of injection findings. Never the arguments. An incoming
+as `airlock.*`, and the number of injection findings. The `airlock.*` attributes are those of
+the outcome record, so a replay or a denial after the first decision shows as such, and a span
+whose verdict is `error` has status `ERROR`. Never the arguments. An incoming
 `traceparent` (header or `_meta`) is continued and a new one is put into the upstream `_meta`,
 so the audit's `trace_id` matches what the upstream sees. `tracestate` and `baggage` travel the
 same way; a value of these three that is not a string is ignored and a new trace starts.

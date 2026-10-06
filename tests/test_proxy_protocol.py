@@ -8,12 +8,13 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
+from opentelemetry.trace import StatusCode
 
 from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META
 from mcp_airlock.audit import AuditLog
 
-from .conftest import ENVELOPE, ROOT, V, audit_rows, call, make_airlock, patch_post, rpc
+from .conftest import ENVELOPE, ROOT, SPANS, V, audit_rows, call, make_airlock, patch_post, rpc
 
 SURROGATE = "\ud800"  # JSON allows the escape, UTF-8 cannot encode it
 
@@ -381,3 +382,62 @@ async def test_policy_diff_refuses_an_sse_catalog_without_a_response():
     http = httpx.AsyncClient(transport=httpx.MockTransport(sse_upstream(PROGRESS)))
     with pytest.raises(RuntimeError, match="without a response"):
         await _catalog(http, "http://upstream/mcp", "airlock-policy")
+
+
+# ---------------------------------------------------------------- span attributes follow the final decision (B20)
+def last_span():
+    span = SPANS.get_finished_spans()[-1]
+    return {k: v for k, v in span.attributes.items() if k.startswith("airlock.")}, span.status.status_code
+
+
+async def test_a_replay_span_says_deny_not_confirmed(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    async with serving(al) as c:
+        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+        SPANS.clear()
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+    assert res["_meta"][META + "rule_id"] == "mrtr.replay"
+    attrs, status = last_span()
+    assert attrs == {"airlock.verdict": "deny", "airlock.rule_id": "mrtr.replay", "airlock.tier": "L2"}
+    assert status is StatusCode.UNSET
+
+
+async def test_a_decline_span_carries_the_rule_and_the_tier(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    async with serving(al) as c:
+        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        SPANS.clear()
+        res = await call(c, "delete_service", {"name": "api"},
+                         extra={"requestState": token, "inputResponses": {CONFIRM_KEY: {"action": "decline"}}})
+    assert res["_meta"][META + "rule_id"] == "mrtr.declined"
+    assert last_span()[0] == {"airlock.verdict": "deny", "airlock.rule_id": "mrtr.declined", "airlock.tier": "L2"}
+
+
+async def test_a_catalog_denial_span_has_the_airlock_attributes(audit_path):
+    al = mock_airlock(audit_path, Flaky())  # the upstream is down: tools/list for the dry_run check fails
+    SPANS.clear()
+    async with serving(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+    assert res["_meta"][META + "rule_id"] == "catalog.unavailable"
+    assert last_span()[0] == {"airlock.verdict": "deny", "airlock.rule_id": "catalog.unavailable", "airlock.tier": "L2"}
+
+
+async def test_an_upstream_failure_span_is_an_error(audit_path):
+    al = mock_airlock(audit_path, Flaky())
+    SPANS.clear()
+    async with serving(al) as c:
+        res = await call(c, "get_service", {"name": "api"})
+    assert res["_meta"][META + "rule_id"] == "upstream.unreachable"
+    attrs, status = last_span()
+    assert attrs == {"airlock.verdict": "error", "airlock.rule_id": "upstream.unreachable", "airlock.tier": "L0"}
+    assert status is StatusCode.ERROR
+
+
+async def test_a_missing_principal_span_names_the_rule(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    SPANS.clear()
+    async with serving(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}}, principal=None)
+    assert r.status_code == 401
+    assert last_span()[0] == {"airlock.verdict": "deny", "airlock.rule_id": "principal.missing", "airlock.tier": ""}

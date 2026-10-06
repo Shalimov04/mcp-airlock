@@ -100,6 +100,9 @@
   with a parse error instead of being forwarded, written to `audit.jsonl` as non-JSON and dropped
   by the Postgres sink. A body nested deeper than 64 levels is refused with `-32600`; one too deep
   to parse at all is a parse error. Both used to be an unaudited bare 500.
+* The `airlock.*` span attributes follow the outcome record. A blocked replay, a decline, a
+  `catalog.unavailable` denial or an upstream failure used to leave the span saying what the first
+  decision was (or nothing at all); a span whose verdict is `error` now also has status `ERROR`.
 * A `traceparent`, `tracestate` or `baggage` in `_meta` that is not a string is ignored and a new
   trace is started, instead of an unaudited bare 500 for any caller. The three are rebuilt from the
   span's context before the call is forwarded, so a bad value never reaches the upstream.
