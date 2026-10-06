@@ -399,8 +399,10 @@ keep the `httpx` logger at `WARNING`.
 
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
-`X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as
-unverified unless it came from a bearer token the proxy could check. The page shows the prompt
+`X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval as
+`approved_by_source: header`. It is `verified` only when the identity came out of a bearer
+token the proxy itself checked (a JWT secret or JWKS URL is configured); any other
+`Authorization` header, `Basic` included, does not change that. The page shows the prompt
 text (the redacted arguments and up to 2000 characters of the dry-run preview), cut at 8000
 characters with a note, kept in the store until the prompt expires. The approval itself is
 audited with `method: approve` and rule `mrtr.approved_oob`.

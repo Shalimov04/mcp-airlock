@@ -748,8 +748,9 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         await self.engine.store.approve(claims["k"], claims["exp"])
         headers = {k.lower(): v for k, v in request.headers.items()}
         who = await self._resolve(headers)
-        # Who clicked: a verified token when there is one, else whatever the fronting SSO proxy put in a header.
-        if who and headers.get("authorization"):
+        # Who clicked: "verified" only for a subject out of a token this process checked. Any other Authorization
+        # header (Basic, a bare value, a bearer with no JWT configured) leaves the header-derived name unverified.
+        if who and who.verified:
             approver, source = who.sub, "verified"
         else:
             approver, source = (who.sub if who else headers.get("x-airlock-principal") or headers.get("x-forwarded-user")), "header"

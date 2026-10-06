@@ -273,6 +273,38 @@ async def test_approver_identity_recorded(upstream, audit_path):
     assert row["detail"]["approved_by_source"] == "header"  # unverified: the fronting proxy's word, marked as such
 
 
+@pytest.mark.parametrize("authorization", ["Basic Zm9vOmJhcg==", "x", "Bearer garbage"])
+async def test_approver_with_a_non_jwt_authorization_header_stays_unverified(upstream, audit_path, authorization):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)  # header trust only, no JWT configured
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+        r = await c.post(approve_path(posted), headers={"authorization": authorization, "x-airlock-principal": "mallory"})
+        assert r.status_code == 200
+    row = audit_rows(audit_path)[-1]
+    assert row["rule_id"] == "mrtr.approved_oob"
+    assert row["detail"]["approved_by"] == "mallory" and row["detail"]["approved_by_source"] == "header"
+
+
+async def test_approver_is_verified_only_from_a_token_the_proxy_checked(upstream, audit_path):
+    import jwt as pyjwt
+    posted: list[str] = []
+    secret = "s3cret-s3cret-s3cret-s3cret-32b!"
+    al = webhook_airlock(upstream, audit_path, posted, identity=IdentityConfig(jwt_secret=secret, trust_header=True))
+    good = pyjwt.encode({"sub": "boss", "exp": 4102444800}, secret, algorithm="HS256")
+    bad = pyjwt.encode({"sub": "boss", "exp": 4102444800}, "other-" + secret, algorithm="HS256")
+    cases = [({"authorization": "Basic Zm9vOmJhcg==", "x-airlock-principal": "mallory"}, "mallory", "header"),
+             ({"authorization": f"Bearer {bad}", "x-airlock-principal": "mallory"}, "mallory", "header"),
+             ({"x-airlock-principal": "mallory"}, "mallory", "header"),
+             ({"authorization": f"Bearer {good}", "x-airlock-principal": "mallory"}, "boss", "verified")]
+    async with proxy_client(al) as c:
+        for i, (headers, approver, source) in enumerate(cases):
+            await call(c, "delete_service", {"name": f"svc{i}"})  # one prompt per case: a second click is not recorded
+            assert (await c.post(approve_path(posted), headers=headers)).status_code == 200
+            detail = audit_rows(audit_path)[-1]["detail"]
+            assert (detail["approved_by"], detail["approved_by_source"]) == (approver, source), headers
+
+
 async def test_accept_with_explicit_dry_run_does_not_burn_key(client, upstream):
     token = (await call(client, "delete_service", {"name": "api"}))["requestState"]
     res = await call(client, "delete_service", {"name": "api", "dry_run": True}, extra=accept(token))
@@ -313,6 +345,21 @@ async def test_header_groups_ignored_unless_header_trusted(upstream, audit_path,
                       principal="mallory", headers={"x-airlock-groups": "oncall"})
     assert r.status_code == 401
     assert upstream.CALLS == []
+
+
+async def test_jwt_with_a_blank_sub_is_refused_like_a_missing_principal(upstream, audit_path):
+    import jwt as pyjwt
+    secret = "s3cret-s3cret-s3cret-s3cret-32b!"
+    al = make_airlock(upstream, audit_path, env="dev", identity=IdentityConfig(jwt_secret=secret))
+    async with proxy_client(al) as c:
+        for sub in ("", "   "):
+            tok = pyjwt.encode({"sub": sub, "exp": 4102444800}, secret, algorithm="HS256")
+            r = await rpc(c, "tools/call", {"name": "restart_service", "arguments": {"name": "api"}}, principal=None,
+                          headers={"authorization": f"Bearer {tok}"})
+            assert r.status_code == 401, r.text
+    assert upstream.CALLS == []
+    rows = audit_rows(audit_path)
+    assert rows and all(r["rule_id"] == "principal.missing" and r["principal"] is None for r in rows)
 
 
 async def test_catalog_cache_is_per_principal(upstream, audit_path):

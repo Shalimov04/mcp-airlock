@@ -47,6 +47,11 @@
 * `airlock-audit query` reads the rotated files too, oldest first.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.
+* The approver of an out-of-band confirmation is recorded as `verified` only when the identity
+  came out of a bearer token the proxy checked. A `Basic` header, a bare value or a bearer with no
+  JWT configured used to label the header-supplied name `verified`.
+* A JWT whose `sub` is empty or blank is refused with 401 `principal.missing` instead of being
+  accepted as principal `""`; a blank `X-Airlock-Principal` is refused the same way.
 
 ## 0.3.0 - 2026-10-02
 

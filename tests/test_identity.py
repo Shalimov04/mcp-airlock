@@ -117,3 +117,33 @@ def test_from_env(monkeypatch):
     monkeypatch.setenv("AIRLOCK_GROUPS_CLAIM", "roles")
     monkeypatch.setenv("AIRLOCK_TRUST_PRINCIPAL_HEADER", "0")
     assert IdentityConfig.from_env() == IdentityConfig(jwks_url="https://x/jwks", issuer="https://x", audience="a", groups_claim="roles")
+
+
+@pytest.mark.parametrize("sub", ["", "   ", "\t\n"])
+def test_blank_sub_is_refused(sub):
+    tok = jwt.encode({"sub": sub, "exp": time.time() + 60}, "s3cret", algorithm="HS256")
+    assert resolve(bearer(tok), HS) is None  # not Principal(""): one shared anonymous identity
+    assert resolve(bearer(rs(sub=sub)), OIDC) is None
+
+
+def test_non_string_sub_is_refused():
+    tok = jwt.encode({"sub": 123, "exp": time.time() + 60}, "s3cret", algorithm="HS256")
+    assert resolve(bearer(tok), HS) is None
+
+
+def test_blank_header_principal_is_refused_and_a_padded_one_is_trimmed():
+    assert resolve({"x-airlock-principal": "   "}, IdentityConfig(trust_header=True)) is None
+    assert resolve({"x-airlock-principal": " carol "}, IdentityConfig(trust_header=True)) == Principal("carol")
+
+
+def test_verified_marks_subjects_out_of_a_checked_token_only():
+    assert resolve(bearer(rs()), OIDC).verified is True
+    tok = jwt.encode({"sub": "bob", "exp": time.time() + 60}, "s3cret", algorithm="HS256")
+    assert resolve(bearer(tok), HS).verified is True
+    trusted = IdentityConfig(trust_header=True)
+    assert resolve({"x-airlock-principal": "carol"}, trusted).verified is False
+    assert resolve(bearer("whatever", **{"x-airlock-principal": "carol"}), trusted).verified is False  # no verifier
+    both = IdentityConfig(jwt_secret="s3cret", trust_header=True)
+    assert resolve({"authorization": "Basic Zm9vOmJhcg==", "x-airlock-principal": "carol"}, both).verified is False
+    assert resolve({"authorization": "x", "x-airlock-principal": "carol"}, both).verified is False
+    assert resolve(bearer(tok, **{"x-airlock-principal": "carol"}), both) == Principal("bob")  # equality ignores the flag
