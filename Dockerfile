@@ -10,6 +10,8 @@ RUN uv sync --frozen --no-dev --no-editable --extra postgres --extra otlp
 FROM python:3.12-slim-bookworm
 COPY --from=build /app/.venv /app/.venv
 ENV PATH=/app/.venv/bin:$PATH
+# the slim image ships the stdlib without .pyc too; as root, before USER, for the same reason
+RUN python -m compileall -q /usr/local/lib/python3.12
 RUN mkdir /data && chown 65532:65532 /data
 WORKDIR /data
 USER 65532:65532

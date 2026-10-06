@@ -73,6 +73,11 @@ def test_build_stage_compiles_bytecode(name):
     text = (ROOT / name).read_text()
     assert "ENV UV_COMPILE_BYTECODE=1" in text
     assert text.index("ENV UV_COMPILE_BYTECODE=1") < text.index("RUN uv sync")
+    # The slim base image ships the stdlib without .pyc as well, and uv only compiles the venv.
+    # As root, so it may write under /usr/local; after the last FROM, so it lands in the image.
+    stdlib = "RUN python -m compileall -q /usr/local/lib/python3.12"
+    assert stdlib in text
+    assert text.rindex("FROM ") < text.index(stdlib) < text.index("USER 65532")
 
 
 def test_readme_docker_run_example_reaches_a_host_upstream_on_linux():

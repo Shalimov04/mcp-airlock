@@ -50,8 +50,10 @@
   every policy change, no longer refuses connections; `terminationGracePeriodSeconds` (30) is set
   for the sleep, the open calls and the OTLP flush. A negative value, or the sleep on a cluster
   older than 1.30 (set `preStopSeconds=0` there), is refused with a chart message.
-* The container images compile bytecode at build time (`UV_COMPILE_BYTECODE=1`); the venv is
-  read-only at run time, so no `.pyc` could ever be written and every start paid the import cost.
+* The container images compile bytecode at build time (`UV_COMPILE_BYTECODE=1` for the venv,
+  `compileall` for the standard library, which the slim base image ships without `.pyc`); the
+  filesystem is read-only at run time, so no `.pyc` could ever be written and every start paid
+  the import cost.
 * `policy.example.yaml` no longer tells approvers that `restart_service` is refused at L2: a tool
   without `dry_run` is refused at L1 and confirmed without a preview at L2.
 * The README `docker run` example adds `--add-host=host.docker.internal:host-gateway`, without
