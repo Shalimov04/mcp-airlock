@@ -54,6 +54,8 @@
   accepted as principal `""`; a blank `X-Airlock-Principal` is refused the same way.
 * The Slack approval message escapes `&`, `<` and `>` in the arguments and the dry-run preview, so
   an agent cannot plant a `<url|label>` link or an `<!channel>` mention in it.
+* A principal named `group:<g>` no longer gets the tier override of group `<g>`: `group:` keys in
+  `principals` match group membership only.
 
 ## 0.3.0 - 2026-10-02
 

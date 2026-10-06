@@ -110,6 +110,8 @@ def test_policy_tier_resolution(tmp_path):
     assert pol.tier("set_replicas", principal="alice", groups=("readonly",)) == "L3"  # principal beats group
     assert pol.tier("delete_service", principal="alice") == "L2"
     assert pol.tier("nope", principal="alice") is None
+    assert pol.tier("set_replicas", principal="group:oncall") == "L2"  # named like the group, not in it
+    assert pol.tier("set_replicas", principal="group:oncall", groups=("oncall",)) == "L3"
 
 
 async def test_group_from_jwt_changes_tier(upstream, audit_path, tmp_path):
@@ -130,6 +132,20 @@ async def test_group_from_jwt_changes_tier(upstream, audit_path, tmp_path):
         assert res["resultType"] == "input_required"
         assert upstream.CALLS[-1]["meta"][META + "principal"] == "carol"
         assert upstream.CALLS[-1]["meta"][META + "groups"] == ["devs"]
+
+
+async def test_a_principal_named_like_a_group_does_not_get_the_group_tier(upstream, audit_path, tmp_path):
+    p = tmp_path / "p.yaml"
+    p.write_text(PRINCIPAL_POLICY)  # "group:oncall" skips confirmation in prod
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
+    al = Airlock(Policy.load(p), "http://localhost:9001/mcp", AuditLog(audit_path), http=http, trust_principal_header=True)
+    args = {"names": ["api"], "replicas": 1}
+    async with proxy_client(al) as c:
+        res = await call(c, "set_replicas", args, principal="group:oncall")
+        assert res["resultType"] == "input_required" and res["_meta"][META + "rule_id"] == "tier.L2.confirm"
+        res = await call(c, "set_replicas", args, principal="group:oncall", headers={"x-airlock-groups": "oncall"})
+        assert res["_meta"][META + "rule_id"] == "tier.L3.auto"  # membership still counts, the name alone does not
+    assert len([x for x in upstream.CALLS if x["tool"] == "set_replicas" and not x["args"].get("dry_run")]) == 1
 
 
 # 3. catalog cache honouring ttlMs ---------------------------------------------------------------------------------

@@ -314,7 +314,9 @@ tools:
 ```
 
 A tier is resolved in this order: an entry for the exact principal, then the first matching
-group in the order the token lists them, then `tiers[environment]`. The `description` is what
+group in the order the token lists them, then `tiers[environment]`. Keys starting with `group:`
+are groups only: a caller whose own name starts with `group:` is matched by the groups it is in,
+never by its name. The `description` is what
 the person approving the call gets to read, so write it for them. `output` and `blast_radius`
 on a tool replace the top-level values for that tool; `window_s` is at most 86400 (a day), as
 far back as the store keeps usage. Unknown keys are a load error.

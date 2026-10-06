@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .store import USAGE_RETENTION_S, MemoryStore
 
 Tier = Literal["L0", "L1", "L2", "L3"]
+GROUP_PREFIX = "group:"  # a `principals` key for a group; never matched against the caller's own name
 # L0 read:     pass through
 # L1 suggest:  write tool, always forced dry_run=true (never executes)
 # L2 confirm:  dry_run=true until a human confirms via MRTR, then executes once
@@ -152,7 +153,10 @@ class Policy(BaseModel):
         rule = self.tools.get(tool)
         if rule is None:
             return None
-        for key in ([principal] if principal else []) + [f"group:{g}" for g in groups]:  # principal beats group, first group wins
+        # principal beats group, first group wins. "group:" keys are groups only: a subject that happens to be
+        # named "group:oncall" must not inherit the group's tier.
+        own = [principal] if principal and not principal.startswith(GROUP_PREFIX) else []
+        for key in own + [f"{GROUP_PREFIX}{g}" for g in groups]:
             override = rule.principals.get(key, {})
             if self.environment in override:
                 return override[self.environment]
