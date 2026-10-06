@@ -70,6 +70,7 @@ READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
 DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
 MAX_DEPTH = 64  # JSON nesting of the whole request body; far below the recursion limit of the parser and the audit
+W3C_META = ("traceparent", "tracestate", "baggage")  # trace context a client may put in _meta
 _tracer = trace.get_tracer("mcp-airlock")
 
 
@@ -353,7 +354,7 @@ class Airlock:
         if method == "tools/call" and (not isinstance(tool, str) or not isinstance(args, dict)):
             return self._reject(rid, INVALID_PARAMS, "tools/call needs string 'name' and object 'arguments'", sub, method, None)
 
-        parent = extract(headers) if "traceparent" in headers else extract(params.get("_meta") or {})
+        parent = extract(headers) if "traceparent" in headers else extract(_trace_carrier(params))
         span_name = f"execute_tool {tool}" if tool else method
         with _tracer.start_as_current_span(span_name, context=parent, kind=SpanKind.SERVER) as span:
             span.set_attribute("gen_ai.operation.name", "execute_tool" if tool else method)
@@ -582,7 +583,7 @@ class Airlock:
     async def forward(self, body: dict[str, Any], headers: dict[str, str], who: Principal) -> tuple[int, dict[str, Any]]:
         params = dict(body["params"])
         meta = {k: v for k, v in (params.get("_meta") or {}).items()
-                if not k.startswith(META) and k not in ("traceparent", "tracestate")}
+                if not k.startswith(META) and k not in W3C_META}  # re-injected below from the span's context
         meta[META + "principal"] = who.sub  # identity travels in _meta; upstream auth is the proxy's own
         if who.groups:
             meta[META + "groups"] = list(who.groups)
@@ -876,6 +877,13 @@ def _last_sse_message(text: str) -> dict[str, Any]:
             except ValueError:
                 pass
     return last or {"jsonrpc": "2.0", "id": None, "error": {"code": INTERNAL_ERROR, "message": "empty SSE response"}}
+
+
+def _trace_carrier(params: Any) -> dict[str, str]:
+    """The W3C trace fields of `_meta`, strings only: the propagators run re.search on the values, and a client that
+    sends `"traceparent": 123` would otherwise crash the request before the span and the audit exist."""
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    return {k: v for k, v in (meta.items() if isinstance(meta, dict) else ()) if k in W3C_META and isinstance(v, str)}
 
 
 def _no_constant(name: str) -> Any:

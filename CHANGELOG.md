@@ -89,6 +89,9 @@
   with a parse error instead of being forwarded, written to `audit.jsonl` as non-JSON and dropped
   by the Postgres sink. A body nested deeper than 64 levels is refused with `-32600`; one too deep
   to parse at all is a parse error. Both used to be an unaudited bare 500.
+* A `traceparent`, `tracestate` or `baggage` in `_meta` that is not a string is ignored and a new
+  trace is started, instead of an unaudited bare 500 for any caller. The three are rebuilt from the
+  span's context before the call is forwarded, so a bad value never reaches the upstream.
 * `airlock-audit query` reads the rotated files too, oldest first.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.

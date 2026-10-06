@@ -538,7 +538,8 @@ uv run airlock-audit verify audit.jsonl.2 audit.jsonl.1 audit.jsonl
 как `enduser.id`; в спане `tools/call` ещё вердикт, правило и тир как `airlock.*` и число
 находок разметки инъекций. Аргументов там нет никогда. Входящий `traceparent` (заголовок или
 `_meta`) продолжается, а новый кладётся в `_meta` для upstream, так что `trace_id` в аудите
-совпадает с тем, что видит сервер.
+совпадает с тем, что видит сервер. `tracestate` и `baggage` идут тем же путём; значение любого
+из трёх, которое не строка, игнорируется, и начинается новый трейс.
 
 Спаны пишутся в файл через `--otel-file` (или `AIRLOCK_OTEL_FILE`), в OTLP-коллектор, если
 задан `OTEL_EXPORTER_OTLP_ENDPOINT` или `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, или и туда, и

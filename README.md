@@ -535,7 +535,8 @@ method the proxy does not forward) produces none. The span carries the `gen_ai.*
 principal as `enduser.id`; a `tools/call` span also carries the verdict, the rule and the tier
 as `airlock.*`, and the number of injection findings. Never the arguments. An incoming
 `traceparent` (header or `_meta`) is continued and a new one is put into the upstream `_meta`,
-so the audit's `trace_id` matches what the upstream sees.
+so the audit's `trace_id` matches what the upstream sees. `tracestate` and `baggage` travel the
+same way; a value of these three that is not a string is ignored and a new trace starts.
 
 Spans go to a file with `--otel-file` (or `AIRLOCK_OTEL_FILE`), to an OTLP collector when
 `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, or to both. The

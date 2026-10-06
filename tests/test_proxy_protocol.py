@@ -210,3 +210,30 @@ async def test_moderate_nesting_still_passes(upstream, audit_path):
     async with serving(al) as c:
         r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api", "tree": deep}})
     assert r.status_code == 200 and r.json()["result"]["isError"] is False, r.text
+
+
+# ---------------------------------------------------------------- non-string trace fields in _meta (B19)
+@pytest.mark.parametrize("field", [{"traceparent": 123}, {"traceparent": [1]}, {"traceparent": True}, {"tracestate": 5},
+                                   {"baggage": 5}, {"traceparent": None, "tracestate": {"a": 1}}])
+async def test_a_non_string_trace_field_in_meta_is_ignored(upstream, audit_path, field):
+    al = make_airlock(upstream, audit_path)
+    meta = {**ENVELOPE, **field}
+    async with serving(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}, "_meta": meta})
+        assert r.status_code == 200 and r.json()["result"]["isError"] is False, r.text
+        r = await rpc(c, "tools/list", {"_meta": meta})
+        assert r.status_code == 200 and "tools" in r.json()["result"], r.text
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}, "_meta": meta}, principal=None)
+        assert r.status_code == 401, r.text
+    rows = audit_rows(audit_path)
+    assert len(rows) == 6 and rows[-1]["rule_id"] == "principal.missing"
+    assert all(len(x["trace_id"]) == 32 for x in rows)  # a new trace was started each time
+
+
+async def test_a_string_traceparent_in_meta_is_still_continued(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    meta = {**ENVELOPE, "traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01", "tracestate": 7}
+    async with serving(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}, "_meta": meta})
+    assert r.status_code == 200, r.text
+    assert audit_rows(audit_path)[0]["trace_id"] == "0af7651916cd43dd8448eb211c80319c"
