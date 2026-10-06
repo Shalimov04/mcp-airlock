@@ -531,9 +531,9 @@ limit at the next rotation.
 A request refused before it is attributed to a principal (a malformed or oversized body, no
 credentials) is audited without its arguments, and its `method` and `tool` are cut at 128
 characters, so an unauthenticated client cannot write payloads into the log; the same cut
-applies to every protocol denial. Its two records still count toward the rotation budget: anyone who can
-reach `/mcp` can push older files out with enough requests. When the trail matters, keep the
-Postgres sink (`AIRLOCK_AUDIT_DSN`) or ship the files off the host.
+applies to every protocol denial. Its two records still count toward the rotation budget: anyone
+who can reach `/mcp` can push older files out with enough requests. When the trail matters, keep
+the Postgres sink (`AIRLOCK_AUDIT_DSN`) or ship the files off the host.
 
 To check the chain:
 
