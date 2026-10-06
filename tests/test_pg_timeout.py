@@ -221,6 +221,9 @@ class FakeConn:
     async def execute(self, *a, **kw):
         return self
 
+    async def fetchone(self):
+        return (1, 1, 1)  # ping reads the three table oids: all present
+
     @asynccontextmanager
     async def transaction(self):
         yield

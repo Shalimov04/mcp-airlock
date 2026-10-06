@@ -309,7 +309,7 @@ With `--strict` any warning stops the start with exit code 2.
 |---|---|
 | `POST /mcp` | The MCP endpoint the client talks to. |
 | `GET /healthz` | `{"status":"ok"}` while the process is up. |
-| `GET /readyz` | 200 `{"status":"ok"}` when the store responds, 503 `{"status":"unavailable"}` on an error or after 2 seconds. With the memory store it is always 200. |
+| `GET /readyz` | 200 `{"status":"ok"}` when the store responds and its tables exist (missing ones are created again by the probe), 503 `{"status":"unavailable"}` on an error or after 2 seconds. With the memory store it is always 200. |
 | `GET /approve/<token>` | The approve page for an out-of-band confirmation. Renders only. |
 | `POST /approve/<token>` | Records the approval. |
 
@@ -557,14 +557,19 @@ approve-page text and blast-radius counters have to live somewhere shared if you
 one replica; that is what `AIRLOCK_STORE_DSN` is for. `AIRLOCK_AUDIT_DSN` adds a Postgres sink
 for the audit log next to the file. Both need the `postgres` extra and may point at the same
 database. The tables (`airlock_keys`, `airlock_prompts`, `airlock_usage`, `airlock_audit`) are
-created on first use.
+created on first use, and created again when a store call or `/readyz` finds them gone (a
+database recreated empty); until that works, `/readyz` says 503.
 
 The store keeps a small connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on
 first use and closes at shutdown. Replicas times the pool size must fit the server's
-`max_connections`. Pooled connections never auto-prepare statements, so PgBouncer in
-transaction mode works for `AIRLOCK_STORE_DSN`. The audit sink uses one connection of its own,
-with psycopg's default auto-prepare, and reconnects once when it drops; point
-`AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer in session mode.
+`max_connections`, and one replica never holds more: each pooled connection gets a
+`statement_timeout` and a `lock_timeout` just under the connect timeout in force when it is
+opened, and a connection the client cuts also gets a cancel request, so a backend waiting on a
+lock is not left behind. Pooled connections never auto-prepare statements, so PgBouncer in
+transaction mode works for `AIRLOCK_STORE_DSN` (the two timeouts are session settings, which
+PgBouncer may hand to another replica; the cancel request covers that case). The audit sink
+uses one connection of its own, with psycopg's default auto-prepare, and reconnects once when
+it drops; point `AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer in session mode.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),
