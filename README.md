@@ -406,7 +406,11 @@ and posts again. httpx itself logs every request URL at `INFO`, so if you config
 keep the `httpx` logger at `WARNING`.
 
 In the Slack message `&`, `<` and `>` in the arguments and the dry-run preview are escaped, so
-the only link in it is the proxy's own.
+an agent cannot plant a `<url|label>` link with a hidden target or an `<!channel>` mention in
+it. A bare URL in the arguments or the preview still shows as a URL, and the preview keeps its
+line breaks, so an agent can still put an `Approve: https://...` line of its own into the
+text. The proxy's link is the `Approve:` line at the end of the message; read that one. The
+agent cannot approve its own call either way.
 
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in

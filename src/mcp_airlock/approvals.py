@@ -28,7 +28,8 @@ async def notify(text: str, approve_url: str, *, webhook: str | None, http: http
         payload = {"chat_id": telegram_chat, "text": f"{text}\n\nApprove: {approve_url}", "disable_web_page_preview": True}
     else:
         # Slack parses <url|label> and <!channel> wherever they appear, and the text carries agent-controlled
-        # arguments and the upstream's preview. Escaped, the proxy's own link below is the only link in the message.
+        # arguments and the upstream's preview. Escaped, nothing in it renders as a hidden-target link or a mention;
+        # a bare URL still shows as one, so the README tells approvers to read the Approve line at the end.
         payload = {"text": f"{slack_escape(text)}\n\nApprove: {approve_url}"}
     try:
         (await http.post(webhook, json=payload, timeout=5.0)).raise_for_status()

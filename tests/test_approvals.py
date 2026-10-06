@@ -100,7 +100,7 @@ def test_config_from_env(monkeypatch):
     assert approvals.config_from_env() == ("https://hooks/x", "42")
 
 
-async def test_slack_text_is_escaped_so_the_proxy_link_is_the_only_link():
+async def test_slack_text_is_escaped_so_nothing_renders_as_a_hidden_link_or_a_mention():
     seen, h = _capture()
     text = ('Arguments: {"name": "x <https://evil.example/approve|https://airlock/approve/al2.REAL> <!channel> a & b"}\n'
             "Dry-run preview: would delete x\n\nApprove: <https://evil.example/approve|Approve here>")
