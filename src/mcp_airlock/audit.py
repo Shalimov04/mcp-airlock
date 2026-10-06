@@ -119,10 +119,11 @@ def _lines(buf: bytes) -> list[bytes]:
     return [ln for ln in buf.split(b"\n") if ln.strip()]  # blank lines are skipped the way verify skips them
 
 
-def _tail(path: Path) -> tuple[list[bytes], bytes]:
+def _tail(path: Path) -> tuple[list[bytes], bytes, int]:
     """The last non-blank lines of an existing file, read from the end, and the torn fragment after them: a last line
     without its newline that is not a chained record (a crash or a short write left it) counts for nothing and is
-    returned apart, so the caller can cut it off. ([], b"") for a missing, empty or unreadable file."""
+    returned apart with the file offset it starts at (the byte after the last newline), so the caller can cut it
+    off. ([], b"", 0) for a missing, empty or unreadable file."""
     try:
         with path.open("rb") as f:
             buf, pos = b"", f.seek(0, os.SEEK_END)
@@ -132,16 +133,16 @@ def _tail(path: Path) -> tuple[list[bytes], bytes]:
                 f.seek(pos)
                 buf = f.read(step) + buf
     except OSError:  # missing or unreadable
-        return [], b""
+        return [], b"", 0
     lines = _lines(buf)
     if lines and not buf.endswith(b"\n") and _hash_of(lines[-1]) is None:
-        return lines[:-1], lines[-1]
-    return lines, b""
+        return lines[:-1], lines[-1], pos + buf.rfind(b"\n") + 1  # rfind is -1 when buf is the whole file
+    return lines, b"", 0
 
 
 def _last_hash(path: Path) -> str | None:
     """`hash` of the last whole record of an existing file; None when there is none."""
-    lines, _ = _tail(path)
+    lines, _, _ = _tail(path)
     return _hash_of(lines[-1]) if lines else None
 
 
@@ -160,9 +161,9 @@ class AuditLog:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_bytes, self.keep = max_bytes or None, keep
-        lines, torn = _tail(self.path)
+        lines, torn, at = _tail(self.path)
         if torn:
-            self._cut_torn(torn)
+            self._cut_torn(torn, at)
         # no hash in the live file (missing, empty, or only a torn line): a crash between the rotation rename and the
         # first write, so the chain goes on from .1; a live file of unchained records next to no .1 starts at GENESIS
         self._last = (_hash_of(lines[-1]) if lines else None) or _last_hash(self.path.with_name(self.path.name + ".1")) or GENESIS
@@ -171,11 +172,11 @@ class AuditLog:
         self._torn = self._size > 0 and not _ends_with_newline(self.path)  # a line without its newline is still there
         self._lock = threading.Lock()
 
-    def _cut_torn(self, fragment: bytes) -> None:
+    def _cut_torn(self, fragment: bytes, at: int) -> None:
         """A torn last line can never be chained, and left on a line of its own it is a `not JSON` break that makes
         every later verify fail. The bytes are kept in <path>.torn (an audit file should lose nothing silently) and
-        the file is cut back to the last newline. When the file cannot be cut (an append-only attribute, say) it is
-        left as it was, and verify reports the line."""
+        the file is cut back to `at`, the byte after the last newline. When the file cannot be cut (an append-only
+        attribute, say) it is left as it was, and verify reports the line."""
         aside = self.path.with_name(self.path.name + ".torn")
         try:
             with aside.open("ab") as f:
@@ -184,7 +185,7 @@ class AuditLog:
         except OSError as e:  # the disk may still be full; the fragment was never a record, so the cut goes ahead
             kept = f"not kept: {e}"
         try:
-            os.truncate(self.path, self.path.stat().st_size - len(fragment))
+            os.truncate(self.path, at)
         except OSError as e:
             log.warning("audit: %s ends in a torn line of %d bytes that could not be cut (%s); verify will report it",
                         self.path, len(fragment), e)
@@ -208,7 +209,9 @@ class AuditLog:
                 self._rotate()
             if (n := self._f.write(data)) != len(data):  # a full disk: the record is not chained
                 try:  # the half line comes back off, so it is not a `not JSON` break for every later verify
-                    os.ftruncate(self._f.fileno(), self._size)
+                    # From the file's own size, not self._size: another process appending to the same file (the
+                    # append-only open makes that work) would otherwise have its records cut off too.
+                    os.ftruncate(self._f.fileno(), os.fstat(self._f.fileno()).st_size - n)
                 except OSError:  # the file cannot shrink: the torn line gets its newline before the next record
                     self._size, self._torn = self._size + n, n > 0
                 raise OSError(f"short write to {self.path}")

@@ -645,6 +645,21 @@ def test_a_short_write_is_an_error_and_leaves_the_chain_where_it_was(tmp_path, c
     assert verify_cli(capsys, path)[0] == 0  # the file the proxy left behind passes, with no torn line in the way
 
 
+def test_a_short_write_cuts_back_only_its_own_bytes_next_to_another_writer(tmp_path, capsys):
+    path = chained(tmp_path / "a.jsonl", 1)
+    sink = AuditLog(path)
+    other = AuditLog(path)  # another process appending to the same file, after this sink measured it
+    write_n(other, 1, start=5)
+    other.close()
+    sink._f.close()
+    sink._f = ShortFile(path)
+    with pytest.raises(OSError, match="short write"):
+        write_n(sink, 1, start=1)
+    sink.close()
+    assert ids_in(path) == ["c000", "c005"] and path.read_bytes().endswith(b"}\n")  # the other record is still there
+    assert verify_cli(capsys, path)[0] == 0
+
+
 def test_a_short_write_that_cannot_be_cut_back_gives_the_torn_line_its_newline(tmp_path, capsys, monkeypatch):
     path = chained(tmp_path / "a.jsonl", 1)
     sink = AuditLog(path)
