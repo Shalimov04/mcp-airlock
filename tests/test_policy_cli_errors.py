@@ -43,6 +43,23 @@ def test_pin_with_an_unparsable_policy_is_an_error_and_writes_no_pins(tmp_path, 
     assert not pins.exists()
 
 
+@pytest.mark.parametrize("text", ["- a\n", "just a string\n"])
+@pytest.mark.parametrize("how", ["--env", "AIRLOCK_ENV"])
+def test_diff_and_pin_with_a_non_mapping_policy_and_an_environment_are_one_error_line(tmp_path, monkeypatch, capsys, text, how):
+    # the environment used to be assigned into the document before validation: TypeError on a list or a string
+    (tmp_path / "list.yaml").write_text(text)
+    monkeypatch.delenv("AIRLOCK_ENV", raising=False)
+    extra = ["--env", "prod"] if how == "--env" else []
+    if how == "AIRLOCK_ENV":
+        monkeypatch.setenv("AIRLOCK_ENV", "prod")
+    assert policy_cli.main(["diff", str(tmp_path / "list.yaml"), "--upstream", "http://127.0.0.1:1/mcp", *extra]) == 1
+    out = one_line(capsys)
+    assert out.startswith("ERROR invalid: ") and "valid dictionary" in out and "ERROR upstream" not in out
+    pins = tmp_path / "pins.json"
+    assert policy_cli.main(["pin", str(tmp_path / "list.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--pins", str(pins), *extra]) == 1
+    assert one_line(capsys).startswith("ERROR invalid: ") and not pins.exists()
+
+
 def test_diff_with_an_invalid_policy_is_invalid_not_upstream(tmp_path, capsys):
     (tmp_path / "l9.yaml").write_text("version: 1\nenvironment: prod\ntools: {x: {tiers: {prod: L9}}}\n")
     assert policy_cli.main(["diff", str(tmp_path / "l9.yaml"), "--upstream", "http://127.0.0.1:1/mcp"]) == 1

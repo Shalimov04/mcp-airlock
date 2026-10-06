@@ -81,6 +81,22 @@ def test_airlock_debug_other_than_1_does_not_mean_debug(tmp_path, value):
     assert r.returncode == 1 and "Traceback" not in r.stderr and error_text(r.stderr).startswith("mcp-airlock: "), r.stderr
 
 
+@pytest.mark.parametrize("text", ["- a\n", "just a string\n"])
+@pytest.mark.parametrize("how", ["--env", "AIRLOCK_ENV"])
+def test_a_policy_that_is_not_a_mapping_with_an_environment_is_a_message_not_a_traceback(tmp_path, text, how):
+    # --env (or AIRLOCK_ENV) used to be written into the document before validation: TypeError on a list or a string
+    (tmp_path / "list.yaml").write_text(text)
+    argv = ["--policy", str(tmp_path / "list.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl")]
+    env = {}
+    if how == "--env":
+        argv += ["--env", "prod"]
+    else:
+        env["AIRLOCK_ENV"] = "prod"
+    r = run_airlock(*argv, env=env)
+    assert r.returncode == 1 and "Traceback" not in r.stderr, r.stderr
+    assert error_text(r.stderr).startswith("mcp-airlock: ") and "valid dictionary" in r.stderr, r.stderr
+
+
 def test_a_policy_without_environment_is_a_validation_message_not_a_traceback(tmp_path):
     (tmp_path / "noenv.yaml").write_text("version: 1\ntools: {get_service: {tiers: {prod: L0}}}\n")
     r = run_airlock("--policy", str(tmp_path / "noenv.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"))

@@ -410,7 +410,7 @@ class Policy(BaseModel):
     @classmethod
     def load(cls, path: str | Path, environment: str | None = None) -> Policy:
         data = yaml.safe_load(Path(path).read_text()) or {}
-        if environment:
+        if environment and isinstance(data, dict):  # a list or scalar document fails validation below, not here
             data["environment"] = environment
         return cls.model_validate(data)
 
