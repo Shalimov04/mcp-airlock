@@ -13,7 +13,7 @@ from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META
 from mcp_airlock.audit import AuditLog
 
-from .conftest import ENVELOPE, ROOT, V, audit_rows, make_airlock, rpc
+from .conftest import ENVELOPE, ROOT, V, audit_rows, call, make_airlock, patch_post, rpc
 
 SURROGATE = "\ud800"  # JSON allows the escape, UTF-8 cannot encode it
 
@@ -237,3 +237,147 @@ async def test_a_string_traceparent_in_meta_is_still_continued(upstream, audit_p
         r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}, "_meta": meta})
     assert r.status_code == 200, r.text
     assert audit_rows(audit_path)[0]["trace_id"] == "0af7651916cd43dd8448eb211c80319c"
+
+
+# ---------------------------------------------------------------- upstream failures (B12)
+class Flaky:
+    """An upstream handler that raises `error` while `down`, and answers normally otherwise."""
+
+    def __init__(self, error: Exception | None = None):
+        self.error, self.down, self.requests = error or httpx.ConnectError("refused"), True, 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests += 1
+        if self.down:
+            raise self.error
+        return tool_result(json.loads(request.content)["id"], "scaled")
+
+
+async def test_an_unreachable_upstream_is_an_error_that_charges_nothing(audit_path):
+    flaky = Flaky()
+    al = mock_airlock(audit_path, flaky, env="dev")  # set_replicas: L3, counted by names, max_per_principal 5
+    async with serving(al) as c:
+        for _ in range(5):
+            res = await call(c, "set_replicas", {"names": ["a", "b", "c"], "replicas": 1})
+            assert res["isError"] and res["_meta"][META + "rule_id"] == "upstream.unreachable", res
+            assert "nothing reached the upstream" in res["content"][0]["text"] and "may have run" not in res["content"][0]["text"]
+        assert await al.engine.store.usage_sum("alice", "set_replicas", 0) == 0  # the window was given back each time
+        flaky.down = False
+        res = await call(c, "set_replicas", {"names": ["a", "b", "c"], "replicas": 1})
+        assert res["isError"] is False, res  # the outage did not use up the window
+    outcomes = [x for x in audit_rows(audit_path) if x["phase"] == "outcome"]
+    assert [x["verdict"] for x in outcomes] == ["error"] * 5 + ["allow"]
+    first = outcomes[0]
+    assert first["rule_id"] == "upstream.unreachable" and first["detail"] == "upstream unreachable: ConnectError"
+    assert first["upstream_status"] is None and first["tier"] == "L3"
+
+
+async def test_a_failure_after_sending_keeps_the_charge_and_says_the_call_may_have_run(audit_path):
+    flaky = Flaky(httpx.ReadTimeout("slow"))
+    al = mock_airlock(audit_path, flaky, env="dev")
+    async with serving(al) as c:
+        res = await call(c, "set_replicas", {"names": ["a", "b"], "replicas": 1})
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "upstream.unreachable"
+    assert "the call itself may have run" in res["content"][0]["text"]
+    assert await al.engine.store.usage_sum("alice", "set_replicas", 0) == 2  # it may have run: the charge stays
+
+
+@pytest.mark.parametrize("body, note", [(b"<html>502</html>", "non-JSON"), (b"[1, 2]", "non-object")])
+async def test_a_reply_that_is_not_a_json_rpc_object_is_an_error_not_an_allow(audit_path, body, note):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+    al = mock_airlock(audit_path, handler)
+    async with serving(al) as c:
+        res = await call(c, "get_service", {"name": "api"})
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "upstream.bad_reply" and note in res["content"][0]["text"]
+    outcome = audit_rows(audit_path)[-1]
+    assert outcome["verdict"] == "error" and outcome["rule_id"] == "upstream.bad_reply" and outcome["upstream_status"] == 200
+    assert note in outcome["detail"]
+
+
+async def test_an_unreachable_upstream_after_the_yes_spends_the_key_but_refunds_the_window(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    orig, down = al.http.post, False
+
+    async def post(url, *, content, headers):
+        if down and json.loads(content)["method"] == "tools/call":
+            raise httpx.ConnectError("refused")
+        return await orig(url, content=content, headers=headers)
+
+    patch_post(al, post)
+    async with serving(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+        token = res["requestState"]
+        down = True
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+        text = res["content"][0]["text"]
+        assert res["_meta"][META + "rule_id"] == "upstream.unreachable" and "the confirmation is spent" in text, text
+        assert await al.engine.store.usage_sum("alice", "delete_service", 0) == 0  # charged, then refunded
+        down = False
+        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
+        assert res["_meta"][META + "rule_id"] == "mrtr.replay"  # the key cannot be un-burned; a new prompt is needed
+    assert all(c["args"]["dry_run"] for c in upstream.CALLS if c["tool"] == "delete_service")  # never executed for real
+
+
+async def test_an_unreachable_upstream_on_tools_list_is_a_502_audited_as_an_error(audit_path):
+    al = mock_airlock(audit_path, Flaky())
+    async with serving(al) as c:
+        r = await rpc(c, "tools/list", rid=7)
+    assert r.status_code == 502 and r.json()["id"] == 7 and "unreachable" in r.json()["error"]["message"], r.text
+    outcome = audit_rows(audit_path)[-1]
+    assert outcome["verdict"] == "error" and outcome["rule_id"] == "upstream.unreachable"
+
+
+# ---------------------------------------------------------------- SSE answers without a response (B18)
+def sse(*messages: dict) -> bytes:
+    return "".join(f"event: message\ndata: {json.dumps(m)}\n\n" for m in messages).encode()
+
+
+def sse_upstream(*messages: dict, with_answer: bool = False):
+    def handler(request: httpx.Request) -> httpx.Response:
+        rid = json.loads(request.content)["id"]
+        frames = list(messages)
+        if with_answer:
+            frames.insert(0, {"jsonrpc": "2.0", "id": rid, "result": {"resultType": "complete", "content": [{"type": "text", "text": "ok"}]}})
+        return httpx.Response(200, content=sse(*frames), headers={"content-type": "text/event-stream"})
+    return handler
+
+
+PROGRESS = {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 1}}
+OTHER = {"jsonrpc": "2.0", "id": "other-999", "result": {"resultType": "complete", "content": []}}
+ASK = {"jsonrpc": "2.0", "id": 1, "method": "elicitation/create", "params": {"message": "?"}}  # a request, our id
+
+
+@pytest.mark.parametrize("frames", [(), (PROGRESS,), (OTHER,), (ASK,), (PROGRESS, OTHER, ASK)])
+async def test_an_sse_stream_without_our_response_is_an_error_with_our_id(audit_path, frames):
+    al = mock_airlock(audit_path, sse_upstream(*frames))
+    async with serving(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}})
+    assert r.status_code == 200 and r.json()["id"] == 1, r.text
+    res = r.json()["result"]
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "upstream.bad_reply"
+    assert "SSE stream ended without a response" in res["content"][0]["text"]
+    outcome = audit_rows(audit_path)[-1]
+    assert outcome["verdict"] == "error" and outcome["rule_id"] == "upstream.bad_reply" and outcome["upstream_status"] == 200
+
+
+async def test_the_matching_response_is_taken_from_the_stream_whatever_follows_it(audit_path):
+    al = mock_airlock(audit_path, sse_upstream(PROGRESS, OTHER, with_answer=True))
+    async with serving(al) as c:
+        res = await call(c, "get_service", {"name": "api"})
+    assert not res.get("isError") and res["content"][0]["text"] == "ok" and res["_meta"][META + "rule_id"] == "tier.L0.read"
+
+
+async def test_an_sse_tools_list_without_a_response_is_a_502(audit_path):
+    al = mock_airlock(audit_path, sse_upstream(PROGRESS))
+    async with serving(al) as c:
+        r = await rpc(c, "tools/list", rid=3)
+    assert r.status_code == 502 and r.json()["id"] == 3 and "without a response" in r.json()["error"]["message"], r.text
+
+
+async def test_policy_diff_refuses_an_sse_catalog_without_a_response():
+    from mcp_airlock.policy_cli import _catalog
+    http = httpx.AsyncClient(transport=httpx.MockTransport(sse_upstream(PROGRESS)))
+    with pytest.raises(RuntimeError, match="without a response"):
+        await _catalog(http, "http://upstream/mcp", "airlock-policy")

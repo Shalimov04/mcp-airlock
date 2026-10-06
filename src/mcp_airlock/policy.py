@@ -290,3 +290,9 @@ class Engine:
         if await self.store.usage_reserve(principal, tool, d.objects, now, now - blast.window_s, blast.max_per_principal):
             return d
         return self._over(d.tier, d.objects, await self.store.usage_sum(principal, tool, now - blast.window_s), blast)
+
+    async def refund(self, principal: str, tool: str, d: Decision) -> None:
+        """Give back what `reserve` charged for `d`, when nothing reached the upstream. A negative usage row: the
+        window sum nets it out, and it leaves the window together with the charge."""
+        if d.verdict == "allow" and self._counts(d):
+            await self.store.usage_add(principal, tool, -d.objects, time.time())

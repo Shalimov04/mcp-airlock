@@ -64,7 +64,9 @@ async def _catalog(http: httpx.AsyncClient, upstream: str, principal: str) -> di
             params["cursor"] = cursor
         r = await http.post(upstream, headers=headers, json={"jsonrpc": "2.0", "id": i, "method": "tools/list", "params": params})
         r.raise_for_status()
-        body = _last_sse_message(r.text) if r.headers.get("content-type", "").startswith("text/event-stream") else r.json()
+        body = _last_sse_message(r.text, i) if r.headers.get("content-type", "").startswith("text/event-stream") else r.json()
+        if body is None:
+            raise RuntimeError("tools/list failed: the SSE stream ended without a response")
         if "error" in body:
             raise RuntimeError(f"tools/list failed: {body['error']}")
         tools.update((t["name"], t) for t in body["result"].get("tools") or [])

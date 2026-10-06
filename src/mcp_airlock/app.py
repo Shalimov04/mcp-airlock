@@ -119,6 +119,15 @@ class UpstreamTooLarge(Exception):
         self.status, self.limit = status, limit
 
 
+class UpstreamFailed(Exception):
+    """The upstream gave no usable answer. `sent` says whether the request reached it: after a connect failure there
+    is nothing to charge, anything later may have run. `status` is what the upstream sent, None when it sent nothing."""
+
+    def __init__(self, rule: str, detail: str, *, sent: bool, status: int | None = None):
+        super().__init__(detail)
+        self.rule, self.detail, self.sent, self.status = rule, detail, sent, status
+
+
 def _b64(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
@@ -413,6 +422,9 @@ class Airlock:
             self._outcome(verdict="error", rule_id="upstream.too_large", upstream_status=e.status, latency_ms=_ms(t0),
                           detail=f"limit {e.limit} bytes", **base)
             return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: the upstream response exceeded {e.limit} bytes", status=502)
+        except UpstreamFailed as e:
+            self._outcome(verdict="error", rule_id=e.rule, upstream_status=e.status, latency_ms=_ms(t0), detail=e.detail, **base)
+            return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: {e.detail}", status=502)
         if method == "tools/list" and isinstance(reply.get("result"), dict):
             self._filter_tools(reply["result"], who, policy)
             self._vet_tools(reply["result"], base, pins)
@@ -488,6 +500,22 @@ class Airlock:
             if d.verdict == "confirm":  # the preview is gone: no prompt without it, and a retry costs nothing
                 ran += " and no confirmation was issued"
             return _tool_error(rid, f"airlock: the upstream response exceeded {e.limit} bytes and was dropped; {ran}", "upstream.too_large")
+        except UpstreamFailed as e:
+            self._outcome(verdict="error", rule_id=e.rule, tier=d.tier, dry_run=d.dry_run, upstream_status=e.status,
+                          latency_ms=_ms(t0), detail=e.detail, **base)
+            if e.sent:
+                ran = "the dry run itself may have run, nothing was executed" if d.dry_run else "the call itself may have run"
+            else:
+                ran = "nothing reached the upstream"
+                try:  # the window charge was for an execution that did not happen
+                    await engine.refund(who.sub, tool, d)
+                except Exception as e2:  # the answer matters more than the refund
+                    log.warning("blast-radius refund failed: %s", type(e2).__name__)
+            if d.verdict == "confirm":
+                ran += " and no confirmation was issued"
+            elif d.rule_id == "tier.L2.confirmed" and not e.sent:  # the key was burned before forwarding and stays so
+                ran += "; the confirmation is spent, start again without requestState"
+            return _tool_error(rid, f"airlock: {e.detail}; {ran}", e.rule)
         result = reply.get("result")
         gated = d.verdict == "confirm" or d.rule_id == "tier.L2.confirmed"
         if gated and isinstance(result, dict) and result.get("resultType") == "input_required":
@@ -556,6 +584,8 @@ class Airlock:
                                                     "method": "tools/list", "params": params}, list_headers, who)
             except UpstreamTooLarge as e:
                 raise CatalogUnavailable(f"upstream tools/list response exceeded {e.limit} bytes") from e
+            except UpstreamFailed as e:
+                raise CatalogUnavailable(f"upstream tools/list failed: {e.detail}") from e
             result = reply.get("result") if status == 200 else None
             if not isinstance(result, dict):
                 raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {_clip(str(reply.get('error') or 'no result'))}")
@@ -600,24 +630,30 @@ class Airlock:
             async with self.http.stream("POST", self.upstream, content=json.dumps(dict(body, params=params)), headers=out_headers) as r:
                 if r.headers.get("content-encoding", "identity").strip().lower() not in ("identity", ""):
                     # Refused unread: one gzip chunk can decode to a thousand times its size before the count below sees it.
-                    return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream returned encoded content despite accept-encoding identity ({r.status_code})"}}
+                    raise UpstreamFailed("upstream.encoded", f"upstream returned encoded content despite accept-encoding identity (HTTP {r.status_code})",
+                                         sent=True, status=r.status_code)
                 async for chunk in r.aiter_bytes():
                     total += len(chunk)
                     if total > self.max_upstream_bytes:
                         raise UpstreamTooLarge(r.status_code, self.max_upstream_bytes)  # leaving the block closes the response
                     chunks.append(chunk)
         except httpx.HTTPError as e:
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream unreachable: {type(e).__name__}"}}
+            # Only a failed connect is known not to have reached the upstream; a timeout or a torn read may have.
+            raise UpstreamFailed("upstream.unreachable", f"upstream unreachable: {type(e).__name__}",
+                                 sent=not isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))) from e
         raw = b"".join(chunks)
         ctype = r.headers.get("content-type", "")
         if ctype.startswith("text/event-stream"):
-            return r.status_code, _last_sse_message(raw.decode("utf-8", errors="replace"))
+            reply = _last_sse_message(raw.decode("utf-8", errors="replace"), body["id"])
+            if reply is None:
+                raise UpstreamFailed("upstream.bad_reply", "upstream SSE stream ended without a response", sent=True, status=r.status_code)
+            return r.status_code, reply
         try:
             reply = json.loads(raw)
         except ValueError:
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream returned non-JSON ({r.status_code})"}}
+            raise UpstreamFailed("upstream.bad_reply", f"upstream returned non-JSON (HTTP {r.status_code})", sent=True, status=r.status_code) from None
         if not isinstance(reply, dict):
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": "upstream returned a non-object"}}
+            raise UpstreamFailed("upstream.bad_reply", "upstream returned a non-object", sent=True, status=r.status_code)
         return r.status_code, reply
 
     def _filter_tools(self, result: dict[str, Any], who: Principal, policy: Policy) -> None:
@@ -865,18 +901,22 @@ def _tool_error(rid: Any, text: str, rule_id: str) -> JSONResponse:
         "_meta": {META + "verdict": "deny", META + "rule_id": rule_id}}})
 
 
-def _last_sse_message(text: str) -> dict[str, Any]:
-    last: dict[str, Any] = {}
+def _last_sse_message(text: str, rid: Any) -> dict[str, Any] | None:
+    """The response to request `rid` in an SSE body, None when there is none. Notifications and server-to-client
+    requests carry `method`, and a response to another id is not ours: handed back as the answer, any of them
+    makes an SDK client wait forever for the real one."""
+    found: dict[str, Any] | None = None
     for frame in text.replace("\r\n", "\n").split("\n\n"):
         data = "\n".join(line[5:].strip() for line in frame.split("\n") if line.startswith("data:"))
-        if data:
-            try:
-                msg = json.loads(data)
-                if isinstance(msg, dict) and "id" in msg:
-                    last = msg
-            except ValueError:
-                pass
-    return last or {"jsonrpc": "2.0", "id": None, "error": {"code": INTERNAL_ERROR, "message": "empty SSE response"}}
+        if not data:
+            continue
+        try:
+            msg = json.loads(data)
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and "method" not in msg and ("result" in msg or "error" in msg) and msg.get("id") == rid:
+            found = msg
+    return found
 
 
 def _trace_carrier(params: Any) -> dict[str, str]:

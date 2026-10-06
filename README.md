@@ -377,7 +377,7 @@ Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unas
 `protocol.<code>`, `passthrough` (a `tools/list` or `server/discover`), `mrtr.pending`,
 `mrtr.declined`, `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`,
 `mrtr.approved_oob`, `mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`,
-`internal.error`.
+`upstream.unreachable`, `upstream.encoded`, `upstream.bad_reply`, `internal.error`.
 
 `SIGHUP` reloads the policy file and, if one is configured, the pins file, as one pair. A file
 that does not load keeps the current policy and pins, and the error is logged. The environment
@@ -392,7 +392,9 @@ an expiry (10 minutes) and the approval mode. Nothing is stored when it is issue
 comes back the proxy checks the signature, checks that all of those still match the call in
 front of it, re-runs the policy, burns the key, then charges the blast-radius counter.
 Burning is an atomic insert in the store, so two replicas cannot both execute the same
-confirmation. A decline burns the key too.
+confirmation. A decline burns the key too, and so does an upstream that turns out to be
+unreachable right after the yes: the key is burned before the call is sent and is never
+un-burned, so the agent has to ask for a new prompt (the blast-radius charge is given back).
 
 Before the prompt is issued the proxy asks the upstream for `tools/list` and looks at the
 tool's schema. If the tool declares `dry_run`, the dry run is forwarded and its output is
@@ -674,9 +676,18 @@ numbers are in `_meta["io.mcp-airlock/output"]`. An upstream answer over
 `AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it comes back as an error
 that says the call ran (or that only its dry run did), with rule `upstream.too_large`.
 
+An upstream that cannot be reached (`upstream.unreachable`), answers with compressed content
+(`upstream.encoded`) or sends something that is not a JSON-RPC response (`upstream.bad_reply`) is
+reported the same way: a tool error carrying the rule, audited as verdict `error` with the reason
+in `detail`. When the connection itself failed, nothing reached the upstream: the error says so and
+the blast-radius charge is given back. After anything else (a timeout, a torn read, a bad answer)
+the call may have run; the error says that too, and the charge stays. For `tools/list` and
+`server/discover` these failures are an HTTP 502.
+
 The upstream call has a 60 second timeout. Upstream responses arriving as SSE are reduced to the
-final message; progress notifications are dropped. The catalog is read in at most 10 pages.
-Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
+response that carries the call's id; notifications, server-to-client requests and responses to
+other ids are dropped, and a stream without that response is `upstream.bad_reply`. The catalog is
+read in at most 10 pages. Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
 
 The request body must be strict JSON: `NaN`, `Infinity` and a number that does not fit a double
 (`1e400`) are refused with a parse error (`-32700`), since they are not JSON and the Postgres sink

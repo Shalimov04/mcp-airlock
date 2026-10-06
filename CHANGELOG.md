@@ -19,6 +19,17 @@
   read "definition changed since it was pinned". Icons and `_meta` are deliberately not covered.
 * **Titles in the guard.** The `tools/list` scan for injection phrases now also reads the tool
   `title` and `annotations.title`, not only the description; a hit is marked in `_meta` as before.
+* **Upstream failures.** An unreachable upstream, a compressed answer or a reply that is not a
+  JSON-RPC object used to come back as a synthetic 502 audited as `allow` with no detail. A tool
+  call now gets a tool error with rule `upstream.unreachable`, `upstream.encoded` or
+  `upstream.bad_reply`, saying whether the call may have run, and the outcome record says
+  `error` with the reason. When the connection itself failed, the blast-radius charge is given
+  back; the key of a confirmed `L2` call stays burned and the error says to ask again. `tools/list`
+  and `server/discover` still answer 502.
+* An SSE answer is reduced to the response carrying the call's id. A stream with only
+  notifications, a server-to-client request or a response to another id used to be passed back as
+  the answer (HTTP 200, `id: null`), on which the official SDK client hangs; it is now
+  `upstream.bad_reply`. `airlock-policy diff` refuses such a catalog too.
 
 ### Added
 
