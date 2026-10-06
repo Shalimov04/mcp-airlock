@@ -157,7 +157,8 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 `lint` needs no network. It reports a tool without tiers (`no_tiers`, an error), a write tool
 without a description (`no_description`), a `count_arg` that relies on the global blast radius
 (`blast_radius_default`), a `where` rule for an environment no tier mentions
-(`where_env_unknown`) and an environment no tool covers (`env_unused`); `--env` adds
+(`where_env_unknown`), a `where` regex with several unbounded repeats in a row
+(`where_regex_cost`) and an environment no tool covers (`env_unused`); `--env` adds
 environments that must be covered. `diff` asks the server itself (not the proxy, which hides
 unlisted tools) for `tools/list` and tells you which allowlisted tools the server no longer has
 (`missing_upstream`, an error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`),
@@ -369,8 +370,19 @@ Each rule has exactly one matcher: `equals`, `in`, `not_in` or `regex` (full mat
 unless it has `optional: true`. A list value must match for every element. A string argument that
 parses as JSON `null`, a list or an object is denied by any rule, because the upstream may decode
 it before it validates it. For the same reason `not_in` also denies a value whose type is not among
-the listed values (`3` against `[kube-system]`). A regex runs in the request path on every call, so
-avoid nested repetition.
+the listed values (`3` against `[kube-system]`).
+
+A regex runs in the request path, on the event loop, so its cost is the time one request can stall
+the whole proxy. A pattern that can take exponential time on a crafted value is refused when the
+policy loads (and by `lint`): a repetition inside a repetition (`(a+)+`, `(\w+\s?)+`), an
+alternation inside a repetition whose alternatives can start alike (`(a|aa)+`) and a
+backreference. A nested repetition is fine when the outer count is fixed (`(\d{1,3}\.){3}`) or
+every iteration starts with a character the rest of the group cannot consume
+(`(\.[a-z]{1,63})*`), and so is an alternation whose alternatives start apart (`(foo|bar)+`). The
+remaining patterns are at most polynomial, so a regex is tried only on strings up to 1024
+characters: a longer value fails the rule, with a message saying so. `lint` warns about two or
+more unbounded repeats in a row (`.*-.*-prod`, `where_regex_cost`), which can take quadratic or
+worse time within that cap.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
@@ -609,8 +621,8 @@ answering) and the gated call is denied with `store.unavailable`: a tool error c
 audited as a denial like `catalog.unavailable`, with the store's error in `detail` and a one-line
 warning in the log. A `tools/list` does not touch the store and is not affected. A failed connect
 attempt is given up after the connect timeout, so the store recovers within a few seconds of the
-database coming back. A connection that has not answered by then is cut and dropped from the pool, including one that was idle in it. A saturated pool can make
-`/readyz` report 503.
+database coming back. A connection that has not answered by then is cut and dropped from the
+pool, including one that was idle in it. A saturated pool can make `/readyz` report 503.
 
 ## Prompt injection
 

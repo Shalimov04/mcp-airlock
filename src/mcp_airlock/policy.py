@@ -8,12 +8,18 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from re import _constants as _sre, _parser as _sre_parser  # the stdlib's own parse tree; re has no public one
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .store import USAGE_RETENTION_S, MemoryStore
+
+# A where regex runs on the event loop with the GIL held, so its cost bounds how long one request can stall the
+# whole proxy. Patterns that can go exponential are refused at load (regex_risk); for the polynomial ones the value
+# length is capped, and a longer value fails the rule.
+REGEX_MAX_CHARS = 1024
 
 Tier = Literal["L0", "L1", "L2", "L3"]
 GROUP_PREFIX = "group:"  # a `principals` key for a group; never matched against the caller's own name
@@ -63,6 +69,9 @@ class WhereRule(BaseModel):
                 re.compile(self.regex)  # an invalid pattern is a load error, not a runtime one
             except re.error as e:
                 raise ValueError(f"invalid regex: {e}") from e
+            if (why := regex_risk(self.regex)) is not None:
+                raise ValueError(f"regex {self.regex!r} has {why}: it can take exponential time on a crafted value "
+                                 "and freeze the proxy; use a character class or a fixed count instead")
         return self
 
     def kind(self) -> str:
@@ -84,7 +93,7 @@ class WhereRule(BaseModel):
         if not isinstance(v, (str, int, float, bool)):
             return False
         if self.regex is not None:
-            return isinstance(v, str) and re.fullmatch(self.regex, v) is not None
+            return isinstance(v, str) and len(v) <= REGEX_MAX_CHARS and re.fullmatch(self.regex, v) is not None
         if self.kind() == "equals":
             return _same(v, self.equals)
         if self.in_ is not None:
@@ -119,8 +128,175 @@ def _json(s: str) -> Any:
     return s if isinstance(d, (str, int, float)) else d  # the SDK keeps a decoded str, int or float (a bool is an int)
 
 
+def _over_regex_cap(v: Any) -> bool:
+    return any(isinstance(x, str) and len(x) > REGEX_MAX_CHARS for x in (v if isinstance(v, (list, tuple)) else [v]))
+
+
 _WHY = {"equals": "does not equal the required value", "in": "is not in the allowed values",
         "not_in": "is in the forbidden values", "regex": "does not match the required pattern"}
+
+
+# ---------------------------------------------------------------- regex cost
+# Backtracking goes exponential when the engine can split the same characters between iterations of a repetition
+# in many ways: a repetition inside a repetition ((a+)+), an alternation inside a repetition whose alternatives can
+# start alike ((a|aa)+) or a backreference. These are refused when the policy loads. A nested repetition is harmless
+# when every iteration starts with a character the rest of the group never consumes ((\.[a-z]{1,63})*): the
+# iteration boundaries are then fixed and nothing can shift between them. Everything else is at worst polynomial in
+# the value length, which REGEX_MAX_CHARS bounds.
+
+_REPEATS = (_sre.MAX_REPEAT, _sre.MIN_REPEAT, _sre.POSSESSIVE_REPEAT)
+_ATOMS = (_sre.LITERAL, _sre.NOT_LITERAL, _sre.IN, _sre.ANY)
+_CATEGORY = {_sre.CATEGORY_DIGIT: r"\d", _sre.CATEGORY_NOT_DIGIT: r"\D", _sre.CATEGORY_SPACE: r"\s",
+             _sre.CATEGORY_NOT_SPACE: r"\S", _sre.CATEGORY_WORD: r"\w", _sre.CATEGORY_NOT_WORD: r"\W"}
+
+
+def regex_risk(pattern: str) -> str | None:
+    """What lets `pattern` take exponential time on a crafted value, or None when nothing does."""
+    return _risk(_sre_parser.parse(pattern), nested=False)
+
+
+def regex_unbounded_repeats(pattern: str) -> int:
+    """How many unbounded repeats (`*`, `+`, `{n,}`) the pattern runs one after another: two can take quadratic
+    time in the value length, three cubic, and so on. A repeat inside another one is not counted."""
+    return _unbounded(_sre_parser.parse(pattern))
+
+
+def _risk(seq: Any, nested: bool) -> str | None:
+    """`nested`: this sequence is inside a repetition whose iterations can share characters."""
+    for op, av in seq:
+        found = None
+        if op in (_sre.GROUPREF, _sre.GROUPREF_EXISTS):
+            found = "a backreference"
+        elif op in _REPEATS:
+            mn, mx, body = av
+            loops = mx > mn and mx > 1  # a fixed count ((ab){3}) splits only one way; `?` never iterates
+            if nested and mx > mn:  # an optional item inside a loop splits too: (a?a)+ is (a|aa)+
+                found = "a repetition inside a repetition"
+            elif loops and any(op2 is _sre.BRANCH and _overlapping(av2[1]) for op2, av2 in _walk(body)):
+                found = "an alternation inside a repetition"
+            else:
+                found = _risk(body, nested or (loops and not _separated(body)))
+        elif op is _sre.SUBPATTERN:
+            found = _risk(av[3], nested)
+        elif op is _sre.BRANCH:
+            found = next((r for alt in av[1] if (r := _risk(alt, nested)) is not None), None)
+        elif op in (_sre.ASSERT, _sre.ASSERT_NOT):
+            found = _risk(av[1], nested)
+        elif op is _sre.ATOMIC_GROUP:
+            found = _risk(av, nested)
+        if found is not None:
+            return found
+    return None
+
+
+def _walk(seq: Any, lookarounds: bool = True):
+    """Every node of the tree, depth first. Lookaround bodies consume nothing and can be left out."""
+    for op, av in seq:
+        yield op, av
+        if op in _REPEATS:
+            yield from _walk(av[2], lookarounds)
+        elif op is _sre.SUBPATTERN:
+            yield from _walk(av[3], lookarounds)
+        elif op is _sre.BRANCH:
+            for alt in av[1]:
+                yield from _walk(alt, lookarounds)
+        elif op in (_sre.ASSERT, _sre.ASSERT_NOT):
+            if lookarounds:
+                yield from _walk(av[1], lookarounds)
+        elif op is _sre.ATOMIC_GROUP:
+            yield from _walk(av, lookarounds)
+        elif op is _sre.GROUPREF_EXISTS:
+            for alt in av[1:]:
+                if alt is not None:
+                    yield from _walk(alt, lookarounds)
+
+
+def _separated(body: Any) -> bool:
+    """Every iteration of the repeated group starts with a character that the rest of the group never consumes."""
+    head, rest = _head(body)
+    chars = _chars(head)
+    return chars is not None and not any(_consumes(rest, c) for c in chars)
+
+
+def _overlapping(alts: list) -> bool:
+    """Can two alternatives start with the same character, or one of them with nothing?"""
+    sets = [_chars(_head(alt)[0]) for alt in alts]
+    if any(s is None for s in sets):
+        return True
+    folded = [{o for c in s for o in _fold(c)} for s in sets]
+    return any(a & b for i, a in enumerate(folded) for b in folded[i + 1:])
+
+
+def _head(seq: Any) -> tuple[Any, list]:
+    """The first item of the sequence, looking through leading groups, and everything after it."""
+    items = list(seq)
+    while items and items[0][0] is _sre.SUBPATTERN:
+        items = list(items[0][1][3]) + items[1:]
+    return (items[0], items[1:]) if items else (None, [])
+
+
+def _chars(item: Any) -> set[int] | None:
+    """The characters a literal or a small plain class matches; None for anything wider or for no item."""
+    if item is None:
+        return None
+    op, av = item
+    if op is _sre.LITERAL:
+        return {av}
+    if op is _sre.IN and all(k in (_sre.LITERAL, _sre.RANGE) for k, _ in av):
+        chars = {c for k, v in av for c in ([v] if k is _sre.LITERAL else range(v[0], v[1] + 1))}
+        return chars if len(chars) <= 64 else None
+    return None  # a class with a category or a negation, a dot, an anchor or a nested repeat
+
+
+def _fold(c: int) -> set[int]:
+    return {c} | {ord(x) for x in (chr(c).lower(), chr(c).upper()) if len(x) == 1}  # (?i) may be on
+
+
+def _consumes(seq: Any, c: int) -> bool:
+    """Can some character-consuming item in the sequence match the character `c` (in any case)?"""
+    for op, av in _walk(seq, lookarounds=False):
+        if op in (_sre.GROUPREF, _sre.GROUPREF_EXISTS):
+            return True  # whatever the group matched: unknown, so assume yes
+        if op in _ATOMS and any(_atom_matches(op, av, o) for o in _fold(c)):
+            return True
+    return False
+
+
+def _atom_matches(op: Any, av: Any, c: int) -> bool:
+    if op is _sre.LITERAL:
+        return av == c
+    if op is _sre.NOT_LITERAL:
+        return av != c
+    if op is _sre.ANY:
+        return True  # a dot takes everything but a newline, which no separator should rely on
+    negate = bool(av) and av[0][0] is _sre.NEGATE
+    hit = False
+    for k, v in av[1:] if negate else av:
+        if k is _sre.LITERAL:
+            hit |= v == c
+        elif k is _sre.RANGE:
+            hit |= v[0] <= c <= v[1]
+        elif k is _sre.CATEGORY and v in _CATEGORY:
+            hit |= re.fullmatch(_CATEGORY[v], chr(c)) is not None
+        else:
+            return True  # a category this check does not model: assume it matches
+    return hit != negate
+
+
+def _unbounded(seq: Any) -> int:
+    n = 0
+    for op, av in seq:
+        if op in _REPEATS:
+            n += 1 if av[1] == _sre.MAXREPEAT else _unbounded(av[2])
+        elif op is _sre.SUBPATTERN:
+            n += _unbounded(av[3])
+        elif op is _sre.BRANCH:
+            n += max(_unbounded(alt) for alt in av[1])
+        elif op in (_sre.ASSERT, _sre.ASSERT_NOT):
+            n += _unbounded(av[1])
+        elif op is _sre.ATOMIC_GROUP:
+            n += _unbounded(av)
+    return n
 
 
 class ToolRule(BaseModel):
@@ -181,6 +357,8 @@ class Policy(BaseModel):
                 if w.optional:
                     continue
                 return f"argument {w.arg!r} is missing, required by the {w.kind()} condition"
+            if w.regex is not None and _over_regex_cap(args[w.arg]):  # the pattern is never tried on it: fails closed
+                return f"argument {w.arg!r} is longer than {REGEX_MAX_CHARS} characters, more than a pattern is tried on"
             if not w.holds(args[w.arg]):
                 return f"argument {w.arg!r} {_WHY[w.kind()]}"
         return None

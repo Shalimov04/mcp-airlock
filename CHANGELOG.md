@@ -116,7 +116,13 @@
   gated call with rule `store.unavailable`, as the README said it would: a tool error, an intent
   and an outcome record saying `deny` with the store's error in `detail`, and one warning line in
   the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record.
-* `airlock-audit query` reads the rotated files too, oldest first.
+* A `where` regex can no longer freeze the proxy. A pattern that can take exponential time on a
+  crafted value (a repetition inside a repetition such as `(a+)+`, an alternation inside a
+  repetition whose alternatives can start alike, a backreference) is refused when the policy
+  loads and by `airlock-policy lint`; a regex is tried only on strings up to 1024 characters, and
+  a longer value fails the rule. `lint` warns about two or more unbounded repeats in a row
+  (`where_regex_cost`). One `get_service` call with a 32-character name used to block the event
+  loop, `/healthz` and `SIGTERM` for over a minute.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.
 * The approver of an out-of-band confirmation is recorded as `verified` only when the identity

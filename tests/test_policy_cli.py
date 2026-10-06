@@ -188,6 +188,9 @@ def test_main_diff_non_json_upstream_is_an_error_line_not_a_traceback(monkeypatc
     "{arg: name, contains: x}",  # unknown matcher
     "{arg: name, in: [a], optinal: true}",  # unknown key next to a valid matcher
     "{arg: name, regex: '('}",  # invalid regex
+    "{arg: name, regex: '(a+)+$'}",  # exponential backtracking: one call would freeze the proxy
+    "{arg: name, regex: '(a|aa)+'}",
+    "{arg: name, regex: '(a)\\1'}",
     "{arg: name, in: [a], regex: 'a'}",  # two matchers
     "{arg: name}",  # no matcher
     "{arg: name, in: []}",  # would deny every value
@@ -207,6 +210,15 @@ def test_lint_accepts_a_good_where_rule(tmp_path):
                                         "    where: [{arg: name, in: [a, b]}, {arg: n, regex: 'a.*', env: [prod]}, "
                                         "{arg: m, in: [a, null]}, {arg: k, equals: null}]\n"))
     assert codes(f, "ERROR") == []
+
+
+def test_lint_warns_about_a_regex_with_several_unbounded_repeats(tmp_path):
+    f = policy_cli.lint(write(tmp_path, "  x:\n    description: d\n    tiers: {prod: L0}\n"
+                                        "    where: [{arg: a, regex: '.*-.*-prod'}, {arg: b, regex: '[^/]+/[^/]+/[^/]+'}, "
+                                        "{arg: c, regex: 'tmp-.*'}, {arg: d, regex: '(\\.[a-z]+)*'}]\n"))  # d: the inner repeat is not counted
+    warns = [m for lvl, c, m in f if c == "where_regex_cost" and lvl == "WARN"]
+    assert len(warns) == 2 and "2 unbounded" in warns[0] and "3 unbounded" in warns[1] and "1024 chars" in warns[0]
+    assert codes(f, "ERROR") == []  # a warning: the length cap bounds these, unlike the exponential ones
 
 
 def test_lint_where_env_unknown_warns_once_per_rule_and_name(tmp_path):

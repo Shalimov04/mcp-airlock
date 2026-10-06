@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from mcp_airlock import Policy
 from mcp_airlock.app import CONFIRM_KEY, META
-from mcp_airlock.policy import Engine, WhereRule
+from mcp_airlock.policy import REGEX_MAX_CHARS, Engine, WhereRule
 
 from .conftest import ROOT, audit_rows, call
 
@@ -151,8 +151,9 @@ async def test_a_string_that_decodes_to_a_number_bool_or_string_is_left_alone(va
     # the SDK decodes these too but keeps the string: only a null, list or dict is substituted. A number the digit limit
     # refuses here is a string upstream as well, whether its decode fails there too or yields an int
     assert not await violates([{"arg": "a", "not_in": ["prod-db"]}], {"a": value})
-    assert not await violates([{"arg": "a", "regex": ".+"}], {"a": value})
     assert not await violates([{"arg": "a", "equals": value}], {"a": value})
+    # a regex is tried only on values up to REGEX_MAX_CHARS; the long one fails the rule for its length, not its content
+    assert await violates([{"arg": "a", "regex": ".+"}], {"a": value}) == (len(value) > REGEX_MAX_CHARS)
 
 
 async def test_a_string_nested_too_deep_to_decode_here_fails_closed():
@@ -269,6 +270,62 @@ def test_a_copied_policy_evaluates_like_the_original():
     for c in (copy.deepcopy(pol), pol.model_copy(deep=True)):
         assert c.args_violation("t", {"a": "x", "b": None}) is None
         assert c.args_violation("t", {"a": "y", "b": None}) == pol.args_violation("t", {"a": "y", "b": None})
+
+
+# ---------------------------------------------------------------- regex cost (the match runs on the event loop)
+
+@pytest.mark.parametrize("pattern, why", [
+    ("(a+)+$", "repetition inside a repetition"),  # the classic: 2^n ways to split the a's
+    ("(a*)*", "repetition inside a repetition"),
+    ("(a{2,3})+", "repetition inside a repetition"),
+    ("(a?a)+$", "repetition inside a repetition"),  # an optional item inside a loop is (a|aa)+ in disguise
+    ("(a[a-z]+)+$", "repetition inside a repetition"),  # the separator is a character the rest consumes too
+    (r"^(\w+\s?)+$", "repetition inside a repetition"),
+    ("(x[0-9]+|y[0-9]+)+", "repetition inside a repetition"),  # a branch is not a separator
+    ("(a|aa)+$", "alternation inside a repetition"),
+    ("(a|ab)+", "alternation inside a repetition"),  # an alternative that is a prefix of another
+    ("(?i)(Foo|foo)+", "alternation inside a repetition"),  # alike once case is folded
+    (r"(a)\1", "backreference"),
+    (r"(?P<n>[a-z]+)-(?P=n)", "backreference"),
+    ("(a)(?(1)b|c)", "backreference"),
+])
+def test_a_pattern_that_can_take_exponential_time_is_a_load_error(pattern, why):
+    with pytest.raises(ValidationError, match=f"{why}.*exponential"):
+        WhereRule.model_validate({"arg": "a", "regex": pattern})
+    with pytest.raises(ValidationError):
+        policy([{"arg": "a", "regex": pattern}])
+
+
+@pytest.mark.parametrize("pattern", [
+    "tmp-.*", r"\d+", "[a-z]+/[a-z]+", ".*-.*-prod",  # linear or polynomial: bounded by the length cap
+    r"(\.[a-z]{1,63})*", r"[a-z]{1,63}(\.[a-z]{1,63})*",  # a DNS name: every iteration starts with a dot
+    r"(,\s*\d+)*", r"(\d{3}-)+\d{4}", "(ab|cd)*", "(foo|bar)+", "(?:a|b)+",  # separated, or alternatives that start apart
+    "(a{2})+", "((ab){2})+", r"^(?:\d{1,3}\.){3}\d{1,3}$", "(a|aa){3}",  # a fixed count splits one way
+    "(a+)?b", "x(ab)*$", r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", r"^[\w.-]+@[\w-]+(\.[\w-]+)+$",
+])
+def test_the_usual_patterns_still_load(pattern):
+    assert WhereRule.model_validate({"arg": "a", "regex": pattern}).regex == pattern
+
+
+async def test_a_value_longer_than_the_cap_fails_a_regex_rule_without_trying_the_pattern():
+    pol = policy([{"arg": "a", "regex": ".*"}])  # would match anything
+    assert pol.args_violation("t", {"a": "x" * REGEX_MAX_CHARS}) is None
+    msg = pol.args_violation("t", {"a": "x" * (REGEX_MAX_CHARS + 1)})
+    assert msg == f"argument 'a' is longer than {REGEX_MAX_CHARS} characters, more than a pattern is tried on"
+    assert "pattern" in pol.args_violation("t", {"a": ["ok", "x" * (REGEX_MAX_CHARS + 1)]})  # one element is enough
+    assert not WhereRule.model_validate({"arg": "a", "regex": ".*"}).holds("x" * (REGEX_MAX_CHARS + 1))
+    assert pol.args_violation("t", {"a": "x" * 5000}) and (await decide(pol, {"a": "x" * 5000})).rule_id == "args.violation"
+    # the other matchers have no such cap: an exact comparison is linear
+    assert policy([{"arg": "a", "equals": "x" * 5000}]).args_violation("t", {"a": "x" * 5000}) is None
+
+
+async def test_a_quadratic_pattern_on_the_longest_allowed_value_is_quick():
+    import time
+    pol = policy([{"arg": "name", "regex": ".*-.*-prod"}])  # 20 s on a 60000-char value before the cap
+    t0 = time.perf_counter()
+    for n in (REGEX_MAX_CHARS, REGEX_MAX_CHARS + 1, 60_000):
+        assert (await decide(pol, {"name": "-" * n + "!"})).rule_id == "args.violation"
+    assert time.perf_counter() - t0 < 1.0
 
 
 # ---------------------------------------------------------------- through the proxy
