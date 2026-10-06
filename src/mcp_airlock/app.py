@@ -107,6 +107,22 @@ class JSONResponse(_JSONResponse):
             return json.dumps(content, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
 
 
+class StoreUnavailable(Exception):
+    """The store did not answer a step of a gated call. Fails closed by design (the README says a store outage denies
+    the call), so it is a denial with a rule id, not an internal error with a traceback."""
+
+    def __init__(self, cause: BaseException):
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _is_store_error(e: BaseException) -> bool:
+    pg = sys.modules.get("psycopg")  # imported only when a Postgres store or sink is configured
+    if pg is not None and isinstance(e, pg.Error):  # psycopg_pool's PoolTimeout and PoolClosed are OperationalErrors
+        return True
+    return isinstance(e, RuntimeError) and "store is closed" in str(e)  # PostgresStore after aclose()
+
+
 class CatalogUnavailable(Exception):
     """The upstream did not give us a usable tools/list; we cannot tell whether a tool has dry_run."""
 
@@ -383,6 +399,11 @@ class Airlock:
                 if method == "tools/call":
                     return await self._call(rid, body, params, headers, who, tool, args, base, span, engine)
                 return await self._passthrough(body, headers, who, method, base, engine.policy, pins)
+            except StoreUnavailable as e:
+                # The documented behaviour: a store outage denies the gated call. A class name in the log, no traceback.
+                log.warning("store unavailable, denying %s for %s: %s", tool, who.sub, type(e.cause).__name__)
+                self._audit_deny(base, "store.unavailable", engine.policy.tier(tool, who.sub, who.groups), _exc_text(e.cause))
+                return _tool_error(rid, "airlock: denied (store.unavailable): the store did not answer; retry later", "store.unavailable")
             except Exception as e:  # never leak a traceback; try hard to leave an outcome record
                 log.exception("airlock internal error")
                 self._outcome(verdict="error", rule_id="internal.error", detail=_exc_text(e), **base)
@@ -437,7 +458,7 @@ class Airlock:
 
     async def _call(self, rid, body, params, headers, who: Principal, tool, args, base, span, engine: Engine) -> Response:
         policy = engine.policy
-        mode, claims = await self.verify_confirmation(params, who.sub, tool, args)
+        mode, claims = await self._store_step(self.verify_confirmation(params, who.sub, tool, args))
         if mode.startswith("deny:"):
             rule = mode[5:]
             self._audit_deny(base, rule, policy.tier(tool, who.sub, who.groups), "confirmation rejected")
@@ -450,8 +471,8 @@ class Airlock:
             except CatalogUnavailable as e:
                 self._audit_deny(base, "catalog.unavailable", tier, str(e))
                 return _tool_error(rid, f"airlock: denied (catalog.unavailable): {e}", "catalog.unavailable")
-        d = await engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups,
-                                       dry_run_supported=dry_run_prop is not None)
+        d = await self._store_step(engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups,
+                                                   dry_run_supported=dry_run_prop is not None))
         span.set_attributes({"airlock.verdict": d.verdict, "airlock.rule_id": d.rule_id, "airlock.tier": d.tier or ""})
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
@@ -468,10 +489,10 @@ class Airlock:
                 "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"], META + "message": message,
                           META + "verdict": "confirm", META + "rule_id": "mrtr.pending"}}})
         if d.rule_id == "tier.L2.confirmed":  # the one path that executes for real: burn the key first, atomically
-            if not await self.engine.store.consume_once(claims["k"], claims["exp"]):
+            if not await self._store_step(self.engine.store.consume_once(claims["k"], claims["exp"])):
                 self._audit_deny(base, "mrtr.replay", d.tier, "idempotency key already used")
                 return _tool_error(rid, "airlock: denied (mrtr.replay)", "mrtr.replay")
-        d = await engine.reserve(who.sub, tool, d)  # atomic window charge; a replay never gets this far
+        d = await self._store_step(engine.reserve(who.sub, tool, d))  # atomic window charge; a replay never gets this far
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
             return _tool_error(rid, f"airlock: denied ({d.rule_id}): {d.message}", d.rule_id)
@@ -547,6 +568,16 @@ class Airlock:
         self._outcome(verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
                       upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
+
+    async def _store_step(self, step: Any) -> Any:
+        """Await a step of the gate that talks to the store. A store that does not answer becomes StoreUnavailable;
+        any other exception passes through unchanged, so a real bug still surfaces as internal.error."""
+        try:
+            return await step
+        except Exception as e:
+            if _is_store_error(e):
+                raise StoreUnavailable(e) from e
+            raise
 
     # ---------- audit helpers ----------
     def _outcome(self, **rec: Any) -> None:

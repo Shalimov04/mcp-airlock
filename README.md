@@ -375,11 +375,12 @@ avoid nested repetition.
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
 `tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`,
-`dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`,
-`protocol.<code>`, `passthrough` (a `tools/list` or `server/discover`), `mrtr.pending`,
-`mrtr.declined`, `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`,
-`mrtr.approved_oob`, `mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`,
-`upstream.unreachable`, `upstream.encoded`, `upstream.bad_reply`, `internal.error`.
+`dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `store.unavailable`,
+`principal.missing`, `protocol.<code>`, `passthrough` (a `tools/list` or `server/discover`),
+`mrtr.pending`, `mrtr.declined`, `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`,
+`mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`, `request.too_large`,
+`upstream.too_large`, `upstream.unreachable`, `upstream.encoded`, `upstream.bad_reply`,
+`internal.error`.
 
 `SIGHUP` reloads the policy file and, if one is configured, the pins file, as one pair. A file
 that does not load keeps the current policy and pins, and the error is logged. The environment
@@ -603,11 +604,12 @@ left unchanged, and then the pool wait is `PGCONNECT_TIMEOUT` or
 The connect timeout in force (the DSN's own, else `PGCONNECT_TIMEOUT`, else
 `AIRLOCK_STORE_CONNECT_TIMEOUT`, at least 2 s) bounds every store call: the wait for a pooled
 connection and the work on it. If the database is down, each store call fails after about the
-connect timeout (twice that at
-most, when the server accepts the connection and then stops answering) and the gated call is
-denied. A failed connect attempt is given up after the connect timeout, so the store recovers
-within a few seconds of the database coming back. A connection that has not answered by then is
-cut and dropped from the pool, including one that was idle in it. A saturated pool can make
+connect timeout (twice that at most, when the server accepts the connection and then stops
+answering) and the gated call is denied with `store.unavailable`: a tool error carrying the rule,
+audited as a denial like `catalog.unavailable`, with the store's error in `detail` and a one-line
+warning in the log. A `tools/list` does not touch the store and is not affected. A failed connect
+attempt is given up after the connect timeout, so the store recovers within a few seconds of the
+database coming back. A connection that has not answered by then is cut and dropped from the pool, including one that was idle in it. A saturated pool can make
 `/readyz` report 503.
 
 ## Prompt injection

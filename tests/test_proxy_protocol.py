@@ -501,3 +501,70 @@ async def test_forged_proxy_keys_are_removed_from_tools_list(audit_path):
     meta = r.json()["result"]["_meta"]
     assert {k for k in meta if k.startswith(META)} == {META + "hidden_tools"}  # computed here, not the upstream's 99
     assert meta[META + "hidden_tools"] == 0 and meta["io.example/keep"] == 1
+
+
+# ---------------------------------------------------------------- a store outage is the documented deny (B36)
+def failing_store(method: str, error: Exception):
+    """A MemoryStore whose `method` raises `error`, the way a Postgres store does when the database is gone."""
+    from mcp_airlock.store import MemoryStore
+
+    class Store(MemoryStore):
+        pass
+
+    async def fail(*a, **kw):
+        raise error
+
+    setattr(Store, method, fail)
+    return Store()
+
+
+@pytest.mark.parametrize("method, tool, extra", [
+    ("usage_sum", "set_replicas", {}),  # evaluate: the window pre-check
+    ("usage_reserve", "set_replicas", {}),  # reserve: the atomic charge
+    ("is_approved", "delete_service", "token"),  # verify_confirmation in oob mode
+    ("consume_once", "delete_service", "accept"),  # the key burn after the yes
+])
+async def test_a_store_that_does_not_answer_denies_the_gated_call(upstream, audit_path, caplog, method, tool, extra):
+    psycopg = pytest.importorskip("psycopg")
+    al = make_airlock(upstream, audit_path, env="dev", store=failing_store(method, psycopg.OperationalError("PoolTimeout: couldn't get a connection")))
+    async with serving(al) as c:
+        if extra:
+            token = (await call(c, "delete_service", {"name": "api"}))["requestState"] if method != "is_approved" else None
+            if method == "is_approved":
+                al.approval_mode, al.webhook = "oob", "https://hooks/x"  # the retry asks the store whether the link was pressed
+                token = al.issue_token("alice", "delete_service", {"name": "api"})[0]
+            extra = accept(token) if extra == "accept" else {"requestState": token}
+        args = {"names": ["api"], "replicas": 1} if tool == "set_replicas" else {"name": "api"}
+        with caplog.at_level("WARNING", logger="mcp_airlock"):
+            res = await call(c, tool, args, extra=extra or {})
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "store.unavailable", res
+    assert "the store did not answer" in res["content"][0]["text"] and "PoolTimeout" not in res["content"][0]["text"]
+    rows = [x for x in audit_rows(audit_path) if x["rule_id"] == "store.unavailable"]
+    assert [x["phase"] for x in rows] == ["intent", "outcome"] and all(x["verdict"] == "deny" for x in rows)
+    assert rows[0]["detail"].startswith("OperationalError: PoolTimeout") and rows[0]["tier"] in ("L2", "L3")
+    assert "Traceback" not in caplog.text and "OperationalError" in caplog.text
+    assert not [x for x in upstream.CALLS if x["tool"] == tool and not x["args"].get("dry_run")]  # nothing executed
+
+
+async def test_a_non_store_exception_is_still_an_internal_error(upstream, audit_path):
+    al = make_airlock(upstream, audit_path, env="dev", store=failing_store("usage_sum", RuntimeError("bug")))
+    async with serving(al) as c:
+        r = await rpc(c, "tools/call", {"name": "set_replicas", "arguments": {"names": ["api"], "replicas": 1}})
+    assert r.status_code == 500 and r.json()["error"]["message"] == "airlock: internal error"
+    assert audit_rows(audit_path)[-1]["rule_id"] == "internal.error"
+
+
+async def test_a_postgres_store_with_no_database_denies_within_the_connect_timeout(upstream, audit_path, monkeypatch):
+    pytest.importorskip("psycopg_pool")
+    from mcp_airlock.store import PostgresStore
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    store = PostgresStore("postgresql://airlock:airlock@127.0.0.1:1/airlock")  # port 1: nothing listens, connect is refused
+    al = make_airlock(upstream, audit_path, store=store)
+    try:
+        async with serving(al) as c:
+            res = await call(c, "delete_service", {"name": "api"})
+    finally:
+        await store.aclose()
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "store.unavailable", res
+    rows = audit_rows(audit_path)
+    assert [x["rule_id"] for x in rows] == ["store.unavailable"] * 2 and rows[0]["tier"] == "L2"

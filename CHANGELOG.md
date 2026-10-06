@@ -112,6 +112,10 @@
 * A `traceparent`, `tracestate` or `baggage` in `_meta` that is not a string is ignored and a new
   trace is started, instead of an unaudited bare 500 for any caller. The three are rebuilt from the
   span's context before the call is forwarded, so a bad value never reaches the upstream.
+* A store that does not answer (a pool timeout, a cut connection, a closed store) now denies the
+  gated call with rule `store.unavailable`, as the README said it would: a tool error, an intent
+  and an outcome record saying `deny` with the store's error in `detail`, and one warning line in
+  the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record.
 * `airlock-audit query` reads the rotated files too, oldest first.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.

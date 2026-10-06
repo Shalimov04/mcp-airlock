@@ -379,11 +379,11 @@ tools:
 `tier.unassigned`, `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`,
 `tier.L2.confirmed`, `tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`,
 `blast_radius.per_principal`, `dry_run.unsupported`, `catalog.unavailable`,
-`catalog.pin_mismatch`, `principal.missing`, `protocol.<code>`, `passthrough` (`tools/list` или
-`server/discover`), `mrtr.pending`, `mrtr.declined`, `mrtr.replay`, `mrtr.expired`,
-`mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`,
-`request.too_large`, `upstream.too_large`, `upstream.unreachable`, `upstream.encoded`,
-`upstream.bad_reply`, `internal.error`.
+`catalog.pin_mismatch`, `store.unavailable`, `principal.missing`, `protocol.<code>`,
+`passthrough` (`tools/list` или `server/discover`), `mrtr.pending`, `mrtr.declined`,
+`mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`, `mrtr.approved_oob`,
+`mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`,
+`upstream.unreachable`, `upstream.encoded`, `upstream.bad_reply`, `internal.error`.
 
 `SIGHUP` перечитывает файл политики и, если он задан, файл пинов, как одну пару. Файл, который
 не загрузился, оставляет текущие политику и пины, а ошибка пишется в лог. Имя окружения, режим
@@ -613,7 +613,10 @@ mode работает. Но оба таймаута это настройки с
 `AIRLOCK_STORE_CONNECT_TIMEOUT`, минимум 2 с) ограничивает каждый вызов хранилища: и ожидание
 соединения из пула, и работу на нём. Если база недоступна, каждый вызов хранилища падает
 примерно по таймауту подключения (самое большее через двойной таймаут, когда сервер принял
-соединение и перестал отвечать), а проверяемый вызов отклоняется. Неудачная попытка
+соединение и перестал отвечать), а проверяемый вызов отклоняется с `store.unavailable`: это
+tool error с идентификатором правила, записанный в аудит как отказ, по образцу
+`catalog.unavailable`, с ошибкой хранилища в `detail` и одной строкой предупреждения в логе.
+`tools/list` к хранилищу не обращается и не страдает. Неудачная попытка
 подключения бросается по истечении того же таймаута, поэтому хранилище восстанавливается
 через несколько секунд после возвращения базы. Соединение, которое к этому моменту не
 ответило, обрывается и выбрасывается из пула, в том числе то, что простаивало в нём. Занятый
