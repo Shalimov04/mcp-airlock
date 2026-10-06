@@ -190,9 +190,12 @@ The values are documented in `charts/mcp-airlock/values.yaml`. The points that m
   `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN`, `OTEL_EXPORTER_OTLP_HEADERS` and the JWT
   secret; the chart refuses them in `env`. A credential that lives in another Secret or a
   ConfigMap goes in `extraEnv` as a plain Kubernetes env entry with a `valueFrom` (or in
-  `envFrom`). Do not put credentials in the `upstream` URL either, they end up in the pod spec.
-  Whole numbers in a values file, such as the byte limits in `env` or `extraArgs`, may be left
-  unquoted.
+  `envFrom`). An `extraEnv` name may replace one of the optional `existingSecret` keys; a name
+  that is also in `env`, or `AIRLOCK_STORE_DSN` and `AIRLOCK_SECRET` with `sharedStore`, is
+  refused, since one container cannot set a name twice. Do not put credentials in the `upstream`
+  URL either, they end up in the pod spec. Whole numbers in a values file, such as the byte
+  limits in `env` or `extraArgs`, may be left unquoted; a plain `value` in `extraEnv` must be a
+  string.
 * **More than one replica.** Create a Secret with `AIRLOCK_STORE_DSN` and `AIRLOCK_SECRET`, then
   `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. The chart refuses
   more replicas without `sharedStore`. `AIRLOCK_SECRET` is only set together with the shared
@@ -208,8 +211,9 @@ The values are documented in `charts/mcp-airlock/values.yaml`. The points that m
 * **Policy changes.** A new policy rolls the pods; SIGHUP reload is not used here. A pod that
   is told to stop keeps serving for `preStopSeconds` (5) first, so kube-proxy has dropped it from
   the Service before the listener closes and a rolling update refuses no connections; the native
-  `sleep` hook needs Kubernetes 1.30+. `terminationGracePeriodSeconds` (30) covers that sleep,
-  the open calls and the OTLP flush.
+  `sleep` hook needs Kubernetes 1.30+, so on an older cluster set `preStopSeconds=0` (the chart
+  refuses the sleep there, the pod spec would be rejected otherwise).
+  `terminationGracePeriodSeconds` (30) covers that sleep, the open calls and the OTLP flush.
 * **Strictness.** `strict` is on, so any [startup warning](#startup-warnings) stops the pod. The
   log says why.
 * **Approve page.** `/approve` is on the same Service, so put it behind SSO, as the

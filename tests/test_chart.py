@@ -23,7 +23,8 @@ def render(tmp_path: Path, values: str = "", *sets: str) -> list[dict]:
         f.write_text(values)
         cmd += ["-f", str(f)]
     for s in sets:
-        cmd += ["--set", s]
+        # a plain `k=v` is a --set; an option such as --kube-version=1.29.0 is passed through
+        cmd += [s] if s.startswith("--") else ["--set", s]
     run = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stderr
     return [d for d in yaml.safe_load_all(run.stdout) if d]
@@ -105,6 +106,30 @@ def test_extra_env_and_env_from_are_rendered_as_given(tmp_path):
     assert "envFrom" not in container(render(tmp_path))
 
 
+def test_an_extra_env_name_that_is_also_set_elsewhere_is_refused(tmp_path):
+    # Server-side apply rejects a container env with one name twice, client-side apply lets the
+    # later entry win silently; both are worse than a chart message.
+    msg = refusal(tmp_path, 'env: {FOO: "1"}\nextraEnv: [{name: FOO, value: "2"}]\n')
+    assert "FOO is set in both env and extraEnv" in msg
+    msg = refusal(tmp_path, "sharedStore: true\nexistingSecret: s\nextraEnv:\n"
+                            "  - name: AIRLOCK_SECRET\n    valueFrom: {secretKeyRef: {name: a, key: b}}\n")
+    assert "AIRLOCK_SECRET comes from existingSecret when sharedStore=true" in msg
+    msg = refusal(tmp_path, 'extraEnv: [{name: A, value: "1"}, {name: A, value: "2"}]\n')
+    assert "A is listed twice in extraEnv" in msg
+    assert "needs a name" in refusal(tmp_path, 'extraEnv: [{value: "1"}]\n')
+    # without sharedStore the key is not rendered by the chart, so an own source is fine
+    e = env(render(tmp_path, "extraEnv:\n  - name: AIRLOCK_SECRET\n"
+                             "    valueFrom: {secretKeyRef: {name: a, key: b}}\n"))
+    assert e["AIRLOCK_SECRET"]["valueFrom"]["secretKeyRef"] == {"name": "a", "key": "b"}
+
+
+def test_an_extra_env_value_must_be_a_string(tmp_path):
+    # extraEnv is rendered as given, so an unquoted number reaches the API as a number, which
+    # it rejects; env goes through the scalar helper and may stay unquoted
+    assert "extraEnv value for NUM must be a string" in refusal(tmp_path, "extraEnv: [{name: NUM, value: 5}]\n")
+    assert env(render(tmp_path, 'extraEnv: [{name: NUM, value: "5"}]\n'))["NUM"]["value"] == "5"
+
+
 def test_pre_stop_sleep_and_grace_period(tmp_path):
     docs = render(tmp_path)
     assert container(docs)["lifecycle"] == {"preStop": {"sleep": {"seconds": 5}}}
@@ -114,3 +139,13 @@ def test_pre_stop_sleep_and_grace_period(tmp_path):
     assert pod(docs)["terminationGracePeriodSeconds"] == 45
     assert "terminationGracePeriodSeconds must exceed preStopSeconds" in refusal(
         tmp_path, "preStopSeconds: 10\nterminationGracePeriodSeconds: 10\n")
+    # a negative sleep passed the grace-period check and was left for the API server to reject
+    assert "preStopSeconds must be 0 or more" in refusal(tmp_path, "preStopSeconds: -1\n")
+
+
+def test_pre_stop_sleep_is_refused_on_a_cluster_older_than_1_30(tmp_path):
+    # such an API server drops the sleep field and then rejects a preStop with no handler
+    msg = refusal(tmp_path, "", "--kube-version=1.29.5")
+    assert "needs Kubernetes 1.30+" in msg and "set preStopSeconds=0" in msg
+    assert "lifecycle" not in container(render(tmp_path, "preStopSeconds: 0\n", "--kube-version=1.29.5"))
+    assert "lifecycle" in container(render(tmp_path, "", "--kube-version=1.30.0"))

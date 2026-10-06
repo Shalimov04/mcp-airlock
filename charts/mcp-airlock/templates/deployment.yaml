@@ -31,13 +31,42 @@
 {{- fail (printf "%s holds a credential: put it in existingSecret, not in env" $k) }}
 {{- end }}
 {{- end }}
+{{- /* A name set twice in one container is rejected by server-side apply and silently resolved
+       by client-side apply, so every collision is refused here. The optional existingSecret keys
+       are the one exception: an extraEnv entry of the same name replaces them (see below). */}}
+{{- $own := list }}
 {{- range .Values.extraEnv }}
+{{- if not .name }}
+{{- fail "every extraEnv entry needs a name" }}
+{{- end }}
+{{- if has .name $own }}
+{{- fail (printf "%s is listed twice in extraEnv" .name) }}
+{{- end }}
+{{- $own = append $own .name }}
+{{- if hasKey (default dict $.Values.env) .name }}
+{{- fail (printf "%s is set in both env and extraEnv: keep one" .name) }}
+{{- end }}
+{{- if and $.Values.sharedStore (has .name (list "AIRLOCK_STORE_DSN" "AIRLOCK_SECRET")) }}
+{{- fail (printf "%s comes from existingSecret when sharedStore=true: drop it from extraEnv" .name) }}
+{{- end }}
 {{- if and (has .name $credentials) (hasKey . "value") }}
 {{- fail (printf "%s holds a credential: put it in existingSecret, or give extraEnv a valueFrom, not a value" .name) }}
 {{- end }}
+{{- /* extraEnv is rendered as given, so an unquoted number would reach the API as a number */}}
+{{- if and (hasKey . "value") (not (kindIs "string" .value)) }}
+{{- fail (printf "extraEnv value for %s must be a string: quote it" .name) }}
+{{- end }}
+{{- end }}
+{{- if lt (int .Values.preStopSeconds) 0 }}
+{{- fail "preStopSeconds must be 0 or more" }}
 {{- end }}
 {{- if le (int .Values.terminationGracePeriodSeconds) (int .Values.preStopSeconds) }}
 {{- fail "terminationGracePeriodSeconds must exceed preStopSeconds, or the shutdown and the OTLP flush get no time" }}
+{{- end }}
+{{- /* an older API server drops the sleep field and rejects a preStop with no handler; under
+       helm template without --kube-version this is Helm's own recent default and passes */}}
+{{- if and (gt (int .Values.preStopSeconds) 0) (semverCompare "<1.30-0" .Capabilities.KubeVersion.Version) }}
+{{- fail (printf "the native preStop sleep needs Kubernetes 1.30+, this cluster is %s: set preStopSeconds=0" .Capabilities.KubeVersion.Version) }}
 {{- end }}
 {{- $secret := include "mcp-airlock.secretName" . }}
 apiVersion: apps/v1
@@ -113,9 +142,8 @@ spec:
             - name: {{ $k }}
               value: {{ include "mcp-airlock.scalar" $v }}
             {{- end }}
-            {{- $own := list }}
-            {{- range .Values.extraEnv }}{{ $own = append $own .name }}{{ end }}
-            {{- /* an extraEnv entry of the same name replaces the optional existingSecret key */}}
+            {{- /* an extraEnv entry of the same name replaces the optional existingSecret key;
+                   every other collision was refused above */}}
             {{- range list "AIRLOCK_JWT_SECRET" "AIRLOCK_UPSTREAM_AUTH" "AIRLOCK_APPROVAL_WEBHOOK" "AIRLOCK_AUDIT_DSN" "OTEL_EXPORTER_OTLP_HEADERS" }}
             {{- if not (has . $own) }}
             - name: {{ . }}

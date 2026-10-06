@@ -33,7 +33,10 @@ sharedStore: false
 env: {}
 # More env entries as Kubernetes writes them, for a value from another Secret or a ConfigMap, e.g.
 # [{name: OTEL_EXPORTER_OTLP_HEADERS, valueFrom: {secretKeyRef: {name: otel, key: headers}}}].
-# Rendered after env and the existingSecret keys, so $(VAR) may refer to those.
+# Rendered as given, so a plain `value` must be a string: quote a number. Rendered after env and
+# the existingSecret keys, so $(VAR) may refer to those. A name here replaces the optional
+# existingSecret key of that name; a name that is also in env, or AIRLOCK_STORE_DSN and
+# AIRLOCK_SECRET with sharedStore, is refused, since one container cannot set a name twice.
 extraEnv: []
 # envFrom entries (secretRef, configMapRef) as Kubernetes writes them.
 envFrom: []
@@ -43,7 +46,8 @@ strict: true
 extraArgs: []
 # Seconds the pod keeps serving after SIGTERM is due, so kube-proxy has dropped the endpoint
 # before uvicorn closes its listener; without it a rolling update refuses a few connects. The
-# native sleep action needs Kubernetes 1.30+. 0 leaves the hook out.
+# native sleep action needs Kubernetes 1.30+: on an older cluster set 0, which leaves the hook
+# out (the chart refuses the sleep there instead of letting the API server reject the pod).
 preStopSeconds: 5
 # preStopSeconds, plus the open calls, plus the OTLP flush (up to the exporter timeout, 10 s by
 # default). Must exceed preStopSeconds.

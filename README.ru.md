@@ -187,9 +187,12 @@ helm install airlock charts/mcp-airlock \
 * **Секреты кладите в `existingSecret`, не в `env`.** Это `AIRLOCK_UPSTREAM_AUTH`,
   `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN`, `OTEL_EXPORTER_OTLP_HEADERS` и JWT-секрет;
   чарт не принимает их в `env`. Секрет, который лежит в другом Secret или в ConfigMap, задаётся
-  в `extraEnv` обычной записью env Kubernetes с `valueFrom` (или через `envFrom`). Учётные данные
-  в URL `upstream` тоже не кладите, они попадут в спецификацию пода. Целые числа в файле values,
-  например лимиты в байтах в `env` и `extraArgs`, можно не брать в кавычки.
+  в `extraEnv` обычной записью env Kubernetes с `valueFrom` (или через `envFrom`). Имя в
+  `extraEnv` может заменить один из необязательных ключей `existingSecret`; имя, которое есть и
+  в `env`, или `AIRLOCK_STORE_DSN` и `AIRLOCK_SECRET` при `sharedStore`, чарт не принимает: одно
+  имя в контейнере нельзя задать дважды. Учётные данные в URL `upstream` тоже не кладите, они
+  попадут в спецификацию пода. Целые числа в файле values, например лимиты в байтах в `env` и
+  `extraArgs`, можно не брать в кавычки; простое `value` в `extraEnv` должно быть строкой.
 * **Больше одной реплики.** Создайте Secret с `AIRLOCK_STORE_DSN` и `AIRLOCK_SECRET`, затем
   `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. Без `sharedStore`
   чарт больше одной реплики не принимает. `AIRLOCK_SECRET` задаётся только вместе с общим
@@ -206,8 +209,10 @@ helm install airlock charts/mcp-airlock \
 * **Смена политики.** Новая политика перезапускает поды; перезагрузка по SIGHUP тут не
   используется. Под, которому велели остановиться, сначала ещё `preStopSeconds` (5) секунд
   обслуживает запросы, чтобы kube-proxy успел убрать его из Service до закрытия сокета, и
-  rolling update не отказывает соединениям; родной хук `sleep` требует Kubernetes 1.30+.
-  `terminationGracePeriodSeconds` (30) покрывает эту паузу, открытые вызовы и сброс очереди OTLP.
+  rolling update не отказывает соединениям; родной хук `sleep` требует Kubernetes 1.30+, так что
+  на более старом кластере задайте `preStopSeconds=0` (чарт там отказывает в паузе сам, иначе
+  API-сервер отверг бы под). `terminationGracePeriodSeconds` (30) покрывает эту паузу, открытые
+  вызовы и сброс очереди OTLP.
 * **Строгий режим.** `strict` включён, так что любое
   [предупреждение при старте](#предупреждения-при-старте) останавливает под. Причина в логе.
 * **Страница approve.** `/approve` лежит на том же Service, поэтому закройте её SSO, как сказано
