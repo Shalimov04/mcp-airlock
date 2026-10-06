@@ -59,6 +59,12 @@
 * The approve page responses carry `Cache-Control: no-store`, `Referrer-Policy: no-referrer`,
   `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a Content-Security-Policy with
   `frame-ancestors 'none'`.
+* A `tools/call` retried with a `requestState` whose confirmation was already executed or declined,
+  and no answer, is refused with `mrtr.replay` instead of staying `pending` until the token
+  expires. In `inband` mode without a webhook such a retry gets the question again with a fresh
+  `requestState`, since there is nothing to wait for.
+* The `pending` result carries `verdict: confirm` and `rule_id: mrtr.pending` in `_meta`, like
+  every other `tools/call` result, and its message says when an in-band accept was ignored.
 
 ## 0.3.0 - 2026-10-02
 

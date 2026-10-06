@@ -226,8 +226,8 @@ async def test_the_environment_stays_the_one_the_process_runs_in(upstream, audit
         issued = await call(c, "delete_service", {"name": "api"})  # the token is bound to the environment of its day
         write_policy(tmp_path / "policy.yaml", {**policy_data(), "environment": "staging"})
         assert al.reload().ok and al.engine.policy.environment == expect
-        retry = await call(c, "delete_service", {"name": "api"}, extra={"requestState": issued["requestState"]})
-        assert retry["_meta"][META + "status"] == "pending"  # still bound, not mrtr.mismatch: a reload voids no confirmation
+        retry = await call(c, "delete_service", {"name": "api"}, extra=accept(issued["requestState"]))
+        assert retry["_meta"][META + "rule_id"] == "tier.L2.confirmed"  # still bound, not mrtr.mismatch: a reload voids no confirmation
 
 
 # ---------------------------------------------------------------- what carries over

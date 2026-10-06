@@ -285,8 +285,14 @@ class Airlock:
         strict = self.approval_mode == "oob" or ("m" in claims and claims["m"] != "inband")
         if answer is None or (in_band and strict):
             # No answer for our question (or, in oob mode, one that does not count): approved out-of-band, or still waiting (nothing burned)
+            if await self.engine.store.is_consumed(claims["k"]):
+                return "deny:mrtr.replay", None  # executed or declined: "pending" would have the client poll until expiry
             if await self.engine.store.is_approved(claims["k"]):
                 return "accepted", claims
+            if not strict and not self.webhook:
+                # No approval channel but the client itself, and it sent no answer: nothing to wait for, so the
+                # call is treated as new and the question is asked again (a fresh token; this one stays unused).
+                return "none", None
             return ("pending" if answer is None else "pending:ignored"), claims
         if in_band:
             return "accepted", claims
@@ -414,10 +420,12 @@ class Airlock:
             detail = "in-band accept ignored (approval mode oob)" if mode == "pending:ignored" else None
             for phase in ("intent", "outcome"):
                 self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
+            message = ("Awaiting approval. " + ("The in-band accept was ignored (approval mode oob). " if detail else "")
+                       + "Retry with this requestState once the approver has confirmed.")
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
                 "resultType": "input_required", "requestState": params["requestState"],
-                "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"],
-                          META + "message": "Awaiting approval. Retry with this requestState once the approver has confirmed."}}})
+                "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"], META + "message": message,
+                          META + "verdict": "confirm", META + "rule_id": "mrtr.pending"}}})
         if d.rule_id == "tier.L2.confirmed":  # the one path that executes for real: burn the key first, atomically
             if not await self.engine.store.consume_once(claims["k"], claims["exp"]):
                 self._audit_deny(base, "mrtr.replay", d.tier, "idempotency key already used")

@@ -40,8 +40,8 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
 6. Writes two audit records, one before the upstream call and one after, whatever happened.
 
 Refusals come back as tool results with `isError: true`, not as protocol errors, so the
-model sees why and can do something else. Every result carries the verdict and the rule
-that produced it in `_meta`.
+model sees why and can do something else. Every `tools/call` result, a pending one included,
+carries the verdict and the rule that produced it in `_meta`.
 
 The proxy accepts three methods: `tools/call` as above, `tools/list` and `server/discover`.
 A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of
@@ -384,14 +384,17 @@ only ever sees `requestState`, cannot forge it. Opening the link shows a page wi
 button; the `GET` does nothing (link previews and prefetchers would otherwise approve
 things), the `POST` records the approval. The agent finds out by repeating the call
 with `requestState` and no `inputResponses`: it gets `input_required` back with
-`status: pending` until the button is pressed, then the call runs. A human takes minutes; the
-retry loop built into the official Python SDK client gives up after about two seconds of
-polling with `InputRequiredRoundsExceededError`. Catch it and retry later with the same
-`requestState`.
+`status: pending` (and `verdict: confirm`, `rule_id: mrtr.pending` in `_meta`) until the button
+is pressed, then the call runs. A human takes minutes; the retry loop built into the official
+Python SDK client gives up after about two seconds of polling with
+`InputRequiredRoundsExceededError`. Catch it and retry later with the same `requestState`.
+A retry without an answer for a key that was already executed or declined is refused with
+`mrtr.replay`, not left pending. In `inband` mode without a webhook there is nothing to wait
+for, so such a retry gets the question again, with a fresh `requestState`.
 
-In `oob` mode an in-band `accept` leaves the call `pending` and the audit record says the
-accept was ignored; a decline still burns the key. The mode travels in the token: an `oob`
-token or an `oob` replica ignores the in-band `accept`.
+In `oob` mode an in-band `accept` leaves the call `pending`; the result's message and the audit
+record say the accept was ignored. A decline still burns the key. The mode travels in the token:
+an `oob` token or an `oob` replica ignores the in-band `accept`.
 
 A failed webhook post is logged as the exception class and the HTTP status, never the URL,
 which holds the Telegram bot token or the Slack secret path. In `oob` mode a failed post
