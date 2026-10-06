@@ -67,6 +67,15 @@ def probe(port: int, env=None, cwd=None) -> int:
 
 
 @pytest.mark.parametrize("name", FILES)
+def test_build_stage_compiles_bytecode(name):
+    # The venv is root-owned and the process runs as 65532 on a read-only root, so the .pyc files
+    # can only come from the build; without them every start pays the import cost.
+    text = (ROOT / name).read_text()
+    assert "ENV UV_COMPILE_BYTECODE=1" in text
+    assert text.index("ENV UV_COMPILE_BYTECODE=1") < text.index("RUN uv sync")
+
+
+@pytest.mark.parametrize("name", FILES)
 def test_both_images_probe_healthz_on_the_exposed_port(name):
     text = (ROOT / name).read_text()
     expose = re.search(r"^EXPOSE (\d+)", text, re.M).group(1)

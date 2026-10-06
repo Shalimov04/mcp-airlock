@@ -1,5 +1,8 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
 WORKDIR /app
+# .pyc at build time: the venv is root-owned and the root filesystem may be read-only, so the
+# process (uid 65532) could never write them, and every start would pay the import cost
+ENV UV_COMPILE_BYTECODE=1
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable --extra postgres --extra otlp
