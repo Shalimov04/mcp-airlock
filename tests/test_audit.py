@@ -790,6 +790,29 @@ def test_a_torn_tail_is_cut_even_when_it_cannot_be_kept_aside(tmp_path, capsys, 
     assert "not kept:" in caplog.text
 
 
+def test_a_torn_live_file_is_cut_to_nothing_and_the_chain_goes_on_from_the_rotated_file(tmp_path, capsys):
+    path = tmp_path / "a.jsonl"
+    rotated = chained(tmp_path / "a.jsonl.1", 2)
+    path.write_bytes(TORN)  # a crash in the first write after a rotation
+    sink = AuditLog(path)
+    write_n(sink, 1, start=2)
+    sink.close()
+    assert ids_in(path) == ["c002"] and jsonl_rows(path)[0]["prev"] == jsonl_rows(rotated)[-1]["hash"]
+    assert path.with_name("a.jsonl.torn").read_bytes() == TORN + b"\n"
+    assert verify_cli(capsys, rotated, path)[0] == 0
+
+
+def test_a_blank_tail_after_a_bad_line_cuts_nothing(tmp_path, capsys):
+    path = chained(tmp_path / "a.jsonl", 1)
+    with path.open("ab") as f:
+        f.write(b"garbage\n" + b" " * 7)  # the bad line has its newline: it is not the torn tail, and is not moved
+    sink = AuditLog(path)
+    write_n(sink, 1, start=1)
+    sink.close()
+    assert not path.with_name("a.jsonl.torn").exists() and lines_of(path)[1] == "garbage"
+    assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:2: not JSON")
+
+
 def test_concurrent_writers_keep_one_chain_through_rotations(tmp_path, capsys):
     n = line_size(tmp_path)
     sink = AuditLog(tmp_path / "a.jsonl", max_bytes=5 * n, keep=100)

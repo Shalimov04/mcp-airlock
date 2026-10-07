@@ -141,9 +141,9 @@ def _tail(path: Path) -> tuple[list[bytes], bytes, int]:
                 buf = f.read(step) + buf
     except OSError:  # missing or unreadable
         return [], b"", 0
-    lines = _lines(buf)
-    if lines and not buf.endswith(b"\n") and _parsed(lines[-1]) is None:
-        return lines[:-1], lines[-1], pos + buf.rfind(b"\n") + 1  # rfind is -1 when buf is the whole file
+    lines, at = _lines(buf), buf.rfind(b"\n") + 1  # rfind is -1 when buf is the whole file
+    if buf[at:].strip() and _parsed(buf[at:]) is None:  # only the bytes after the last newline: a blank tail is no line
+        return lines[:-1], buf[at:], pos + at
     return lines, b"", 0
 
 
