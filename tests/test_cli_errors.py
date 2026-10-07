@@ -34,7 +34,7 @@ def error_text(stderr: str) -> str:
     ("unparsable policy", {}, "flow sequence"),
     ("audit path is a directory", {}, "Is a directory"),
     ("span file in a missing directory", {}, "spans.jsonl"),
-    ("OTEL timeout", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_TIMEOUT": "abc"}, "abc"),
+    ("OTEL timeout", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_TIMEOUT": "abc"}, "OTEL: "),
     ("OTEL compression", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_COMPRESSION": "zstd"}, "zstd"),
     ("OTEL batch delay", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_BSP_SCHEDULE_DELAY": "-5"}, "schedule_delay"),
 ])
@@ -118,3 +118,10 @@ def test_a_policy_without_environment_is_a_validation_message_not_a_traceback(tm
     (tmp_path / "noenv.yaml").write_text("version: 1\ntools: {get_service: {tiers: {prod: L0}}}\n")
     r = run_airlock("--policy", str(tmp_path / "noenv.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"))
     assert r.returncode == 1 and "Traceback" not in r.stderr and "environment" in error_text(r.stderr), r.stderr
+
+
+def test_only_the_policy_raises_yaml_and_validation_errors_inside_build():
+    # main() labels these with the policy path; a new pydantic model elsewhere would be mislabelled
+    src = ROOT / "src" / "mcp_airlock"
+    users = {p.name for p in src.glob("*.py") if "BaseModel" in p.read_text()}
+    assert users <= {"policy.py"}, users

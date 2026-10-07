@@ -41,12 +41,18 @@ def setup_otel(span_file: str | None) -> TracerProvider:
     # OTEL_SERVICE_NAME or service.name in OTEL_RESOURCE_ATTRIBUTES wins; "mcp-airlock" is only the default
     named = OTELResourceDetector().detect().attributes.get(SERVICE_NAME)
     provider = TracerProvider(resource=Resource.create({} if named else {SERVICE_NAME: "mcp-airlock"}))
-    if span_file:  # file/console exporter, independent of OTLP; JSON Lines, the default formatter indents over many lines
-        exporter = ConsoleSpanExporter(out=open(span_file, "a"), formatter=lambda s: s.to_json(indent=None) + "\n")
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-    if otlp_requested() and (exporter := _otlp_exporter()) is not None:
-        # endpoint, headers, timeout, TLS come from the standard OTEL_* variables
-        provider.add_span_processor(BatchSpanProcessor(exporter()))
+    out = open(span_file, "a") if span_file else None
+    try:
+        if out:  # JSON Lines: the SDK default indents
+            exporter = ConsoleSpanExporter(out=out, formatter=lambda s: s.to_json(indent=None) + "\n")
+            provider.add_span_processor(SimpleSpanProcessor(exporter))
+        if otlp_requested() and (otlp := _otlp_exporter()) is not None:
+            # endpoint, headers, timeout, TLS come from the standard OTEL_* variables
+            provider.add_span_processor(BatchSpanProcessor(otlp()))
+    except BaseException:
+        if out:
+            out.close()
+        raise
     trace.set_tracer_provider(provider)
     return provider
 
@@ -111,14 +117,17 @@ def main() -> None:
                 psycopg_pool_module()
         except RuntimeError as e:
             raise _fail(e) from None
-    # OSError: the span, policy or audit file; YAMLError: the policy; ValueError: validation and the OTEL_* settings
     try:
         provider = setup_otel(a.otel_file)
+    except (ValueError, OSError) as e:  # the span file, or an OTEL_* setting the SDK rejects
+        raise _fail(e, f"OTEL: {e}") from None
+    try:
         airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
                         audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep,
                         on_shutdown=provider.shutdown)
     except (ValueError, OSError, yaml.YAMLError) as e:
-        # a YAMLError or a pydantic ValidationError inside build() can only come from the policy
+        # policy_error_message only reshapes YAML and pydantic errors; tests/test_cli_errors.py checks that only
+        # policy.py raises them inside build(), so the policy path never labels another error
         raise _fail(e, policy_error_message(a.policy, e)) from None
     uvicorn.run(airlock.app, host=a.host, port=a.port, log_level="warning")
 

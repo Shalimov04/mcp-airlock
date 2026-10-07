@@ -131,9 +131,9 @@ async def _catalog(http: httpx.AsyncClient, upstream: str, principal: str) -> di
         # a non-MCP endpoint answers with anything: say so instead of failing on a key or attribute
         result = body.get("result") if isinstance(body, dict) else None
         listed = result.get("tools") if isinstance(result, dict) else None
-        if not isinstance(result, dict) or not isinstance(listed, list | None):
+        if not isinstance(result, dict) or not isinstance(listed, list):
             raise RuntimeError(f"tools/list: {upstream} did not answer with a JSON-RPC result holding a tools list; is it an MCP endpoint?")
-        for t in listed or []:
+        for t in listed:
             if not isinstance(t, dict) or not isinstance(t.get("name"), str):
                 raise RuntimeError(f"tools/list: {upstream} listed a tool without a name")
             tools[t["name"]] = t
@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             findings = asyncio.run(diff(a.policy, a.upstream, a.env or env_var, a.principal, pins=a.pins) if a.cmd == "diff"
                                    else pin(a.policy, a.upstream, a.env or env_var, a.principal, a.pins))
-        except (httpx.HTTPError, RuntimeError, ValueError, OSError) as e:  # ValueError: not JSON; a net for the rest
+        except (httpx.HTTPError, RuntimeError, ValueError) as e:  # ValueError: the reply is not JSON
             findings = [("ERROR", "upstream", str(e))]
     for level, code, msg in findings:
         print(f"{level} {code}: {msg}")

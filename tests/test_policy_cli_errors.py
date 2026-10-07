@@ -85,18 +85,13 @@ def test_diff_with_an_invalid_policy_is_invalid_not_upstream(tmp_path, capsys):
 
 # ---------------------------------------------------------------- an upstream that is not an MCP server
 
-@pytest.mark.parametrize("body", [{}, [], {"result": None}, {"result": []}, {"result": {"tools": {}}}, "text",
+@pytest.mark.parametrize("body", [{}, [], {"result": None}, {"result": []}, {"result": {"tools": {}}}, {"result": {"tools": None}}, {"result": {}}, "text",
                                   {"result": {"tools": [{"inputSchema": {}}]}}, {"result": {"tools": [{"name": 1}]}},
                                   {"result": {"tools": ["get_service"]}}])
 async def test_catalog_rejects_a_response_of_the_wrong_shape(body):
     http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)))
     with pytest.raises(RuntimeError, match="tools/list"):
         await policy_cli._catalog(http, "http://x/mcp", "p")
-
-
-async def test_catalog_still_reads_a_result_without_tools():
-    http = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"result": {}})))
-    assert await policy_cli._catalog(http, "http://x/mcp", "p") == {}
 
 
 def test_main_diff_against_a_non_mcp_endpoint_is_one_error_line(capsys):
@@ -206,3 +201,30 @@ def test_main_diff_and_pin_read_airlock_env_unless_env_is_given(monkeypatch):
     policy_cli.main(["pin", str(EXAMPLE), "--upstream", "http://x/mcp"])
     policy_cli.main(["diff", str(EXAMPLE), "--upstream", "http://x/mcp", "--env", "prod"])
     assert seen == [None, "dev", "dev", "prod"]
+
+
+@pytest.mark.parametrize("cmd", ["diff", "pin"])
+@pytest.mark.parametrize("reply", [b'{"result":{"tools":null}}', b'{"result":{}}'])
+def test_main_upstream_without_a_tools_list_is_an_error_not_an_empty_catalog(tmp_path, capsys, cmd, reply):
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    pins = tmp_path / "pins.json"
+    try:
+        argv = [cmd, str(EXAMPLE), "--upstream", f"http://127.0.0.1:{srv.server_address[1]}/mcp"]
+        assert policy_cli.main(argv + (["--pins", str(pins)] if cmd == "pin" else [])) == 1
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert one_line(capsys).startswith("ERROR upstream: ") and not pins.exists()
