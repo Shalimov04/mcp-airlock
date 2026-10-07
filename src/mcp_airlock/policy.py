@@ -8,7 +8,6 @@ import re
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from re import _constants as _sre, _parser as _sre_parser  # the stdlib's own parse tree; re has no public one
 from typing import Any, Literal
 
 import yaml
@@ -16,12 +15,29 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .store import USAGE_RETENTION_S, MemoryStore
 
+
+def _load_sre() -> tuple[Any, Any]:
+    """The stdlib's own regex parse tree; `re` has no public one. 3.11+ has it as re._parser/re._constants and keeps
+    sre_parse/sre_constants as deprecated aliases, so either name may disappear first."""
+    import importlib
+    for parser, constants in (("re._parser", "re._constants"), ("sre_parse", "sre_constants")):
+        try:
+            return importlib.import_module(constants), importlib.import_module(parser)
+        except ImportError:
+            continue
+    # without the parse tree the cost check cannot run, and a policy it never looked at must not load
+    raise RuntimeError("this Python has no regex parser module (re._parser, sre_parse): the where-regex cost check "
+                       "cannot run, so mcp-airlock refuses to start; use a Python version it supports")
+
+
+_sre, _sre_parser = _load_sre()
+
 # A where regex runs on the event loop with the GIL held, so its cost bounds how long one request can stall the
 # whole proxy. Patterns that can go exponential are refused at load (regex_risk), and so are those whose polynomial
 # degree the value cap below does not bound (regex_unbounded_repeats); for the rest the value length is capped,
 # and a longer value fails the rule.
 REGEX_MAX_CHARS = 1024
-REGEX_MAX_UNBOUNDED = 2  # unbounded repeats in a row a pattern may have: two is about a second at the cap, three is minutes
+REGEX_MAX_UNBOUNDED = 2  # unbounded repeats in a row a pattern may have: two is milliseconds at the cap, three seconds, four tens of seconds
 
 Tier = Literal["L0", "L1", "L2", "L3"]
 GROUP_PREFIX = "group:"  # a `principals` key for a group; never matched against the caller's own name
@@ -77,7 +93,7 @@ class WhereRule(BaseModel):
                                  "with a character the group cannot match elsewhere")
             if (n := regex_unbounded_repeats(self.regex)) > REGEX_MAX_UNBOUNDED:
                 raise ValueError(f"regex {self.regex!r} has {n} unbounded repeats in a row: on a {REGEX_MAX_CHARS}-character "
-                                 f"value it can run for minutes and freeze the proxy; use at most {REGEX_MAX_UNBOUNDED}, "
+                                 f"value it can run for seconds and freeze the proxy; use at most {REGEX_MAX_UNBOUNDED}, "
                                  "or separate them with a character the repeats cannot match")
         return self
 
@@ -151,8 +167,10 @@ _WHY = {"equals": "does not equal the required value", "in": "is not in the allo
 # the group has a fixed width (((ab){2})+) or when every iteration starts or ends with a character the rest of the
 # group never consumes ((\.[a-z]{1,63})*, (\d{1,3}\.){3}): the iteration boundaries are then fixed and nothing can
 # shift between them. Everything else is polynomial in the value length, of a degree given by the unbounded repeats
-# that run one after another and can take each other's characters: REGEX_MAX_CHARS bounds the quadratic case to
-# about a second, the cubic one already runs for minutes, so three or more are refused as well.
+# that run one after another and can take each other's characters. Measured with the stdlib re on '-' * n + '!':
+# two repeats take milliseconds at 1024 characters (.*-.*-prod: about 3 ms, 50 ms at 4096), three take one to a few
+# seconds (.*-.*-.*-prod: about a second, a minute at 4096) and four tens of seconds. The cap alone is enough for two;
+# three or more are refused, since one such call stalls every other request for seconds.
 
 _REPEATS = (_sre.MAX_REPEAT, _sre.MIN_REPEAT, _sre.POSSESSIVE_REPEAT)
 _ATOMS = (_sre.LITERAL, _sre.NOT_LITERAL, _sre.IN, _sre.ANY)

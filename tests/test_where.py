@@ -309,7 +309,7 @@ def test_a_pattern_that_can_take_exponential_time_is_a_load_error(pattern, why):
     ("a.*b.*c.*d.*", 3),  # the last repeat runs to the end of the value and has one place to stop
 ])
 def test_a_pattern_the_length_cap_does_not_bound_is_a_load_error(pattern, n):
-    with pytest.raises(ValidationError, match=f"{n} unbounded repeats in a row.*minutes"):
+    with pytest.raises(ValidationError, match=f"{n} unbounded repeats in a row.*seconds"):
         WhereRule.model_validate({"arg": "a", "regex": pattern})
 
 
@@ -420,3 +420,25 @@ async def test_confirmed_call_is_checked_again(client, airlock, upstream):
     airlock.engine.policy = lenient
     res = await call(client, "delete_service", {"name": "api"}, extra=accept(issued["requestState"]))
     assert res["isError"] is False and upstream.CALLS[-1]["args"] == {"name": "api", "dry_run": False}
+
+
+# ---------------------------------------------------------------- the regex parser module may be renamed
+def test_policy_falls_back_to_sre_parse_and_fails_closed_without_a_parser(monkeypatch):
+    import importlib
+    from mcp_airlock import policy as pol
+
+    real_import_module = importlib.import_module
+
+    def block(*names):
+        def fake(name, *a, **k):
+            if name in names:
+                raise ImportError(name)
+            return real_import_module(name, *a, **k)
+        monkeypatch.setattr(importlib, "import_module", fake)
+
+    block("re._parser")
+    sre, parser = pol._load_sre()
+    assert parser.__name__ == "sre_parse" and sre.__name__ == "sre_constants"
+    block("re._parser", "sre_parse")
+    with pytest.raises(RuntimeError, match="refuses to start"):
+        pol._load_sre()

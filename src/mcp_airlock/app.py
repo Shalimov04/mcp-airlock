@@ -39,7 +39,7 @@ from starlette.routing import Route
 
 from . import approvals, guard
 from . import pins as tool_pins
-from .audit import _wellformed, audit_from_env, redact, scrub
+from .audit import audit_from_env, redact, scrub, wellformed
 from .identity import IdentityConfig, Principal, resolve
 from .policy import Engine, Policy
 from .store import store_from_env
@@ -121,7 +121,8 @@ def _is_store_error(e: BaseException) -> bool:
     """A store that did not answer, as opposed to one that answered with a complaint: a DataError (a NUL in a
     principal), an IntegrityError or a missing table is a bug or a broken schema, which a retry never cures."""
     pg = sys.modules.get("psycopg")  # imported only when a Postgres store or sink is configured
-    if pg is not None and isinstance(e, (pg.OperationalError, pg.InterfaceError)):  # the pool's PoolTimeout and PoolClosed are OperationalErrors
+    # the pool's PoolTimeout and PoolClosed are OperationalErrors
+    if pg is not None and isinstance(e, (pg.OperationalError, pg.InterfaceError)):
         return True
     return isinstance(e, RuntimeError) and "store is closed" in str(e)  # PostgresStore after aclose()
 
@@ -383,13 +384,9 @@ class Airlock:
             return self._reject(rid, INVALID_PARAMS, "tools/call needs string 'name' and object 'arguments'", sub, method, None)
 
         parent = extract(headers) if "traceparent" in headers else extract(_trace_carrier(params))
-        span_name = f"execute_tool {tool}" if tool else method
+        span_name = _span_text(f"execute_tool {tool}" if tool else method)
         with _tracer.start_as_current_span(span_name, context=parent, kind=SpanKind.SERVER) as span:
-            span.set_attribute("gen_ai.operation.name", "execute_tool" if tool else method)
-            span.set_attribute("rpc.method", method)
-            if tool:
-                span.set_attribute("gen_ai.tool.name", tool)
-                span.set_attribute("gen_ai.tool.call.id", str(rid))
+            _request_attributes(span, method, tool, rid, who)
             trace_id = format_trace_id(span.get_span_context().trace_id)
             base = dict(call_id=uuid.uuid4().hex, principal=sub, method=method, tool=tool, args=args, trace_id=trace_id)
             if who is None:
@@ -399,7 +396,6 @@ class Airlock:
                 self._audit_deny(dict(base, args=None, method=_clip_name(method), tool=_clip_name(tool)),
                                  "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
                 return _rpc_error(rid, PRINCIPAL_REQUIRED, "airlock: principal required", status=401)
-            span.set_attribute("enduser.id", who.sub)
             try:
                 if method == "tools/call":
                     return await self._call(rid, body, params, headers, who, tool, args, base, span, engine)
@@ -806,9 +802,9 @@ class Airlock:
         ask = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
                "and declining cancels the request." if self.approval_mode == "oob" else "Confirm to execute for real.")
         # U+FFFD for a lone surrogate, as the audit does: this text is posted as UTF-8 to the webhook and saved for the page
-        message = _wellformed(f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
-                              f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
-                              f"{ask} Idempotency key: {key}")
+        message = wellformed(f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
+                             f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
+                             f"{ask} Idempotency key: {key}")
         meta = {**((preview or {}).get("_meta") or {}), META + "idempotency_key": key, META + "verdict": "confirm",
                 META + "rule_id": "tier.L2.confirm"}
         if preview_blocks is not None:
@@ -835,7 +831,7 @@ class Airlock:
             await self.engine.store.save_prompt(claims["k"], stored, claims["exp"])
         except Exception as e:
             log.warning("saving the approval prompt text failed: %s", type(e).__name__)
-        text = _wellformed(f"mcp-airlock approval request from {principal}\n") + message
+        text = wellformed(f"mcp-airlock approval request from {principal}\n") + message
         await approvals.notify(text, self.approve_link(result["requestState"]), webhook=self.webhook,
                                http=self.notify_http, telegram_chat=self.telegram_chat)
 
@@ -993,6 +989,23 @@ def _strip_meta(obj: dict[str, Any]) -> None:
     tools/list answer or a content block, each of which carries its own `_meta`."""
     if "_meta" in obj:
         obj["_meta"] = _upstream_meta(obj)
+
+
+def _span_text(text: Any) -> str:
+    """Client-chosen text on a span (tool name, method, principal, call id): the same credential scrub as the audit
+    detail, and cut like a pre-auth name, since trace backends keep spans where the audit log is rotated."""
+    return _clip_name(scrub(wellformed(str(text))))
+
+
+def _request_attributes(span: Any, method: str, tool: Any, rid: Any, who: Principal | None) -> None:
+    """The one place a request's client text reaches span attributes."""
+    span.set_attribute("gen_ai.operation.name", "execute_tool" if tool else _span_text(method))
+    span.set_attribute("rpc.method", _span_text(method))
+    if tool:
+        span.set_attribute("gen_ai.tool.name", _span_text(tool))
+        span.set_attribute("gen_ai.tool.call.id", _span_text(rid))
+    if who is not None:
+        span.set_attribute("enduser.id", _span_text(who.sub))
 
 
 def _clip_name(name: Any) -> Any:

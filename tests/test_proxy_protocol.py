@@ -711,3 +711,21 @@ async def test_a_postgres_store_with_no_database_denies_within_the_connect_timeo
     assert res["isError"] and res["_meta"][META + "rule_id"] == "store.unavailable", res
     rows = audit_rows(audit_path)
     assert [x["rule_id"] for x in rows] == ["store.unavailable"] * 2 and rows[0]["tier"] == "L2"
+
+
+# ---------------------------------------------------------------- client text on spans goes through the audit scrub
+async def test_span_attributes_scrub_client_chosen_text(upstream, audit_path):
+    secret_tool, secret_principal = "sk-0123456789abcdef", "Bearer eyJabc.def-ghi"
+    al = make_airlock(upstream, audit_path)
+    SPANS.clear()
+    async with serving(al) as c:
+        await rpc(c, "tools/call", {"name": f"get_{secret_tool}", "arguments": {}}, principal=f"u {secret_principal}")
+        await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}}, principal=f"u {secret_principal}",
+                  rid=f"id-{secret_tool}")
+    spans = [s for s in SPANS.get_finished_spans() if "enduser.id" in s.attributes]
+    assert len(spans) == 2
+    for span in spans:
+        text = span.name + " " + " ".join(str(v) for v in span.attributes.values())
+        assert "0123456789abcdef" not in text and "eyJabc" not in text
+        assert span.attributes["enduser.id"].startswith("u ")
+    assert spans[0].attributes["gen_ai.tool.name"].startswith("get_") and "[REDACTED]" in spans[0].attributes["gen_ai.tool.name"]

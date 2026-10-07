@@ -131,11 +131,17 @@
   crafted value (a repetition inside a repetition such as `(a+)+` or `(.*a){12}`, an alternation
   inside a repetition whose alternatives can start alike, a backreference) is refused when the
   policy loads and by `airlock-policy lint`, and so is one with three or more unbounded repeats
-  in a row that can take each other's characters (`.*-.*-.*-prod`), which runs for minutes on a
-  1024-character value; a regex is tried only on strings up to 1024 characters, and a longer value
-  fails the rule. `lint` warns about the quadratic patterns, two such repeats in a row
-  (`where_regex_cost`). One `get_service` call with a 32-character name used to block the event
-  loop, `/healthz` and `SIGTERM` for over a minute.
+  in a row that can take each other's characters (`.*-.*-.*-prod`: about a second on a
+  1024-character value, tens of seconds for four repeats); a regex is tried only on strings up to
+  1024 characters, and a longer value fails the rule. `lint` warns about two such repeats in a
+  row (`where_regex_cost`, milliseconds at the cap). The README lists the safe patterns the check
+  refuses anyway and how to rewrite them. If Python has neither `re._parser` nor `sre_parse`, the
+  policy fails to load instead of skipping the check. One `get_service` call with a 32-character
+  name used to block the event loop, `/healthz` and `SIGTERM` for over a minute.
+* Span attributes and the span name that carry client-chosen text (`gen_ai.tool.name`,
+  `gen_ai.tool.call.id`, `rpc.method`, `enduser.id`) go through the same credential scrub as the
+  audit `detail`, so a key-shaped tool name or principal no longer reaches the trace backend, and
+  they are cut at 128 characters. Patterns added to the scrub later apply to spans as well.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.
 * The approver of an out-of-band confirmation is recorded as `verified` only when the identity

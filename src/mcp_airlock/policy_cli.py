@@ -50,7 +50,7 @@ def lint(policy_path: str | Path, envs=()) -> list[Finding]:
             if w.regex is not None and (n := regex_unbounded_repeats(w.regex)) >= 2:
                 # the exponential and the cubic patterns are a load error; the quadratic ones load and run on the event loop
                 out.append(("WARN", "where_regex_cost", f"{name} has a where regex with {n} unbounded repeats in a row: matching "
-                            f"can take time quadratic in the value length, about a second at the cap of {REGEX_MAX_CHARS} chars "
+                            f"can take time quadratic in the value length, milliseconds at the cap of {REGEX_MAX_CHARS} chars "
                             "(a longer value fails the rule)"))
     for env in dict.fromkeys([*envs, p.environment]):
         if not any(env in r.tiers for r in p.tools.values()):

@@ -384,11 +384,18 @@ ends with a character the rest of the group cannot consume (`(\.[a-z]{1,63})*`,
 alternatives start apart (`(foo|bar)+`). The remaining patterns are polynomial, of a degree set
 by the unbounded repeats that run one after another and can take each other's characters
 (`.*-.*-prod` has two: `.*` can take a dash). A regex is tried only on strings up to 1024
-characters, and a longer value fails the rule with a message saying so, but that cap bounds only
-the quadratic case, at about a second per call: three or more such repeats (`.*-.*-.*-prod`,
-`.*.*.*.*x`) run for minutes within it and are refused as well. `lint` warns about the quadratic
-patterns (`where_regex_cost`); a repeat that must stop at a character it cannot match
-(`[^/]+/[^/]+/[^/]+`) is not counted.
+characters, and a longer value fails the rule with a message saying so. Measured with the stdlib
+`re` on a 1024-character worst-case value on a development machine: two such repeats take a few
+milliseconds, three (`.*-.*-.*-prod`) one to a few seconds, four (`.*.*.*.*x`) tens of seconds;
+each extra repeat multiplies the time by about the value length. So the cap is enough for two, and
+three or more are refused. `lint` warns about two (`where_regex_cost`); a repeat that must stop at
+a character it cannot match (`[^/]+/[^/]+/[^/]+`) is not counted.
+
+The refusal is a heuristic and errs on the safe side, so some safe patterns are refused too:
+`(\s*,\s*\w+)*`, `(\w+\s)*\w+`, `(?:[a-z]+ ?){1,3}` and `(.*a){2}` (a small fixed count) are all
+cheap in practice and still refused. To rewrite one: use a single character class with a length
+(`[\w\s,]{1,200}`, `[a-z ]{1,60}`), write the list so that every item is introduced by a character
+the item cannot contain (`\s*\w+(,\s*\w+)*`), or split the check over several `where` rules.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
@@ -415,7 +422,9 @@ front of it, re-runs the policy, burns the key, then charges the blast-radius co
 Burning is an atomic insert in the store, so two replicas cannot both execute the same
 confirmation. A decline burns the key too, and so does an upstream that turns out to be
 unreachable right after the yes: the key is burned before the call is sent and is never
-un-burned, so the agent has to ask for a new prompt (the blast-radius charge is given back).
+un-burned, so the agent has to ask for a new prompt (the blast-radius charge is given back). A store failure between burning the key and reserving
+the blast-radius window burns the confirmation the same way: the call is denied with
+`store.unavailable` and the human approves again.
 
 Before the prompt is issued the proxy asks the upstream for `tools/list` and looks at the
 tool's schema. If the tool declares `dry_run`, the dry run is forwarded and its output is
