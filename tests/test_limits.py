@@ -380,9 +380,11 @@ async def test_shutdown_closes_the_postgres_audit_connection(tmp_path):
                  MultiAudit(AuditLog(tmp_path / "audit.jsonl"), PostgresAuditLog(PG)))
     al.audit.write(phase="intent", call_id="shutdown", verdict="deny", rule_id="allowlist.deny")  # opens the connection
     pg = al.audit.sinks[1]
-    assert not pg._conn.closed
+    assert pg.flush(10)  # the worker thread opens and owns the connection
+    conn = pg._conn
+    assert not conn.closed
     await run_lifespan(al)
-    assert pg._conn.closed and al.audit.sinks[0]._f.closed
+    assert conn.closed and pg._conn is None and al.audit.sinks[0]._f.closed
     import psycopg
     with psycopg.connect(PG, autocommit=True) as c:
         c.execute("DELETE FROM airlock_audit WHERE call_id = 'shutdown'")  # the database is shared
@@ -488,3 +490,23 @@ async def test_approve_resolves_on_the_loop_without_a_jwks_url(upstream, audit_p
     async with serving(al) as c:
         r = await c.post(link)
     assert r.status_code == 200 and threads[-1] == threading.get_ident()
+
+
+async def test_shutdown_closes_the_audit_off_the_event_loop():
+    class Slow(Sink):
+        def close(self):
+            time.sleep(0.5)
+            super().close()
+
+    sink, ticks = Slow(), []
+    al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://upstream/mcp", sink)
+
+    async def tick():
+        while True:
+            ticks.append(1)
+            await asyncio.sleep(0.05)
+
+    t = asyncio.create_task(tick())
+    await run_lifespan(al)
+    t.cancel()
+    assert sink.closed == 1 and len(ticks) >= 5  # the loop kept running while close() slept

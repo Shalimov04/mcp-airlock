@@ -55,6 +55,7 @@ APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derive
 CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 NAME_MAX = 128  # chars of a client-chosen method or tool name kept in a pre-auth audit record
+AUDIT_CLOSE_S = 15.0  # the audit sink needs about the connect timeout plus 2 s to give up on a frozen database
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 # The message is cut shorter still (approvals.TEXT_MAX), so the rest is not there:
 # the audit intent record has it.
@@ -243,7 +244,11 @@ class Airlock:
                         if close:
                             await close()
                     finally:
-                        self.audit.close()
+                        # off the loop: a frozen audit database holds close() for seconds
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(self.audit.close), AUDIT_CLOSE_S)
+                        except asyncio.TimeoutError:
+                            log.warning("audit close did not finish in %g s", AUDIT_CLOSE_S)
             finally:
                 # uvicorn re-raises SIGTERM after this, so atexit never runs: flush spans here, after the audit
                 if self.on_shutdown is not None:

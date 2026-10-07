@@ -5,21 +5,25 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
+import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
+from mcp_airlock import Airlock, Policy
 from mcp_airlock import __main__ as cli
 from mcp_airlock import audit
-from mcp_airlock.app import build
-from mcp_airlock.audit import GENESIS, REDACTED, AuditLog, MultiAudit, PostgresAuditLog, audit_from_env, row_hash, scrub
+from mcp_airlock.app import CONFIRM_KEY, build
+from mcp_airlock.audit import GENESIS, REDACTED, AuditLog, MultiAudit, PostgresAuditLog, audit_from_env, redact, row_hash, scrub
 from mcp_airlock.audit_cli import default_files, main, query_jsonl, verify
 
-from .conftest import ROOT
+from .conftest import ROOT, audit_rows, call
 
 PG = os.environ.get("AIRLOCK_TEST_PG_DSN")
 NOW = datetime.now(timezone.utc)
@@ -107,6 +111,7 @@ def test_postgres_reconnects_once(pg_dsn):
     import psycopg
     p = PostgresAuditLog(pg_dsn)
     p.write(phase="intent", **BASE)
+    assert p.flush(10)  # the worker owns the connection: poke it only once it is idle
     p._conn.close()  # simulate a dropped connection
     p.write(phase="outcome", **BASE)
     p.close()
@@ -181,6 +186,296 @@ def test_audit_from_env(tmp_path, monkeypatch):
     assert isinstance(m, MultiAudit) and [type(s) for s in m.sinks] == [AuditLog, PostgresAuditLog]
 
 
+# --- the Postgres sink off the event loop ----------------------------------------------------------------------
+
+def proxy_with(upstream, sink):
+    """An Airlock on the fake upstream with the given audit sink (make_airlock always builds a plain file sink)."""
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
+    al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://localhost:9001/mcp", sink, http=http,
+                 trust_principal_header=True)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=al.app), base_url="http://localhost:9000")
+
+
+def table_count(dsn, **where) -> int:
+    import psycopg
+    cond = " AND ".join(f"{k} = %s" for k in where) or "true"
+    with psycopg.connect(dsn, autocommit=True) as c:
+        return c.execute(f"SELECT count(*) FROM airlock_audit WHERE {cond}", tuple(where.values())).fetchone()[0]
+
+
+@pytest.fixture
+def locked_table(pg_dsn):
+    """Holds airlock_audit under ACCESS EXCLUSIVE until the test ends, the way a long migration or a stuck client would."""
+    import psycopg
+    with psycopg.connect(pg_dsn) as c:
+        c.execute("LOCK TABLE airlock_audit IN ACCESS EXCLUSIVE MODE")
+        yield c
+        c.rollback()
+
+
+def test_a_black_holed_database_does_not_block_the_writer(monkeypatch, caplog):
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "1")
+    with socket.socket() as s:  # completes the TCP handshake and never answers
+        s.bind(("127.0.0.1", 0))
+        s.listen(8)
+        sink = PostgresAuditLog(f"postgresql://u@127.0.0.1:{s.getsockname()[1]}/d?sslmode=disable")
+        t0 = time.monotonic()
+        for _ in range(3):
+            sink.write(phase="intent", **BASE)
+        assert time.monotonic() - t0 < 0.5  # used to take about 2 x connect_timeout per record, on the event loop
+        with caplog.at_level(logging.WARNING, logger="mcp_airlock.audit"):
+            sink.close()
+        assert time.monotonic() - t0 < 8  # one deadline to drain, then the rest is dropped
+    assert "not written" in caplog.text or "dropped" in caplog.text
+
+
+async def test_a_locked_audit_table_does_not_hold_up_calls_or_healthz(upstream, tmp_path, pg_dsn, monkeypatch, caplog):
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    pg = PostgresAuditLog(pg_dsn)
+    pg.write(phase="intent", **dict(BASE, call_id="warm", principal="warm"))
+    assert pg.flush(10)  # connected: the lock below must hit the INSERT, not the DDL
+    conn = pg._conn
+    import psycopg
+    with psycopg.connect(pg_dsn) as lock:
+        lock.execute("LOCK TABLE airlock_audit IN ACCESS EXCLUSIVE MODE")
+        async with proxy_with(upstream, MultiAudit(AuditLog(tmp_path / "a.jsonl"), pg)) as c:
+            t0 = time.monotonic()
+            res = await call(c, "list_services", {}, principal="alice")
+            assert (await c.get("/healthz")).status_code == 200
+            took = time.monotonic() - t0
+        assert not res.get("isError") and took < 1, took  # the write waits on the lock, the loop does not
+        assert not pg.flush(0.3)  # still waiting
+        with caplog.at_level(logging.WARNING, logger="mcp_airlock.audit"):
+            assert pg.flush(15)  # statement_timeout or lock_timeout ends each wait, about one deadline per record
+        lock.rollback()
+    assert caplog.text.count("dropped") == 2 and "due to statement timeout" in caplog.text and "Traceback" not in caplog.text
+    assert pg._conn is conn and not conn.closed  # the server ended the wait before the cut: the connection is kept
+    assert table_count(pg_dsn, principal="alice") == 0 and len(jsonl_rows(tmp_path / "a.jsonl")) == 2  # the file has them
+    pg.write(phase="outcome", **dict(BASE, call_id="after"))  # the sink is usable again once the lock is gone
+    pg.close()
+    assert table_count(pg_dsn, call_id="after") == 1
+
+
+def test_close_gives_up_on_a_stuck_sink_within_the_deadline(pg_dsn, locked_table, monkeypatch, caplog):
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    sink = PostgresAuditLog(pg_dsn)
+    for i in range(5):
+        sink.write(phase="intent", **dict(BASE, call_id=f"stuck{i}"))
+    t0 = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="mcp_airlock.audit"):
+        sink.close()  # SIGTERM path: must not wait for five lock waits
+    assert time.monotonic() - t0 < 6
+    assert "closed with" in caplog.text and "not written" in caplog.text
+    sink._worker.join(5)
+    assert not sink._worker.is_alive()
+
+
+def test_the_queue_is_bounded_and_overflow_is_counted(monkeypatch, caplog):
+    monkeypatch.setattr(audit, "QUEUE_MAX", 3)
+    sink = PostgresAuditLog("postgresql://u@127.0.0.1:1/d")
+    sink._worker = threading.Thread(target=lambda: None)  # a worker that never drains, without opening a connection
+    sink._q = audit.queue.Queue(maxsize=3)
+    with caplog.at_level(logging.WARNING, logger="mcp_airlock.audit"):
+        for _ in range(5):
+            sink.write(phase="intent", **BASE)
+    assert sink._q.qsize() == 3 and sink._dropped == 2
+    assert caplog.text.count("behind") == 1  # one line, not one per record
+
+
+def stuck_sink(monkeypatch, max_bytes=None):
+    """A sink whose worker never drains, without opening a connection; the queued items stay for inspection."""
+    if max_bytes is not None:
+        monkeypatch.setattr(audit, "QUEUE_MAX_BYTES", max_bytes)
+    sink = PostgresAuditLog("postgresql://u@127.0.0.1:1/d")
+    sink._worker = threading.Thread(target=lambda: None)
+    sink._worker.start()
+    return sink
+
+
+def test_the_queue_holds_the_serialized_row_and_is_bounded_by_bytes(monkeypatch, caplog):
+    # 1000 parsed rows of a request made of many small objects weighed about 20 GB: a count is not a memory bound.
+    sink = stuck_sink(monkeypatch, max_bytes=10_000)
+    with caplog.at_level(logging.WARNING, logger="mcp_airlock.audit"):
+        for i in range(4):
+            sink.write(phase="intent", **dict(BASE, call_id=f"big{i}", detail="x" * 4000))
+    assert sink._q.qsize() == 2 and sink._dropped == 2 and sink._bytes == sum(i.size for i in sink._q.queue)
+    assert caplog.text.count("behind") == 1 and "KiB" in caplog.text
+    item = sink._q.queue[0]
+    assert isinstance(item, audit._Queued) and isinstance(item.text, str) and item.cols[1] == "big0"
+    assert json.loads(item.text)["detail"] == "x" * 4000 and item.size > 4000  # the text, not a dict of 85000 objects
+    sink._wait_s = 0.2
+    sink.close()
+    assert sink.flush(5) and sink._pending == 0 and sink._bytes == 0  # the drained records are no longer waited for
+
+
+def test_a_record_bigger_than_the_byte_cap_is_queued_when_nothing_else_waits(monkeypatch):
+    sink = stuck_sink(monkeypatch, max_bytes=100)
+    sink.write(phase="intent", **BASE)
+    sink.write(phase="outcome", **BASE)
+    assert sink._q.qsize() == 1 and sink._dropped == 1
+
+
+def test_concurrent_first_use_ddl_does_not_fail(pg_dsn):
+    import psycopg
+    with psycopg.connect(pg_dsn, autocommit=True) as c:
+        c.execute("DROP TABLE airlock_audit")  # a fresh database, several replicas starting at once
+    sink = PostgresAuditLog(pg_dsn)
+    conns = [psycopg.connect(sink.dsn, autocommit=True) for _ in range(8)]
+    barrier, errors = threading.Barrier(len(conns)), []
+
+    def prepare(c):
+        barrier.wait()
+        try:
+            sink._prepare(c)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=prepare, args=(c,)) for c in conns]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    for c in conns:
+        c.close()
+    assert errors == []  # unlocked, most of them used to fail with UniqueViolation on pg_type and the record was dropped
+    sink.write(phase="intent", **BASE)
+    sink.close()
+    assert table_count(pg_dsn) == 1
+
+
+def test_a_failed_prepare_closes_the_connection(monkeypatch):
+    class Conn:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    conn = Conn()
+    monkeypatch.setattr(audit.psycopg_module(), "connect", lambda *a, **kw: conn)
+    sink = PostgresAuditLog("postgresql://u@127.0.0.1:1/d")
+    monkeypatch.setattr(sink, "_prepare", lambda c: (_ for _ in ()).throw(RuntimeError("ddl")))
+    with pytest.raises(RuntimeError, match="ddl"):
+        sink._connect()
+    assert conn.closed
+
+
+# --- text one sink cannot write ---------------------------------------------------------------------------------
+
+NUL_REC = dict(BASE, args={"names": ["prod-db\x00"], "k\x00": 1}, tool="rm_rf\x00", method="tools/ca\x00ll",
+               detail="upstream said \x00")
+NON_FINITE_REC = dict(BASE, args={"x": float("nan"), "y": float("inf"), "z": float("-inf"), "n": [json.loads("1e400")], "ok": 1.5})
+
+
+def strict(line: str) -> dict:
+    def refuse(name):
+        raise ValueError(f"non-standard JSON: {name}")
+
+    return json.loads(line, parse_constant=refuse)
+
+
+def test_nul_in_client_text_is_replaced_in_the_file(tmp_path):
+    log = AuditLog(tmp_path / "a.jsonl")
+    log.write(phase="intent", **NUL_REC)
+    log.close()
+    (row,) = jsonl_rows(tmp_path / "a.jsonl")
+    assert row["args"] == {"names": ["prod-db\ufffd"], "k\ufffd": 1} and row["tool"] == "rm_rf\ufffd"
+    assert row["method"] == "tools/ca\ufffdll" and row["detail"] == "upstream said \ufffd"
+    assert verify([str(tmp_path / "a.jsonl")])[0]
+
+
+def test_non_finite_numbers_are_spelled_out_as_strings(tmp_path):
+    log = AuditLog(tmp_path / "a.jsonl")
+    log.write(phase="intent", **NON_FINITE_REC)
+    log.close()
+    (line,) = [ln for ln in (tmp_path / "a.jsonl").read_text().splitlines() if ln.strip()]
+    row = strict(line)  # RFC 8259: a strict parser such as Node's takes the line
+    assert row["args"] == {"x": "NaN", "y": "Infinity", "z": "-Infinity", "n": ["Infinity"], "ok": 1.5}
+    assert verify([str(tmp_path / "a.jsonl")])[0]
+
+
+def test_dumps_refuses_a_non_finite_number_that_slipped_through():
+    with pytest.raises(ValueError):
+        audit._dumps({"x": float("nan")})
+
+
+@pytest.mark.parametrize("rec", [NUL_REC, NON_FINITE_REC], ids=["nul", "non-finite"])
+def test_both_sinks_hold_the_record(tmp_path, pg_dsn, rec):
+    # Used to leave 0 table rows: jsonb refuses \u0000 and NaN, the text columns refuse NUL, and the failure was only logged.
+    m = MultiAudit(AuditLog(tmp_path / "a.jsonl"), PostgresAuditLog(pg_dsn))
+    m.write(phase="intent", **rec)
+    m.write(phase="outcome", **rec)
+    m.close()
+    rows = jsonl_rows(tmp_path / "a.jsonl")
+    assert len(rows) == 2 and table_count(pg_dsn, principal="alice") == 2
+    import psycopg
+    with psycopg.connect(pg_dsn) as c:
+        recs = [r for (r,) in c.execute("SELECT rec FROM airlock_audit ORDER BY ts, ctid").fetchall()]
+    assert recs == rows  # same values, same hashes in both sinks
+
+
+async def test_nul_in_a_call_reaches_both_sinks(upstream, tmp_path, pg_dsn):
+    pg = PostgresAuditLog(pg_dsn)
+    async with proxy_with(upstream, MultiAudit(AuditLog(tmp_path / "a.jsonl"), pg)) as c:
+        await call(c, "get_service", {"name": "api\x00"}, principal="mallory")
+        await call(c, "rm_rf\x00", {"path": "x"}, principal="mallory")  # allowlist.deny: the tool name carries the NUL
+    pg.close()
+    rows = audit_rows(tmp_path / "a.jsonl")
+    assert len(rows) == 4 and rows[0]["args"] == {"name": "api\ufffd"} and rows[-1]["tool"] == "rm_rf\ufffd"
+    assert table_count(pg_dsn, principal="mallory") == 4
+
+
+# --- secrets inside longer strings -----------------------------------------------------------------------------
+
+INLINE = "key is sk-ABCDEFGH12345678 ok"
+
+
+def test_redact_scrubs_substrings_too():
+    assert redact({"name": INLINE, "cmd": f"curl -H 'Authorization: {BEARER}'", "jwt": f"id {SK} eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln"}) == \
+        {"name": f"key is {REDACTED} ok", "cmd": f"curl -H 'Authorization: {REDACTED}'", "jwt": f"id {REDACTED} {REDACTED}"}
+    assert redact([INLINE, 3, None, True]) == [f"key is {REDACTED} ok", 3, None, True]
+    assert redact(SK) == REDACTED and redact("plain text") == "plain text"
+
+
+def test_redact_scrubs_dict_keys():
+    ghp = "ghp_" + "A" * 20
+    assert redact({SK: 1, "ok-name": {f"x {ghp}": 2}, 3: "n"}) == {REDACTED: 1, "ok-name": {f"x {REDACTED}": 2}, 3: "n"}
+
+
+HYPHENATED = ["disk-cleanup-prod", "task-scheduler", "desk-support-team", "risk-assessment", "disk-monitor-prod",
+              "xghp_ABCDEFGHIJKLMNOPQRSTUV", "KAKIAABCDEFGHIJKLMNOP", "myBearer tokens"]
+
+
+def test_hyphenated_identifiers_are_not_credentials(tmp_path):
+    # "sk-" inside a name used to be redacted: approvers saw 'Arguments: {"name": "di[REDACTED]"}' for disk-monitor-prod.
+    for name in HYPHENATED:
+        assert scrub(name) == name and redact({"name": name}) == {"name": name}
+    assert scrub(f"export GH={SK} task-scheduler") == f"export GH={REDACTED} task-scheduler"
+    sink = AuditLog(tmp_path / "a.jsonl")
+    sink.write(phase="intent", **dict(BASE, tool="disk-cleanup-prod", principal="desk-support-team",
+                                      args={"name": "risk-assessment"}))
+    sink.close()
+    (row,) = jsonl_rows(tmp_path / "a.jsonl")
+    assert (row["tool"], row["principal"], row["args"]) == ("disk-cleanup-prod", "desk-support-team", {"name": "risk-assessment"})
+
+
+async def test_secret_inside_an_argument_is_scrubbed_in_the_audit_and_the_approver_text(client, audit_path, upstream):
+    await call(client, "get_service", {"name": INLINE})
+    res = await call(client, "delete_service", {"name": INLINE})
+    msg = res["inputRequests"][CONFIRM_KEY]["params"]["message"]
+    assert "sk-ABCDEFGH12345678" not in msg and f"key is {REDACTED} ok" in msg  # the Arguments line, next to the scrubbed preview
+    raw = audit_path.read_text()
+    assert "sk-ABCDEFGH12345678" not in raw
+    assert audit_rows(audit_path)[0]["args"] == {"name": f"key is {REDACTED} ok"}
+
+
+async def test_approvers_and_the_audit_see_a_hyphenated_target(client, audit_path, upstream):
+    res = await call(client, "delete_service", {"name": "disk-monitor-prod"}, principal="desk-support-team")
+    msg = res["inputRequests"][CONFIRM_KEY]["params"]["message"]
+    assert '"disk-monitor-prod"' in msg and REDACTED not in msg  # the target of a destructive call is shown
+    rows = audit_rows(audit_path)
+    assert rows[0]["args"] == {"name": "disk-monitor-prod"} and rows[0]["principal"] == "desk-support-team"
+
+
 # --- detail redaction ------------------------------------------------------------------------------------------
 
 BEARER, SK = "Bearer eyJabc.def-ghi", "sk-0123456789abcdef"
@@ -218,12 +513,16 @@ def test_postgres_detail_is_scrubbed(pg_dsn, name):
     assert rec["detail"] == want
 
 
-def test_detail_redaction_leaves_other_fields_alone(tmp_path):
+def test_client_chosen_text_columns_are_scrubbed_like_detail(tmp_path):
+    # A key sent as the tool, method or principal used to survive next to a detail that redacted the same key.
     sink = AuditLog(tmp_path / "a.jsonl")
-    sink.write(phase="outcome", **dict(BASE, detail=f"x {SK}", tool=f"t {SK}"))
+    sink.write(phase="outcome", **dict(BASE, detail=f"tool '{SK}' is not allowlisted", tool=SK,
+                                       method=f"foo {SK} {BEARER}", principal=f"p {SK}", rule_id=f"r {SK}"))
     sink.close()
     (row,) = jsonl_rows(tmp_path / "a.jsonl")
-    assert row["tool"] == f"t {SK}" and row["detail"] == f"x {REDACTED}"
+    assert row["tool"] == REDACTED and row["method"] == f"foo {REDACTED} {REDACTED}" and row["principal"] == f"p {REDACTED}"
+    assert row["detail"] == f"tool '{REDACTED}' is not allowlisted"
+    assert row["rule_id"] == f"r {SK}"  # ours, never client text: left alone
 
 
 def test_scrub_is_fast_on_identifier_runs():
@@ -1089,3 +1388,42 @@ def test_postgres_alone_starts_at_genesis_after_a_row_without_a_hash(pg_dsn):
     sink.write(phase="intent", **BASE)
     sink.close()
     assert pg_recs(pg_dsn)["c1"]["prev"] == GENESIS
+
+
+def test_two_secret_shaped_keys_stay_two_arguments():
+    out = redact({"sk-aaaaaaaa1": 1, "sk-bbbbbbbb2": 2, "sk-cccccccc3": 3})
+    assert sorted(out.values()) == [1, 2, 3] and set(out) == {REDACTED, REDACTED + "#2", REDACTED + "#3"}
+    # a client key that already reads like a suffix is not overwritten
+    out = redact({"sk-aaaaaaaa1": 1, REDACTED + "#2": 2, "sk-bbbbbbbb2": 3})
+    assert out == {REDACTED: 1, REDACTED + "#2": 2, REDACTED + "#3": 3}
+
+
+def test_many_secret_shaped_keys_are_kept_apart_in_linear_time():
+    # A request of 40000 such keys fits in 1 MiB; counting up from #2 for each one took minutes on the event loop.
+    keys = {f"sk-aaaaaaaa{i:06d}": i for i in range(40_000)}
+    t = time.monotonic()
+    out = redact(keys)
+    assert time.monotonic() - t < 2.0 and len(out) == len(keys) and sorted(out.values()) == list(range(40_000))
+
+
+def test_a_credential_after_a_literal_backslash_escape_is_scrubbed():
+    for esc in ("\\n", "\\t", "\\r"):
+        assert scrub(f"echo{esc}sk-abcdefgh12345678 done") == f"echo{esc}{REDACTED} done"
+    assert scrub("echo\\nBearer abc123def") == f"echo\\n{REDACTED}"
+    # the boundary is still a boundary: hyphenated names and plain letters before the prefix stay as sent
+    for kept in ("disk-cleanup-prod", "task-scheduler", "risk-assessment-1", "ask-abcdefgh12345678"):
+        assert scrub(kept) == kept
+
+
+def test_the_backslash_boundary_keeps_the_scan_linear():
+    for hostile in ("\\nsk-" * 50_000, "\\n" + "ey" * 100_000, "sk-" * 70_000, "Bearer " + " " * 200_000 + "x"):
+        t = time.monotonic()
+        scrub(hostile)
+        assert time.monotonic() - t < 2.0, hostile[:12]
+
+
+def test_detail_keys_are_scrubbed_and_kept_apart(tmp_path):
+    log = AuditLog(tmp_path / "a.jsonl")
+    log.write(phase="outcome", call_id="c", detail={"sk-aaaaaaaa1": "x", "sk-bbbbbbbb2": "y", "fine": 1})
+    row = json.loads((tmp_path / "a.jsonl").read_text().splitlines()[0])
+    assert row["detail"] == {REDACTED: "x", REDACTED + "#2": "y", "fine": 1}

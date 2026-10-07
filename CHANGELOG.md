@@ -127,6 +127,32 @@
 * `airlock-policy lint` accepts a policy without `environment` when `--env` or `AIRLOCK_ENV` names
   one, as the proxy does. Without either, the error also lists the file's other validation errors
   instead of hiding them until the environment is fixed.
+* The Postgres audit sink writes from a worker thread through a bounded queue (1000 records, about
+  32 MiB of serialized rows), with a deadline per write equal to the connect timeout plus one
+  second for the server's own `statement_timeout` and `lock_timeout` to end the wait first. An
+  audit database that was paused, locked or black-holed used to stall every request, `/healthz`
+  and SIGTERM for as long as it stayed silent. A record that cannot be written in time is dropped
+  from the table with a warning; the JSONL file keeps it, for as long as that file lives. The
+  table's `intent` row can now land after the upstream call; the file's is still written before.
+  At shutdown the sink drains its queue off the event loop for at most about the connect timeout
+  plus 2 s (capped at 15 s) and logs how many records it left out.
+* The audit table is created under the store's advisory lock, so replicas starting together on an
+  empty database no longer fail the DDL and lose their first audit records.
+* A NUL character in client text no longer keeps the record out of the Postgres audit table; it is
+  stored as U+FFFD in both sinks, like a lone surrogate.
+* A `NaN` or an infinity that reaches the audit (the request parser now refuses them, see below)
+  is written to both sinks as the string `"NaN"`, `"Infinity"` or `"-Infinity"`. It used to make
+  the `audit.jsonl` line non-standard JSON and was refused by the Postgres sink, which left the
+  call out of the table.
+* Credentials inside longer argument strings (a key in a note or a command line) and in argument
+  keys are redacted in the audit `args` and in the Arguments line shown to approvers, where the
+  dry-run preview next to it was already scrubbed. A pattern is matched only at the start of a
+  word or right after a literal `\n`, `\r` or `\t` escape, so a hyphenated name such as
+  `disk-cleanup-prod` is kept. Two keys that scrub to the same text stay two arguments
+  (`[REDACTED]`, `[REDACTED]#2`) instead of one overwriting the other.
+* The `principal`, `method` and `tool` audit fields and the keys in `detail` are scrubbed like the
+  free text in `detail`, so a key sent as the tool name is no longer stored in clear next to a
+  redacted detail.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to
