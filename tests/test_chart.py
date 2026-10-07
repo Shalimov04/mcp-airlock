@@ -164,6 +164,13 @@ def test_null_grace_period_has_its_own_message(tmp_path):
     assert "terminationGracePeriodSeconds must be a number" in msg
 
 
+def test_grace_period_must_be_whole_number(tmp_path):
+    # it used to be cut to 30 without a word
+    msg = refusal(tmp_path, "terminationGracePeriodSeconds: 30.5\n")
+    assert "terminationGracePeriodSeconds must be a whole number" in msg
+    assert pod(render(tmp_path, "terminationGracePeriodSeconds: 40.0\n"))["terminationGracePeriodSeconds"] == 40
+
+
 def test_no_prestop_comment_when_disabled(tmp_path):
     def out(*sets):
         cmd = ["helm", "template", "m", str(CHART), "--set", "upstream=http://u/mcp",

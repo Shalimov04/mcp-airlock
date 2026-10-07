@@ -71,6 +71,9 @@
 {{- if not (or (kindIs "int64" $grace) (kindIs "int" $grace) (kindIs "float64" $grace)) }}
 {{- fail (printf "terminationGracePeriodSeconds must be a number of seconds, got %v" $grace) }}
 {{- end }}
+{{- if ne (float64 $grace) (floor (float64 $grace)) }}
+{{- fail (printf "terminationGracePeriodSeconds must be a whole number of seconds, got %v" $grace) }}
+{{- end }}
 {{- if le (int $grace) (int $preStop) }}
 {{- fail "terminationGracePeriodSeconds must exceed preStopSeconds, or the shutdown and the OTLP flush get no time" }}
 {{- end }}
