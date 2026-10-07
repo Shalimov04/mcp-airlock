@@ -66,6 +66,10 @@
 
 ### Fixed
 
+* The release workflow file was invalid YAML since the chart `appVersion` check was added (a `: `
+  inside an unquoted `run:` line), so GitHub flagged every push and a `v*` tag would not have
+  released. The step is a block scalar now, and `tests/test_workflows.py` parses every workflow
+  file.
 * The release workflow fails when the image tag in the `docker run` examples of `README.md` and
   `README.ru.md` is not the tag's major.minor (`scripts/check_image_tag.sh`).
 * Helm: a whole number from a values file (`env.AIRLOCK_MAX_REQUEST_BYTES: 104857600`, or in

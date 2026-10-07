@@ -22,7 +22,9 @@ jobs:
           test "$(jq -r .version server.json)" = "$v"
           test "$(jq -r '.packages[].version' server.json | sort -u)" = "$v"
       - name: chart appVersion must match the tag
-        run: test "$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' charts/mcp-airlock/Chart.yaml)" = "${GITHUB_REF_NAME#v}"
+        run: |
+          v="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' charts/mcp-airlock/Chart.yaml)"
+          test "$v" = "${GITHUB_REF_NAME#v}"
       - name: README image tag must match the tag
         run: scripts/check_image_tag.sh "$GITHUB_REF_NAME" README.md README.ru.md
       - run: uv build
