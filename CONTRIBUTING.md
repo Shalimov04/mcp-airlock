@@ -31,7 +31,7 @@ and `examples/spans.jsonl`; do not commit those unless the change is the point.
 * A change to the Dockerfiles keeps `tests/test_container.py` green: it reads the `HEALTHCHECK`
   lines and runs the probe command.
 * A change under `.github/workflows/` keeps `tests/test_workflows.py` green: it parses every
-  workflow file and runs the release version checks against the tree.
+  workflow file and runs the release chart `appVersion` check against the tree.
 * Update the docs in the same pull request: `README.md` and `README.ru.md` together, section by
   section (the Russian one is natural Russian prose, not a word-for-word calque), the env var and
   flag tables when a variable or flag changes, `charts/mcp-airlock/values.yaml` comments when a
