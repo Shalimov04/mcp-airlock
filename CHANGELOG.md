@@ -35,11 +35,6 @@
   `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.
 * `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
   bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else disable it.
-
-### Fixed
-
-* Helm: a whole number from a values file (`env.AIRLOCK_MAX_REQUEST_BYTES: 104857600`, or in
-  `extraArgs`) rendered as `1.048576e+08` and crash-looped the pod; it now renders as `104857600`.
 * Helm: `OTEL_EXPORTER_OTLP_HEADERS` is read from `existingSecret` like the other credentials and
   refused in `env`; new `extraEnv` (with `valueFrom`) and `envFrom` values take entries from a
   Secret or ConfigMap of your own. An `extraEnv` name that is also in `env`, or that is
@@ -48,8 +43,15 @@
   `extraEnv` is refused too.
 * Helm: the pod sleeps `preStopSeconds` (5) before shutting down, so a rolling update, including
   every policy change, no longer refuses connections; `terminationGracePeriodSeconds` (30) is set
-  for the sleep, the open calls and the OTLP flush. A negative value, or the sleep on a cluster
-  older than 1.30 (set `preStopSeconds=0` there), is refused with a chart message.
+  for the sleep, the open calls and the OTLP flush. A negative or fractional value, or the sleep
+  on a cluster older than 1.30 (set `preStopSeconds=0` there), is refused with a chart message.
+
+### Fixed
+
+* The release workflow fails when the image tag in the `docker run` examples of `README.md` and
+  `README.ru.md` is not the tag's major.minor (`scripts/check_image_tag.sh`).
+* Helm: a whole number from a values file (`env.AIRLOCK_MAX_REQUEST_BYTES: 104857600`, or in
+  `extraArgs`) rendered as `1.048576e+08` and crash-looped the pod; it now renders as `104857600`.
 * The container images compile bytecode at build time (`UV_COMPILE_BYTECODE=1` for the venv,
   `compileall` for the standard library, which the slim base image ships without `.pyc`); the
   filesystem is read-only at run time, so no `.pyc` could ever be written and every start paid

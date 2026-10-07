@@ -57,10 +57,21 @@
 {{- fail (printf "extraEnv value for %s must be a string: quote it" .name) }}
 {{- end }}
 {{- end }}
-{{- if lt (int .Values.preStopSeconds) 0 }}
+{{- $preStop := .Values.preStopSeconds }}
+{{- if not (or (kindIs "int64" $preStop) (kindIs "int" $preStop) (kindIs "float64" $preStop)) }}
+{{- fail (printf "preStopSeconds must be a whole number of seconds, got %v" $preStop) }}
+{{- end }}
+{{- if ne (float64 $preStop) (floor (float64 $preStop)) }}
+{{- fail (printf "preStopSeconds must be a whole number of seconds, got %v" $preStop) }}
+{{- end }}
+{{- if lt (int $preStop) 0 }}
 {{- fail "preStopSeconds must be 0 or more" }}
 {{- end }}
-{{- if le (int .Values.terminationGracePeriodSeconds) (int .Values.preStopSeconds) }}
+{{- $grace := .Values.terminationGracePeriodSeconds }}
+{{- if not (or (kindIs "int64" $grace) (kindIs "int" $grace) (kindIs "float64" $grace)) }}
+{{- fail (printf "terminationGracePeriodSeconds must be a number of seconds, got %v" $grace) }}
+{{- end }}
+{{- if le (int $grace) (int $preStop) }}
 {{- fail "terminationGracePeriodSeconds must exceed preStopSeconds, or the shutdown and the OTLP flush get no time" }}
 {{- end }}
 {{- /* an older API server drops the sleep field and rejects a preStop with no handler; under
@@ -104,7 +115,11 @@ spec:
       automountServiceAccountToken: false
       # Service-link variables would land in the AIRLOCK_* namespace the proxy reads its config from
       enableServiceLinks: false
+      {{- if gt (int $preStop) 0 }}
       # the preStop sleep, then uvicorn drains the open calls and the OTLP queue is flushed
+      {{- else }}
+      # uvicorn drains the open calls and the OTLP queue is flushed
+      {{- end }}
       terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
@@ -173,13 +188,13 @@ spec:
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if .Values.preStopSeconds }}
+          {{- if gt (int $preStop) 0 }}
           # kube-proxy drops the endpoint after the pod is marked terminating; keep the listener
           # open until it has, or connects during a rollout are refused
           lifecycle:
             preStop:
               sleep:
-                seconds: {{ int .Values.preStopSeconds }}
+                seconds: {{ int $preStop }}
           {{- end }}
           # liveness must not use /readyz, or a store outage restarts every pod
           startupProbe:

@@ -149,3 +149,28 @@ def test_pre_stop_sleep_is_refused_on_a_cluster_older_than_1_30(tmp_path):
     assert "needs Kubernetes 1.30+" in msg and "set preStopSeconds=0" in msg
     assert "lifecycle" not in container(render(tmp_path, "preStopSeconds: 0\n", "--kube-version=1.29.5"))
     assert "lifecycle" in container(render(tmp_path, "", "--kube-version=1.30.0"))
+
+
+def test_prestop_must_be_whole_number(tmp_path):
+    assert "whole number" in refusal(tmp_path, "", "preStopSeconds=2.5")
+    assert "whole number" in refusal(tmp_path, "", "preStopSeconds=five")
+    assert "whole number" in refusal(tmp_path, "preStopSeconds: 2.5\n")
+    docs = render(tmp_path, "preStopSeconds: 2.0\n")
+    assert container(docs)["lifecycle"] == {"preStop": {"sleep": {"seconds": 2}}}
+
+
+def test_null_grace_period_has_its_own_message(tmp_path):
+    msg = refusal(tmp_path, "terminationGracePeriodSeconds: null\n")
+    assert "terminationGracePeriodSeconds must be a number" in msg
+
+
+def test_no_prestop_comment_when_disabled(tmp_path):
+    def out(*sets):
+        cmd = ["helm", "template", "m", str(CHART), "--set", "upstream=http://u/mcp",
+               "--set-file", f"policy={ROOT / 'policy.example.yaml'}"]
+        for s in sets:
+            cmd += ["--set", s]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True).stdout
+
+    assert "the preStop sleep" in out()
+    assert "preStop sleep" not in out("preStopSeconds=0")
