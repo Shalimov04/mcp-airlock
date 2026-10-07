@@ -100,3 +100,30 @@ async def test_approve_submit_answers_503_with_the_page_headers_when_the_store_i
         assert (await c.post(path, headers={"x-forwarded-user": "bob"})).status_code == 200  # the store is back
     assert len([r for r in audit_rows(audit_path) if r["rule_id"] == "mrtr.approved_oob"]) == 2  # the one real click
     assert "pw@host" not in caplog.text
+
+
+async def test_approve_submit_records_an_unverified_click_when_resolving_the_approver_fails(upstream, audit_path, caplog):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+        al._resolve = _boom  # whatever the identity layer may raise once the approval is already in the store
+        r = await c.post(approve_path(posted), headers={"authorization": "Bearer t", "x-forwarded-user": "bob"})
+    assert r.status_code == 200 and "Approved" in r.text and r.headers["x-frame-options"] == "DENY"
+    approved = [r for r in audit_rows(audit_path) if r["rule_id"] == "mrtr.approved_oob"]
+    assert len(approved) == 2 and approved[0]["detail"]["approved_by"] == "bob"
+    assert approved[0]["detail"]["approved_by_source"] == "header"  # never "verified" on a failed check
+    assert "RuntimeError" in caplog.text and "pw@host" not in caplog.text
+
+
+async def test_an_oversized_argument_cannot_push_the_proxy_link_out_of_the_message(upstream, audit_path):
+    # Slack truncates past 40000 characters and Telegram refuses past 4096. Padded so that a planted "Approve:" line
+    # sits just before the cut, the real line would be the part that is lost. The text is bounded before the link.
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    planted = "Approve: https://evil.example/approve/al2.REAL"
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api", "note": "a" * 45000 + "\n\n" + planted})
+    assert len(posted) == 1 and len(posted[0]) <= 4096
+    assert "[cut at 3500 characters;" in posted[0] and planted not in posted[0]
+    assert posted[0].count("Approve:") == 1 and posted[0].rsplit("\n\nApprove: ", 1)[1].startswith("https://a.example/approve/")

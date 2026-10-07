@@ -131,15 +131,19 @@ def test_non_string_sub_is_refused():
     assert resolve(bearer(tok), HS) is None
 
 
-def test_blank_header_principal_is_refused_and_a_padded_one_is_trimmed():
-    assert resolve({"x-airlock-principal": "   "}, IdentityConfig(trust_header=True)) is None
-    assert resolve({"x-airlock-principal": " carol "}, IdentityConfig(trust_header=True)) == Principal("carol")
+@pytest.mark.parametrize("sub", ["   ", " carol ", "carol ", " carol", "carol\n"])
+def test_blank_or_padded_header_principal_is_refused(sub):
+    assert resolve({"x-airlock-principal": sub}, IdentityConfig(trust_header=True)) is None
+    assert resolve({"x-airlock-principal": "carol"}, IdentityConfig(trust_header=True)) == Principal("carol")
 
 
-def test_a_padded_jwt_sub_is_trimmed_like_the_header():
-    tok = jwt.encode({"sub": " carol\t", "exp": time.time() + 60}, "s3cret", algorithm="HS256")
-    assert resolve(bearer(tok), HS) == Principal("carol")  # the same name whichever path it came in by
-    assert resolve(bearer(rs(sub=" carol ")), OIDC).sub == "carol"
+@pytest.mark.parametrize("sub", [" carol\t", "carol ", " carol", " carol", "carol "])
+def test_a_padded_jwt_sub_is_refused_not_trimmed(sub):
+    # Trimmed, "carol " would be carol: her tier override, her confirmation tokens, her audit rows. Both paths refuse.
+    tok = jwt.encode({"sub": sub, "exp": time.time() + 60}, "s3cret", algorithm="HS256")
+    assert resolve(bearer(tok), HS) is None
+    assert resolve(bearer(rs(sub=sub)), OIDC) is None
+    assert resolve(bearer(rs(sub="carol")), OIDC).sub == "carol"
 
 
 def test_verified_marks_subjects_out_of_a_checked_token_only():

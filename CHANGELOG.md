@@ -51,10 +51,16 @@
   came out of a bearer token the proxy checked. A `Basic` header, a bare value or a bearer with no
   JWT configured used to label the header-supplied name `verified`.
 * A JWT whose `sub` is empty or blank is refused with 401 `principal.missing` instead of being
-  accepted as principal `""`; a blank `X-Airlock-Principal` is refused the same way. Surrounding
-  whitespace is trimmed from both, so the same name is the same principal whichever way it came.
+  accepted as principal `""`; a blank `X-Airlock-Principal` is refused the same way. So is a name
+  with surrounding whitespace, from either source: trimmed, `alice ` would be `alice`.
 * The Slack approval message escapes `&`, `<` and `>` in the arguments and the dry-run preview, so
   an agent cannot plant a `<url|label>` link or an `<!channel>` mention in it.
+* The text of the approval message is cut at 3500 characters, with a note, before the proxy's
+  `Approve:` line is added, so the line is always delivered and always last: Telegram refuses a
+  longer message, and Slack truncates one, which an oversized argument could use to cut the real
+  line off behind a planted one. The approve page's cut note now points at the audit record.
+* A failure while working out who clicked the approve button (after the approval was recorded)
+  records the click as unverified instead of answering a bare 500 that the audit never sees.
 * A principal named `group:<g>` no longer gets the tier override of group `<g>`: `group:` keys in
   `principals` match group membership only.
 * The approve page responses carry `Cache-Control: no-store`, `Referrer-Policy: no-referrer`,

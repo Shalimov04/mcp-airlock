@@ -54,7 +54,8 @@ APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derive
 CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
-PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
+# The message is cut shorter still (approvals.TEXT_MAX), so it is not where the rest is: the audit intent record is.
+PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full arguments are in the audit record for this key]"
 # The approve page is a capability URL behind SSO: never framed (clickjacking), never cached, never sent as a referrer.
 APPROVE_PAGE_HEADERS = {
     "content-security-policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
@@ -796,7 +797,11 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         if state == "approved":
             return self._approve_html(f"{tool} for {principal} is already approved. The agent can retry now.")
         headers = {k.lower(): v for k, v in request.headers.items()}
-        who = await self._resolve(headers)
+        try:
+            who = await self._resolve(headers)
+        except Exception as e:  # the approval is recorded already: a 500 here would hide it from the audit. Unverified, then.
+            log.warning("resolving the approver failed: %s", type(e).__name__)
+            who = None
         # Who clicked: "verified" only for a subject out of a token this process checked. Any other Authorization
         # header (Basic, a bare value, a bearer with no JWT configured) leaves the header-derived name unverified.
         if who and who.verified:

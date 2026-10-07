@@ -65,16 +65,22 @@ def _verify(token: str, cfg: IdentityConfig) -> Principal | None:
         )
     except jwt.PyJWTError:
         return None
-    sub = claims["sub"].strip() if isinstance(claims["sub"], str) else ""  # trimmed like the header, so both paths agree
-    if not sub:
+    sub = claims["sub"]
+    if not _usable_name(sub):
         return None  # "require" only checks presence; a blank subject would be one shared anonymous identity
     return Principal(sub, _groups(claims.get(cfg.groups_claim)), verified=True)
+
+
+def _usable_name(sub: object) -> bool:
+    # Refused, not trimmed: trimming would make " alice" the same principal as "alice", with alice's tier
+    # override, confirmation tokens and audit rows, on an IdP that allows such a subject.
+    return isinstance(sub, str) and bool(sub) and sub == sub.strip()
 
 
 def resolve(headers: Mapping[str, str], cfg: IdentityConfig) -> Principal | None:
     auth = headers.get("authorization") or ""
     if auth[:7].lower() == "bearer " and (cfg.jwt_secret or cfg.jwks_url):
         return _verify(auth[7:].strip(), cfg)  # a presented token that fails never falls through to the header
-    if cfg.trust_header and (sub := (headers.get(PRINCIPAL_HEADER) or "").strip()):
+    if cfg.trust_header and _usable_name(sub := headers.get(PRINCIPAL_HEADER)):  # the same rule as the token, so both paths agree
         return Principal(sub, _groups(headers.get(GROUPS_HEADER)))
     return None

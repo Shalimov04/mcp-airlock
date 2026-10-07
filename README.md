@@ -19,7 +19,9 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
 
 1. Works out who is calling. That comes from a JWT (`Authorization: Bearer`) or, if you run
    it behind a gateway that already did the authentication, from an `X-Airlock-Principal`
-   header. It is never taken from the request body. No principal, no call.
+   header. It is never taken from the request body. No principal, no call. A name that is
+   blank or has whitespace around it is no principal either, from either source: trimmed,
+   `alice ` would be `alice`.
 2. Looks the tool up in the policy. Tools that are not listed are refused. Listed tools have
    a risk tier per environment, so the same `delete_service` can be free in `dev` and gated
    in `prod`.
@@ -393,7 +395,8 @@ Python SDK client gives up after about two seconds of polling with
 `InputRequiredRoundsExceededError`. Catch it and retry later with the same `requestState`.
 A retry without an answer for a key that was already executed or declined is refused with
 `mrtr.replay`, not left pending. In `inband` mode without a webhook there is nothing to wait
-for, so such a retry gets the question again, with a fresh `requestState`.
+for, so such a retry gets the question again, with a fresh `requestState`; it is evaluated like
+a new call, dry run included, and costs the same.
 
 In `oob` mode an in-band `accept` leaves the call `pending`; the result's message and the audit
 record say the accept was ignored. A decline still burns the key. The mode travels in the token:
@@ -409,8 +412,10 @@ In the Slack message `&`, `<` and `>` in the arguments and the dry-run preview a
 an agent cannot plant a `<url|label>` link with a hidden target or an `<!channel>` mention in
 it. A bare URL in the arguments or the preview still shows as a URL, and the preview keeps its
 line breaks, so an agent can still put an `Approve: https://...` line of its own into the
-text. The proxy's link is the `Approve:` line at the end of the message; read that one. The
-agent cannot approve its own call either way.
+text. The proxy's link is the `Approve:` line at the end of the message; read that one. It is
+always there and always last: the text before it is cut at 3500 characters with a note, so the
+message fits Telegram's 4096-character limit and Slack never truncates the proxy's line away
+behind a planted one. The agent cannot approve its own call either way.
 
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
@@ -421,8 +426,10 @@ token the proxy itself checked (a JWT secret or JWKS URL is configured); any oth
 text (the redacted arguments and up to 2000 characters of the dry-run preview), cut at 8000
 characters with a note, kept in the store until the prompt expires, and the state of the
 request: once it has been executed or declined there is no button, and a `POST` answers 409
-without recording anything; a second `POST` on an approved request changes nothing and is not
-recorded again. If the store does not answer, the `POST` answers 503 and records nothing.
+without recording anything; a later `POST` on an approved request changes nothing and is not
+recorded again (two clicks that reach a Postgres store at the same moment can both be recorded;
+the approval is still used once). If the store does not answer, the `POST` answers 503 and
+records nothing.
 The responses are sent with `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and a
 Content-Security-Policy that forbids framing. The approval itself is audited with
 `method: approve` and rule `mrtr.approved_oob`.

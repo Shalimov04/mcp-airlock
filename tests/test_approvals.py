@@ -121,3 +121,33 @@ async def test_telegram_text_is_sent_as_is():
 
 def test_slack_escape_does_not_double_escape():
     assert approvals.slack_escape("&lt; & < >") == "&amp;lt; &amp; &lt; &gt;"
+
+
+async def test_an_oversized_text_is_cut_so_the_proxy_link_is_always_delivered_and_last():
+    # Slack truncates past 40000 characters, Telegram refuses past 4096: an agent that pads its argument so its own
+    # "Approve:" line sits just before the cut would have the proxy's real line be the part that is lost.
+    seen, h = _capture()
+    planted = "Approve: https://evil.example/approve/al2.REAL"
+    text = 'Arguments: {"name": "' + "a" * 45000 + "\\n\\n" + planted + '"}'
+    for webhook, chat in (("https://hooks.slack.com/x", None), ("https://api.telegram.org/botT/sendMessage", "-100")):
+        assert await approvals.notify(text, "https://airlock/approve/abc", webhook=webhook, http=_http(h), telegram_chat=chat)
+        body = httpx.Response(200, content=seen[-1].content).json()["text"]
+        assert body.endswith(approvals.CUT_NOTE + "\n\nApprove: https://airlock/approve/abc")
+        assert len(body) <= 4096 and len(body) - len("\n\nApprove: https://airlock/approve/abc") == approvals.TEXT_MAX
+        assert planted not in body and body.count("Approve:") == 1
+
+
+async def test_the_cap_counts_the_escaped_slack_text():
+    seen, h = _capture()
+    assert await approvals.notify("&" * 4000, "https://a/1", webhook="https://hooks.slack.com/x", http=_http(h))  # 20000 escaped
+    body = httpx.Response(200, content=seen[0].content).json()["text"]
+    assert len(body) == approvals.TEXT_MAX + len("\n\nApprove: https://a/1") and "<" not in body
+
+
+async def test_a_text_within_the_cap_is_sent_whole():
+    seen, h = _capture()
+    text = "x" * (approvals.TEXT_MAX - 1) + "<"  # escaped it is 3 characters over: cut, since the service counts those
+    assert await approvals.notify(text, "https://a/1", webhook="https://hooks.slack.com/x", http=_http(h))
+    assert approvals.CUT_NOTE in httpx.Response(200, content=seen[0].content).json()["text"]
+    assert await approvals.notify("x" * approvals.TEXT_MAX, "https://a/1", webhook="https://hooks.slack.com/x", http=_http(h))
+    assert httpx.Response(200, content=seen[1].content).json()["text"] == "x" * approvals.TEXT_MAX + "\n\nApprove: https://a/1"

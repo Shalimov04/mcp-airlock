@@ -929,8 +929,11 @@ async def test_approve_page_text_is_capped(upstream, audit_path):
     posted, page = await approve_page_text(upstream, audit_path, {"name": "api", "note": "a" * 20000})
     text = html.unescape(page.split("<pre>")[1].split("</pre>")[0])
     assert len(text) == 8000 and "not available" not in page
-    assert text.endswith("\n[cut at 8000 characters; the full text is in the original message]")  # the cut is not silent
-    assert "Dry-run preview" in posted and "Dry-run preview" not in text  # what the page lost, the message still has
+    assert text.endswith("\n[cut at 8000 characters; the full arguments are in the audit record for this key]")  # not silent
+    assert "Dry-run preview" not in text and "Dry-run preview" not in posted  # the message is cut shorter than the page
+    assert text.count("a" * 100) > posted.count("a" * 100)  # so it is the page that holds more of the argument
+    rows = [r for r in audit_rows(audit_path) if r["phase"] == "intent" and r["rule_id"] == "tier.L2.confirm"]
+    assert rows and rows[0]["args"]["note"] == "a" * 20000  # and the audit holds all of it, as the note says
 
 
 @pytest.mark.parametrize("kind", ["memory", pytest.param("postgres", marks=pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set"))])
