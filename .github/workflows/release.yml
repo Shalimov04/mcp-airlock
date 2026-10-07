@@ -23,6 +23,8 @@ jobs:
           test "$(jq -r '.packages[].version' server.json | sort -u)" = "$v"
       - name: chart appVersion must match the tag
         run: test "$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\} *$/\1/p' charts/mcp-airlock/Chart.yaml)" = "${GITHUB_REF_NAME#v}"
+      - name: README image tag must match the tag
+        run: scripts/check_image_tag.sh "$GITHUB_REF_NAME" README.md README.ru.md
       - run: uv build
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
