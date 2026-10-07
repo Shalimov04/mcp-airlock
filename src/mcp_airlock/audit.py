@@ -46,12 +46,14 @@ _SECRET_INLINE = re.compile(
 def _map_items(d: dict, fn) -> dict:
     """Scrub the keys, and keep two keys that scrub to the same text apart (`#2`) so no argument disappears."""
     out: dict[Any, Any] = {}
+    nxt: dict[Any, int] = {}  # next free suffix per scrubbed key: counting up from 2 for each key was quadratic
     for k, v in d.items():
-        nk = scrub(k) if isinstance(k, str) else k
-        n = 2
-        while nk in out:
-            nk = f"{scrub(k) if isinstance(k, str) else k}#{n}"
-            n += 1
+        base = nk = scrub(k) if isinstance(k, str) else k
+        if nk in out:
+            n = nxt.get(base, 2)
+            while (nk := f"{base}#{n}") in out:
+                n += 1
+            nxt[base] = n + 1
         out[nk] = fn(k, v)
     return out
 

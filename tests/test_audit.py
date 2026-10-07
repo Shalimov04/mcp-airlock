@@ -1393,6 +1393,17 @@ def test_postgres_alone_starts_at_genesis_after_a_row_without_a_hash(pg_dsn):
 def test_two_secret_shaped_keys_stay_two_arguments():
     out = redact({"sk-aaaaaaaa1": 1, "sk-bbbbbbbb2": 2, "sk-cccccccc3": 3})
     assert sorted(out.values()) == [1, 2, 3] and set(out) == {REDACTED, REDACTED + "#2", REDACTED + "#3"}
+    # a client key that already reads like a suffix is not overwritten
+    out = redact({"sk-aaaaaaaa1": 1, REDACTED + "#2": 2, "sk-bbbbbbbb2": 3})
+    assert out == {REDACTED: 1, REDACTED + "#2": 2, REDACTED + "#3": 3}
+
+
+def test_many_secret_shaped_keys_are_kept_apart_in_linear_time():
+    # A request of 40000 such keys fits in 1 MiB; counting up from #2 for each one took minutes on the event loop.
+    keys = {f"sk-aaaaaaaa{i:06d}": i for i in range(40_000)}
+    t = time.monotonic()
+    out = redact(keys)
+    assert time.monotonic() - t < 2.0 and len(out) == len(keys) and sorted(out.values()) == list(range(40_000))
 
 
 def test_a_credential_after_a_literal_backslash_escape_is_scrubbed():
