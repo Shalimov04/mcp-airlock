@@ -422,9 +422,10 @@ front of it, re-runs the policy, burns the key, then charges the blast-radius co
 Burning is an atomic insert in the store, so two replicas cannot both execute the same
 confirmation. A decline burns the key too, and so does an upstream that turns out to be
 unreachable right after the yes: the key is burned before the call is sent and is never
-un-burned, so the agent has to ask for a new prompt (the blast-radius charge is given back). A store failure between burning the key and reserving
-the blast-radius window burns the confirmation the same way: the call is denied with
-`store.unavailable` and the human approves again.
+un-burned, so the agent has to ask for a new prompt (the blast-radius charge is given back).
+A store failure between burning the key and reserving the blast-radius window burns the
+confirmation the same way: the call is denied with `store.unavailable` and the human approves
+again.
 
 Before the prompt is issued the proxy asks the upstream for `tools/list` and looks at the
 tool's schema. If the tool declares `dry_run`, the dry run is forwarded and its output is

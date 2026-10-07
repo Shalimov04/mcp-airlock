@@ -314,7 +314,7 @@ def test_a_pattern_the_length_cap_does_not_bound_is_a_load_error(pattern, n):
 
 
 @pytest.mark.parametrize("pattern, n", [
-    (".*-.*-prod", 2), ("a.*b.*c", 2), (r"\w*\w*\w*!", 2),  # quadratic: about a second at the cap, a lint warning
+    (".*-.*-prod", 2), ("a.*b.*c", 2), (r"\w*\w*\w*!", 2),  # quadratic: milliseconds at the cap, a lint warning
     ("[^/]+/[^/]+/[^/]+", 0), (r"\w+@\w+", 0), ("[a-z]+-[a-z]+-[a-z]+", 0),  # each repeat has one place to stop
     (r"^[\w.-]+@[\w-]+(\.[\w-]+)+$", 0), (r"(?:[a-z]+\.)+com", 1), (r"(\d{3}-)+\d{4}", 1), ("x(ab)*$", 0),
     (r"(\w+ )*\w+ \w+", 1),  # the group's iterations end at a space: only its count is open

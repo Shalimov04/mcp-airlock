@@ -192,7 +192,7 @@ def test_main_diff_non_json_upstream_is_an_error_line_not_a_traceback(monkeypatc
     "{arg: name, regex: '(a|aa)+'}",
     "{arg: name, regex: '(a)\\1'}",
     "{arg: name, regex: '(.*?,){11}P'}",  # a fixed outer count does not help
-    "{arg: name, regex: '.*-.*-.*-prod'}",  # cubic: minutes within the length cap
+    "{arg: name, regex: '.*-.*-.*-prod'}",  # cubic: seconds within the length cap
     "{arg: name, in: [a], regex: 'a'}",  # two matchers
     "{arg: name}",  # no matcher
     "{arg: name, in: []}",  # would deny every value
@@ -221,7 +221,7 @@ def test_lint_warns_about_a_quadratic_regex(tmp_path):
                                         "{arg: c, regex: 'tmp-.*'}, {arg: d, regex: '(\\.[a-z]+)*'}, {arg: e, regex: 'a.*b.*c'}]\n"))
     warns = [m for lvl, c, m in f if c == "where_regex_cost" and lvl == "WARN"]
     assert len(warns) == 2 and all("2 unbounded" in w and "1024 chars" in w for w in warns)
-    assert codes(f, "ERROR") == []  # a warning: the length cap bounds these at about a second, unlike three or more
+    assert codes(f, "ERROR") == []  # a warning: the length cap bounds these at milliseconds, unlike three or more
 
 
 def test_lint_where_env_unknown_warns_once_per_rule_and_name(tmp_path):
