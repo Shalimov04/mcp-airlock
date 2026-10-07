@@ -54,7 +54,17 @@ APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derive
 CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
-PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full text is in the original message]"
+# The message is cut shorter still (approvals.TEXT_MAX), so the rest is not there:
+# the audit intent record has it.
+PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full arguments are in the audit record for this key]"
+# The approve page is a capability URL behind SSO: never framed (clickjacking), never cached, never sent as a referrer.
+APPROVE_PAGE_HEADERS = {
+    "content-security-policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+}
 READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
 DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
@@ -257,8 +267,9 @@ class Airlock:
 
     async def verify_confirmation(self, params: dict[str, Any], principal: str, tool: str, args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         """Returns (mode, claims): mode is 'none' (no airlock token), 'accepted', 'pending' (token but no answer yet),
-        'pending:ignored' (pending, and an in-band accept was ignored in oob mode of the token or the replica) or 'deny:<rule>'.
-        Never consumes the key on accept; `_call` does that right before forwarding."""
+        'pending:ignored' (pending, and an in-band accept was ignored in oob mode of the token or the replica),
+        'reissue' (an airlock token that nothing can approve but the client, and no answer: the call is evaluated
+        as new) or 'deny:<rule>'. Never consumes the key on accept; `_call` does that right before forwarding."""
         state = params.get("requestState")
         if not isinstance(state, str) or not state.startswith(TOKEN_PREFIX):
             return "none", None  # plain call, or an upstream-owned requestState (forwarded untouched)
@@ -277,8 +288,16 @@ class Airlock:
         strict = self.approval_mode == "oob" or ("m" in claims and claims["m"] != "inband")
         if answer is None or (in_band and strict):
             # No answer for our question (or, in oob mode, one that does not count): approved out-of-band, or still waiting (nothing burned)
+            if await self.engine.store.is_consumed(claims["k"]):
+                return "deny:mrtr.replay", None  # executed or declined: "pending" would have the client poll until expiry
             if await self.engine.store.is_approved(claims["k"]):
                 return "accepted", claims
+            if not strict and not self.webhook:
+                # No approval channel but the client itself, and it sent no answer: nothing to wait for, so the
+                # call is evaluated as new and the question is asked again (a fresh token; this one stays unused).
+                # Not "none": the airlock requestState is still in params and must be stripped before forwarding,
+                # whatever tier the retry lands on.
+                return "reissue", None
             return ("pending" if answer is None else "pending:ignored"), claims
         if in_band:
             return "accepted", claims
@@ -406,10 +425,12 @@ class Airlock:
             detail = "in-band accept ignored (approval mode oob)" if mode == "pending:ignored" else None
             for phase in ("intent", "outcome"):
                 self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
+            message = ("Awaiting approval. " + ("The in-band accept was ignored (approval mode oob). " if detail else "")
+                       + "Retry with this requestState once the approver has confirmed.")
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
                 "resultType": "input_required", "requestState": params["requestState"],
-                "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"],
-                          META + "message": "Awaiting approval. Retry with this requestState once the approver has confirmed."}}})
+                "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"], META + "message": message,
+                          META + "verdict": "confirm", META + "rule_id": "mrtr.pending"}}})
         if d.rule_id == "tier.L2.confirmed":  # the one path that executes for real: burn the key first, atomically
             if not await self.engine.store.consume_once(claims["k"], claims["exp"]):
                 self._audit_deny(base, "mrtr.replay", d.tier, "idempotency key already used")
@@ -724,32 +745,67 @@ class Airlock:
         claims = self.verify_token(request.path_params["token"], APPROVE_PREFIX)  # an agent's requestState is refused here
         return claims if claims and claims["exp"] >= time.time() else None
 
+    async def _approval_state(self, key: str) -> str:
+        """'consumed' (executed or declined, nothing to approve any more), 'approved' or 'open'."""
+        if await self.engine.store.is_consumed(key):
+            return "consumed"
+        return "approved" if await self.engine.store.is_approved(key) else "open"
+
+    def _approve_html(self, body: str, status_code: int = 200) -> HTMLResponse:
+        return HTMLResponse(body, status_code=status_code, headers=APPROVE_PAGE_HEADERS)
+
     async def approve_page(self, request: Request) -> Response:
         if (claims := self._approval_claims(request)) is None:
-            return HTMLResponse("Invalid or expired approval link.", status_code=400)
+            return self._approve_html("Invalid or expired approval link.", status_code=400)
         # GET only renders (link unfurlers and prefetchers do GETs); the POST below approves.
         try:  # a store outage leaves the page without the text, like a failed save
             text = await self.engine.store.get_prompt(claims["k"])
         except Exception as e:
             log.warning("reading the approval prompt text failed: %s", type(e).__name__)
             text = None
+        try:  # read apart from the text: a failure here must not throw away a text already read
+            state = await self._approval_state(claims["k"])
+        except Exception as e:
+            log.warning("reading the approval state failed: %s", type(e).__name__)
+            state = "open"  # the button stays: the POST checks again before it records anything
         details = (f"<pre>{html.escape(text)}</pre>" if text is not None else
                    "<p>The details of this request are not available; check the original message before approving.</p>")
-        return HTMLResponse(f"""<!doctype html><title>mcp-airlock approval</title>
+        action = {"consumed": "<p>This request was already executed or declined; it can no longer be approved.</p>",
+                  "approved": "<p>Already approved. The agent can retry now.</p>",
+                  "open": '<form method="post"><button type="submit">Approve</button></form>'}[state]
+        return self._approve_html(f"""<!doctype html><title>mcp-airlock approval</title>
 <h2>Approve tool call?</h2>
 <p><b>{html.escape(claims['t'])}</b> requested by <b>{html.escape(claims['p'])}</b> in <b>{html.escape(claims['e'])}</b><br>
 idempotency key <code>{html.escape(claims['k'])}</code></p>
 {details}
-<form method="post"><button type="submit">Approve</button></form>""")
+{action}""")
 
     async def approve_submit(self, request: Request) -> Response:
         if (claims := self._approval_claims(request)) is None:
-            return HTMLResponse("Invalid or expired approval link.", status_code=400)
-        await self.engine.store.approve(claims["k"], claims["exp"])
+            return self._approve_html("Invalid or expired approval link.", status_code=400)
+        tool, principal = html.escape(claims["t"]), html.escape(claims["p"])
+        # A burned key (executed or declined) can never run again: approving it would only put a misleading
+        # approval into the audit. A second click on an approved one changes nothing and is not recorded twice.
+        try:
+            state = await self._approval_state(claims["k"])
+            if state == "open":
+                await self.engine.store.approve(claims["k"], claims["exp"])
+        except Exception as e:  # a store outage: say so with the page's headers, record nothing (a 500 would carry neither)
+            log.warning("recording the approval failed: %s", type(e).__name__)
+            return self._approve_html("The store did not answer, so the approval was not recorded. Try again later.", status_code=503)
+        if state == "consumed":
+            return self._approve_html(f"{tool} for {principal} was already executed or declined; nothing to approve.", status_code=409)
+        if state == "approved":
+            return self._approve_html(f"{tool} for {principal} is already approved. The agent can retry now.")
         headers = {k.lower(): v for k, v in request.headers.items()}
-        who = await self._resolve(headers)
-        # Who clicked: a verified token when there is one, else whatever the fronting SSO proxy put in a header.
-        if who and headers.get("authorization"):
+        try:
+            who = await self._resolve(headers)
+        except Exception as e:  # the approval is recorded already: a 500 here would hide it from the audit. Unverified, then.
+            log.warning("resolving the approver failed: %s", type(e).__name__)
+            who = None
+        # Who clicked: "verified" only for a subject out of a token this process checked. Any other Authorization
+        # header (Basic, a bare value, a bearer with no JWT configured) leaves the header-derived name unverified.
+        if who and who.verified:
             approver, source = who.sub, "verified"
         else:
             approver, source = (who.sub if who else headers.get("x-airlock-principal") or headers.get("x-forwarded-user")), "header"
@@ -757,7 +813,7 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         detail = {"key": claims["k"], "approved_by": approver, "approved_by_source": source if approver else None}
         self.audit.write(phase="intent", verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
         self._outcome(verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
-        return HTMLResponse(f"Approved {html.escape(claims['t'])} for {html.escape(claims['p'])}. The agent can retry now.")
+        return self._approve_html(f"Approved {tool} for {principal}. The agent can retry now.")
 
 
 def _ms(t0: float) -> int:

@@ -47,6 +47,38 @@
 * `airlock-audit query` reads the rotated files too, oldest first.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.
+* The approver of an out-of-band confirmation is recorded as `verified` only when the identity
+  came out of a bearer token the proxy checked. A `Basic` header, a bare value or a bearer with no
+  JWT configured used to label the header-supplied name `verified`.
+* A JWT whose `sub` is empty or blank is refused with 401 `principal.missing` instead of being
+  accepted as principal `""`; a blank `X-Airlock-Principal` is refused the same way. So is a name
+  with surrounding whitespace, from either source: trimmed, `alice ` would be `alice`.
+* The Slack approval message escapes `&`, `<` and `>` in the arguments and the dry-run preview, so
+  an agent cannot plant a `<url|label>` link or an `<!channel>` mention in it.
+* The text of the approval message is cut at 3500 characters, with a note, before the proxy's
+  `Approve:` line is added, so the line is always delivered and always last: Telegram refuses a
+  longer message, and Slack truncates one, which an oversized argument could use to cut the real
+  line off behind a planted one. The approve page's cut note now points at the audit record.
+* A failure while working out who clicked the approve button (after the approval was recorded)
+  records the click as unverified instead of answering a bare 500 that the audit never sees.
+* A principal named `group:<g>` no longer gets the tier override of group `<g>`: `group:` keys in
+  `principals` match group membership only.
+* The approve page responses carry `Cache-Control: no-store`, `Referrer-Policy: no-referrer`,
+  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a Content-Security-Policy with
+  `frame-ancestors 'none'`.
+* A `tools/call` retried with a `requestState` whose confirmation was already executed or declined,
+  and no answer, is refused with `mrtr.replay` instead of staying `pending` until the token
+  expires. In `inband` mode without a webhook such a retry gets the question again with a fresh
+  `requestState`, since there is nothing to wait for.
+* The `pending` result carries `verdict: confirm` and `rule_id: mrtr.pending` in `_meta`, like
+  every other `tools/call` result, and its message says when an in-band accept was ignored.
+* `POST` on an approve link whose confirmation was already executed or declined answers 409 and
+  records nothing; it used to say "Approved" and write `mrtr.approved_oob`. A second `POST` on an
+  approved confirmation changes nothing and is not recorded again, and the page shows the state.
+  A store that does not answer during the `POST` gives 503 with the page's headers, not a bare 500.
+* A startup warning (an error under `--strict`) for an `AIRLOCK_APPROVAL_WEBHOOK` that is not an
+  `http(s)` URL with a host, for a Telegram URL without `AIRLOCK_TELEGRAM_CHAT`, and for a chat id
+  without a webhook. Such a proxy used to start in `oob` mode with nothing able to approve.
 
 ## 0.3.0 - 2026-10-02
 

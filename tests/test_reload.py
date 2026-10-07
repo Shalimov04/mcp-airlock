@@ -226,9 +226,19 @@ async def test_the_environment_stays_the_one_the_process_runs_in(upstream, audit
         issued = await call(c, "delete_service", {"name": "api"})  # the token is bound to the environment of its day
         write_policy(tmp_path / "policy.yaml", {**policy_data(), "environment": "staging"})
         assert al.reload().ok and al.engine.policy.environment == expect
-        retry = await call(c, "delete_service", {"name": "api"}, extra={"requestState": issued["requestState"]})
-        assert retry["_meta"][META + "status"] == "pending"  # still bound, not mrtr.mismatch: a reload voids no confirmation
+        retry = await call(c, "delete_service", {"name": "api"}, extra=accept(issued["requestState"]))
+        assert retry["_meta"][META + "rule_id"] == "tier.L2.confirmed"  # still bound, not mrtr.mismatch: a reload voids no confirmation
 
+
+async def test_an_oob_confirmation_stays_pending_across_a_reload(upstream, audit_path, tmp_path):
+    hook = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    al = reloadable(upstream, audit_path, tmp_path, webhook="https://hooks.example/x", public_url="https://a.example",
+                    notify_http=hook)
+    async with proxy(al) as c:
+        issued = await call(c, "delete_service", {"name": "api"})
+        assert al.reload().ok
+        retry = await call(c, "delete_service", {"name": "api"}, extra={"requestState": issued["requestState"]})
+        assert retry["_meta"][META + "status"] == "pending"  # still bound, not mrtr.mismatch
 
 # ---------------------------------------------------------------- what carries over
 

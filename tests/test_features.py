@@ -110,6 +110,8 @@ def test_policy_tier_resolution(tmp_path):
     assert pol.tier("set_replicas", principal="alice", groups=("readonly",)) == "L3"  # principal beats group
     assert pol.tier("delete_service", principal="alice") == "L2"
     assert pol.tier("nope", principal="alice") is None
+    assert pol.tier("set_replicas", principal="group:oncall") == "L2"  # named like the group, not in it
+    assert pol.tier("set_replicas", principal="group:oncall", groups=("oncall",)) == "L3"
 
 
 async def test_group_from_jwt_changes_tier(upstream, audit_path, tmp_path):
@@ -130,6 +132,20 @@ async def test_group_from_jwt_changes_tier(upstream, audit_path, tmp_path):
         assert res["resultType"] == "input_required"
         assert upstream.CALLS[-1]["meta"][META + "principal"] == "carol"
         assert upstream.CALLS[-1]["meta"][META + "groups"] == ["devs"]
+
+
+async def test_a_principal_named_like_a_group_does_not_get_the_group_tier(upstream, audit_path, tmp_path):
+    p = tmp_path / "p.yaml"
+    p.write_text(PRINCIPAL_POLICY)  # "group:oncall" skips confirmation in prod
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
+    al = Airlock(Policy.load(p), "http://localhost:9001/mcp", AuditLog(audit_path), http=http, trust_principal_header=True)
+    args = {"names": ["api"], "replicas": 1}
+    async with proxy_client(al) as c:
+        res = await call(c, "set_replicas", args, principal="group:oncall")
+        assert res["resultType"] == "input_required" and res["_meta"][META + "rule_id"] == "tier.L2.confirm"
+        res = await call(c, "set_replicas", args, principal="group:oncall", headers={"x-airlock-groups": "oncall"})
+        assert res["_meta"][META + "rule_id"] == "tier.L3.auto"  # membership still counts, the name alone does not
+    assert len([x for x in upstream.CALLS if x["tool"] == "set_replicas" and not x["args"].get("dry_run")]) == 1
 
 
 # 3. catalog cache honouring ttlMs ---------------------------------------------------------------------------------
@@ -273,6 +289,38 @@ async def test_approver_identity_recorded(upstream, audit_path):
     assert row["detail"]["approved_by_source"] == "header"  # unverified: the fronting proxy's word, marked as such
 
 
+@pytest.mark.parametrize("authorization", ["Basic Zm9vOmJhcg==", "x", "Bearer garbage"])
+async def test_approver_with_a_non_jwt_authorization_header_stays_unverified(upstream, audit_path, authorization):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)  # header trust only, no JWT configured
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": "api"})
+        r = await c.post(approve_path(posted), headers={"authorization": authorization, "x-airlock-principal": "mallory"})
+        assert r.status_code == 200
+    row = audit_rows(audit_path)[-1]
+    assert row["rule_id"] == "mrtr.approved_oob"
+    assert row["detail"]["approved_by"] == "mallory" and row["detail"]["approved_by_source"] == "header"
+
+
+async def test_approver_is_verified_only_from_a_token_the_proxy_checked(upstream, audit_path):
+    import jwt as pyjwt
+    posted: list[str] = []
+    secret = "s3cret-s3cret-s3cret-s3cret-32b!"
+    al = webhook_airlock(upstream, audit_path, posted, identity=IdentityConfig(jwt_secret=secret, trust_header=True))
+    good = pyjwt.encode({"sub": "boss", "exp": 4102444800}, secret, algorithm="HS256")
+    bad = pyjwt.encode({"sub": "boss", "exp": 4102444800}, "other-" + secret, algorithm="HS256")
+    cases = [({"authorization": "Basic Zm9vOmJhcg==", "x-airlock-principal": "mallory"}, "mallory", "header"),
+             ({"authorization": f"Bearer {bad}", "x-airlock-principal": "mallory"}, "mallory", "header"),
+             ({"x-airlock-principal": "mallory"}, "mallory", "header"),
+             ({"authorization": f"Bearer {good}", "x-airlock-principal": "mallory"}, "boss", "verified")]
+    async with proxy_client(al) as c:
+        for i, (headers, approver, source) in enumerate(cases):
+            await call(c, "delete_service", {"name": f"svc{i}"})  # one prompt per case: a second click is not recorded
+            assert (await c.post(approve_path(posted), headers=headers)).status_code == 200
+            detail = audit_rows(audit_path)[-1]["detail"]
+            assert (detail["approved_by"], detail["approved_by_source"]) == (approver, source), headers
+
+
 async def test_accept_with_explicit_dry_run_does_not_burn_key(client, upstream):
     token = (await call(client, "delete_service", {"name": "api"}))["requestState"]
     res = await call(client, "delete_service", {"name": "api", "dry_run": True}, extra=accept(token))
@@ -313,6 +361,21 @@ async def test_header_groups_ignored_unless_header_trusted(upstream, audit_path,
                       principal="mallory", headers={"x-airlock-groups": "oncall"})
     assert r.status_code == 401
     assert upstream.CALLS == []
+
+
+async def test_jwt_with_a_blank_sub_is_refused_like_a_missing_principal(upstream, audit_path):
+    import jwt as pyjwt
+    secret = "s3cret-s3cret-s3cret-s3cret-32b!"
+    al = make_airlock(upstream, audit_path, env="dev", identity=IdentityConfig(jwt_secret=secret))
+    async with proxy_client(al) as c:
+        for sub in ("", "   "):
+            tok = pyjwt.encode({"sub": sub, "exp": 4102444800}, secret, algorithm="HS256")
+            r = await rpc(c, "tools/call", {"name": "restart_service", "arguments": {"name": "api"}}, principal=None,
+                          headers={"authorization": f"Bearer {tok}"})
+            assert r.status_code == 401, r.text
+    assert upstream.CALLS == []
+    rows = audit_rows(audit_path)
+    assert rows and all(r["rule_id"] == "principal.missing" and r["principal"] is None for r in rows)
 
 
 async def test_catalog_cache_is_per_principal(upstream, audit_path):
@@ -654,7 +717,7 @@ async def test_oob_decline_cancel_and_malformed_answers_still_burn_the_key(upstr
         token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
         res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": token, "inputResponses": {CONFIRM_KEY: answer}})
         assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.declined"
-        assert (await c.post(approve_path(posted))).status_code == 200  # approving afterwards does not revive it
+        assert (await c.post(approve_path(posted))).status_code == 409  # a burned key cannot be approved any more
         res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
         assert res["isError"] and res["_meta"][META + "rule_id"] == "mrtr.replay"
     assert real_deletes(upstream) == []
@@ -866,8 +929,11 @@ async def test_approve_page_text_is_capped(upstream, audit_path):
     posted, page = await approve_page_text(upstream, audit_path, {"name": "api", "note": "a" * 20000})
     text = html.unescape(page.split("<pre>")[1].split("</pre>")[0])
     assert len(text) == 8000 and "not available" not in page
-    assert text.endswith("\n[cut at 8000 characters; the full text is in the original message]")  # the cut is not silent
-    assert "Dry-run preview" in posted and "Dry-run preview" not in text  # what the page lost, the message still has
+    assert text.endswith("\n[cut at 8000 characters; the full arguments are in the audit record for this key]")  # not silent
+    assert "Dry-run preview" not in text and "Dry-run preview" not in posted  # the message is cut shorter than the page
+    assert text.count("a" * 100) > posted.count("a" * 100)  # so it is the page that holds more of the argument
+    rows = [r for r in audit_rows(audit_path) if r["phase"] == "intent" and r["rule_id"] == "tier.L2.confirm"]
+    assert rows and rows[0]["args"]["note"] == "a" * 20000  # and the audit holds all of it, as the note says
 
 
 @pytest.mark.parametrize("kind", ["memory", pytest.param("postgres", marks=pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set"))])

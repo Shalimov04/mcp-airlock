@@ -19,7 +19,9 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
 
 1. Works out who is calling. That comes from a JWT (`Authorization: Bearer`) or, if you run
    it behind a gateway that already did the authentication, from an `X-Airlock-Principal`
-   header. It is never taken from the request body. No principal, no call.
+   header. It is never taken from the request body. No principal, no call. A name that is
+   blank or has whitespace around it is no principal either, from either source: trimmed,
+   `alice ` would be `alice`.
 2. Looks the tool up in the policy. Tools that are not listed are refused. Listed tools have
    a risk tier per environment, so the same `delete_service` can be free in `dev` and gated
    in `prod`.
@@ -40,8 +42,8 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
 6. Writes two audit records, one before the upstream call and one after, whatever happened.
 
 Refusals come back as tool results with `isError: true`, not as protocol errors, so the
-model sees why and can do something else. Every result carries the verdict and the rule
-that produced it in `_meta`.
+model sees why and can do something else. Every `tools/call` result, a pending one included,
+carries the verdict and the rule that produced it in `_meta`.
 
 The proxy accepts three methods: `tools/call` as above, `tools/list` and `server/discover`.
 A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of
@@ -241,7 +243,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. A positive integer. See [Postgres](#postgres). |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `https://api.telegram.org/bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
-| `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. |
+| `AIRLOCK_TELEGRAM_CHAT` | Chat id for the Telegram case. A Telegram URL without it is a startup warning: no message can be sent. |
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_OTEL_FILE` | Path of the span file, the same as `--otel-file`. |
@@ -273,6 +275,9 @@ At startup the proxy prints a warning to stderr for each of these:
 - `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
 - `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the
   approve link
+- `AIRLOCK_APPROVAL_WEBHOOK` that is not an `http(s)` URL with a host, or a Telegram URL without
+  `AIRLOCK_TELEGRAM_CHAT`: no message can be delivered, and in `oob` mode nothing can be approved
+- `AIRLOCK_TELEGRAM_CHAT` without `AIRLOCK_APPROVAL_WEBHOOK`: it is ignored
 - an OTLP endpoint without the `otlp` extra: spans are not exported
 
 With `--strict` any warning stops the start with exit code 2.
@@ -314,10 +319,12 @@ tools:
 ```
 
 A tier is resolved in this order: an entry for the exact principal, then the first matching
-group in the order the token lists them, then `tiers[environment]`. The `description` is what
-the person approving the call gets to read, so write it for them. `output` and `blast_radius`
-on a tool replace the top-level values for that tool; `window_s` is at most 86400 (a day), as
-far back as the store keeps usage. Unknown keys are a load error.
+group in the order the token lists them, then `tiers[environment]`. Keys starting with `group:`
+are groups only: a caller whose own name starts with `group:` is matched by the groups it is in,
+never by its name. The `description` is what the person approving the call gets to read, so
+write it for them. `output` and `blast_radius` on a tool replace the top-level values for that
+tool; `window_s` is at most 86400 (a day), as far back as the store keeps usage. Unknown keys
+are a load error.
 
 `where` limits a tool by argument values. Every rule that applies must hold, otherwise the call is
 denied with `args.violation`. The check runs right after the allowlist, before the tier and the
@@ -382,14 +389,18 @@ only ever sees `requestState`, cannot forge it. Opening the link shows a page wi
 button; the `GET` does nothing (link previews and prefetchers would otherwise approve
 things), the `POST` records the approval. The agent finds out by repeating the call
 with `requestState` and no `inputResponses`: it gets `input_required` back with
-`status: pending` until the button is pressed, then the call runs. A human takes minutes; the
-retry loop built into the official Python SDK client gives up after about two seconds of
-polling with `InputRequiredRoundsExceededError`. Catch it and retry later with the same
-`requestState`.
+`status: pending` (and `verdict: confirm`, `rule_id: mrtr.pending` in `_meta`) until the button
+is pressed, then the call runs. A human takes minutes; the retry loop built into the official
+Python SDK client gives up after about two seconds of polling with
+`InputRequiredRoundsExceededError`. Catch it and retry later with the same `requestState`.
+A retry without an answer for a key that was already executed or declined is refused with
+`mrtr.replay`, not left pending. In `inband` mode without a webhook there is nothing to wait
+for, so such a retry gets the question again, with a fresh `requestState`; it is evaluated like
+a new call, dry run included, and costs the same.
 
-In `oob` mode an in-band `accept` leaves the call `pending` and the audit record says the
-accept was ignored; a decline still burns the key. The mode travels in the token: an `oob`
-token or an `oob` replica ignores the in-band `accept`.
+In `oob` mode an in-band `accept` leaves the call `pending`; the result's message and the audit
+record say the accept was ignored. A decline still burns the key. The mode travels in the token:
+an `oob` token or an `oob` replica ignores the in-band `accept`.
 
 A failed webhook post is logged as the exception class and the HTTP status, never the URL,
 which holds the Telegram bot token or the Slack secret path. In `oob` mode a failed post
@@ -397,13 +408,31 @@ means nobody can approve that prompt: a new call without `requestState` issues a
 and posts again. httpx itself logs every request URL at `INFO`, so if you configure logging,
 keep the `httpx` logger at `WARNING`.
 
+In the Slack message `&`, `<` and `>` in the arguments and the dry-run preview are escaped, so
+an agent cannot plant a `<url|label>` link with a hidden target or an `<!channel>` mention in
+it. A bare URL in the arguments or the preview still shows as a URL, and the preview keeps its
+line breaks, so an agent can still put an `Approve: https://...` line of its own into the
+text. The proxy's link is the `Approve:` line at the end of the message; read that one. It is
+always there and always last: the text before it is cut at 3500 characters with a note, so the
+message fits Telegram's 4096-character limit and Slack never truncates the proxy's line away
+behind a planted one. The agent cannot approve its own call either way.
+
 The approve page is a capability URL. Anyone holding it can press the button. Put
 `/approve` behind your SSO proxy or VPN; whatever identity that proxy passes in
-`X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval, marked as
-unverified unless it came from a bearer token the proxy could check. The page shows the prompt
+`X-Airlock-Principal` or `X-Forwarded-User` is recorded next to the approval as
+`approved_by_source: header`. It is `verified` only when the identity came out of a bearer
+token the proxy itself checked (a JWT secret or JWKS URL is configured); any other
+`Authorization` header, `Basic` included, does not change that. The page shows the prompt
 text (the redacted arguments and up to 2000 characters of the dry-run preview), cut at 8000
-characters with a note, kept in the store until the prompt expires. The approval itself is
-audited with `method: approve` and rule `mrtr.approved_oob`.
+characters with a note, kept in the store until the prompt expires, and the state of the
+request: once it has been executed or declined there is no button, and a `POST` answers 409
+without recording anything; a later `POST` on an approved request changes nothing and is not
+recorded again (two clicks that reach a Postgres store at the same moment can both be recorded;
+the approval is still used once). If the store does not answer, the `POST` answers 503 and
+records nothing. The responses are sent with `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a
+Content-Security-Policy that forbids framing. The approval itself is audited with
+`method: approve` and rule `mrtr.approved_oob`.
 
 ## Audit
 

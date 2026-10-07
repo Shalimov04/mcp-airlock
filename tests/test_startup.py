@@ -107,6 +107,43 @@ def test_default_public_url_without_a_webhook_is_fine(webhook):
     assert warn(webhook=webhook, public_url="http://127.0.0.1:9000") == []
 
 
+PUBLIC = "https://airlock.example.com"
+TELEGRAM = "https://api.telegram.org/bot123:SECRET/sendMessage"
+
+
+@pytest.mark.parametrize("webhook", ["ht!tp://bad url/x", "hooks.slack.com/services/x", "ftp://hooks/x", "https:///x",
+                                     "https://hooks.slack.com:abc/x", "https://"])
+def test_a_webhook_that_is_not_an_http_url_with_a_host_warns(webhook):
+    ws = warn(webhook=webhook, public_url=PUBLIC)
+    only(ws, "AIRLOCK_APPROVAL_WEBHOOK is not an http(s) URL")
+    assert "bad url" not in ws[0] and "hooks" not in ws[0]  # the value is never echoed
+
+
+@pytest.mark.parametrize("webhook", ["https://hooks.slack.com/services/T/B/X", "http://127.0.0.1:8081/hook", TELEGRAM])
+def test_a_usable_webhook_url_is_fine(webhook):
+    assert warn(webhook=webhook, public_url=PUBLIC, telegram_chat="-100") == []
+
+
+def test_a_telegram_webhook_without_a_chat_warns_without_echoing_the_token():
+    ws = warn(webhook=TELEGRAM, public_url=PUBLIC)
+    only(ws, "AIRLOCK_TELEGRAM_CHAT")
+    assert "SECRET" not in ws[0] and "123" not in ws[0]
+    assert warn(webhook=TELEGRAM, public_url=PUBLIC, telegram_chat="-100") == []
+    assert warn(webhook="https://hooks.slack.com/x", public_url=PUBLIC) == []  # Slack needs no chat
+
+
+def test_a_chat_without_a_webhook_warns():
+    only(warn(telegram_chat="-100"), "AIRLOCK_TELEGRAM_CHAT is set without AIRLOCK_APPROVAL_WEBHOOK")
+    assert warn(telegram_chat="") == []
+
+
+def test_the_webhook_warnings_are_plain_sentences():
+    ws = warn(webhook="nope", public_url=PUBLIC) + warn(webhook=TELEGRAM, public_url=PUBLIC) + warn(telegram_chat="1")
+    assert len(ws) == 3
+    for w in ws:
+        assert "\n" not in w and w.endswith(".") and not re.search(r"error|fail|traceback", w, re.I), w
+
+
 WEAK_ID = IdentityConfig(jwks_url="https://idp/jwks", jwt_secret="short", trust_header=True)
 WEAK = dict(secret=None, store_dsn="postgresql://x", webhook="https://hooks/x", public_url=None)
 
@@ -137,7 +174,8 @@ def test_warnings_are_plain_sentences_that_avoid_the_words_the_e2e_run_greps_for
 # ---------------------------------------------------------------- main()
 
 ENV_VARS = ["AIRLOCK_JWT_SECRET", "AIRLOCK_JWKS_URL", "AIRLOCK_JWT_ISSUER", "AIRLOCK_JWT_AUDIENCE", "AIRLOCK_TRUST_PRINCIPAL_HEADER",
-            "AIRLOCK_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK", "AIRLOCK_PUBLIC_URL", "AIRLOCK_PINS",
+            "AIRLOCK_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK", "AIRLOCK_TELEGRAM_CHAT", "AIRLOCK_PUBLIC_URL",
+            "AIRLOCK_PINS",
             "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]
 GOOD_ENV = {"AIRLOCK_JWT_SECRET": KEY32, "AIRLOCK_SECRET": "s"}
 STUB_PROVIDER = SimpleNamespace(shutdown=lambda: None)
@@ -252,3 +290,23 @@ def test_otlp_without_the_extra_stops_under_strict(monkeypatch, capsys):
                  "--strict", seen=seen)
     assert e.value.code == 2 and not seen["built"]
     assert "mcp-airlock[otlp]" in warning_lines(capsys)[0]
+
+
+def test_a_telegram_webhook_without_a_chat_stops_under_strict_and_starts_with_one(monkeypatch, capsys):
+    env = {**GOOD_ENV, "AIRLOCK_APPROVAL_WEBHOOK": TELEGRAM, "AIRLOCK_PUBLIC_URL": PUBLIC}
+    with pytest.raises(SystemExit) as e:
+        run_main(monkeypatch, env, "--strict")
+    assert e.value.code == 2
+    lines = warning_lines(capsys)
+    assert len(lines) == 1 and "AIRLOCK_TELEGRAM_CHAT" in lines[0] and "SECRET" not in lines[0], lines
+    assert run_main(monkeypatch, {**env, "AIRLOCK_TELEGRAM_CHAT": "-100"}, "--strict")["ran"]
+    assert capsys.readouterr().err == ""
+
+
+def test_a_malformed_webhook_url_stops_under_strict(monkeypatch, capsys):
+    env = {**GOOD_ENV, "AIRLOCK_APPROVAL_WEBHOOK": "ht!tp://bad url/x", "AIRLOCK_PUBLIC_URL": PUBLIC}
+    with pytest.raises(SystemExit) as e:
+        run_main(monkeypatch, env, "--strict")
+    assert e.value.code == 2
+    lines = warning_lines(capsys)
+    assert len(lines) == 1 and "not an http(s) URL" in lines[0], lines
