@@ -508,6 +508,15 @@ empty audit file) and `hash` is the sha256 of the record's canonical JSON withou
 (keys sorted, no spaces, UTF-8, non-ASCII not escaped). The Postgres sink stores the same two
 values in `rec`.
 
+A crash or a full disk can leave the last line torn: part of a record, with no newline. Such
+a fragment can never be chained. The proxy cuts it off rather than keep it: at startup it
+appends the fragment to `audit.jsonl.torn`, cuts `audit.jsonl` back to the last newline and
+logs a warning naming both; a short write it notices itself is cut back at once. The chain
+goes on from the last whole record, so `verify` still passes. A fragment that cannot be cut
+(an append-only file, say) stays where it is, and `verify` reports that line as `not JSON`.
+A last line edited into non-JSON with no newline is moved the same way at the next start, so
+keep `audit.jsonl.torn`: it is the evidence.
+
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
 `sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
@@ -528,8 +537,17 @@ uv run airlock-audit query --stats
 `query` reads `audit.jsonl` and its rotated files, oldest first, and prints matching records
 as JSONL, newest last. `--jsonl` names another file. The filters are `--principal`, `--tool`,
 `--verdict`, `--rule`, `--phase` (`intent` or `outcome`) and `--since` (`30m`, `2h`, `7d` or an
-ISO 8601 time); `--limit` keeps the newest N; `--stats` prints counts by verdict and rule
-instead. The same filters work against Postgres with `--dsn` or `AIRLOCK_AUDIT_DSN`.
+ISO 8601 time); `--limit` keeps the newest N (0: all); `--stats` prints counts by
+verdict and rule instead. The same filters work against Postgres with `--dsn` or
+`AIRLOCK_AUDIT_DSN`, with the same connect timeout as the proxy. A line that is not a record
+(a torn line left by an older version, say) is skipped with `airlock-audit: skipped
+audit.jsonl:57: not JSON` (or `not a record`, for JSON that is not an object) on stderr and
+the rest of the log is still printed. A missing file, a DSN that does not parse, a Postgres
+that does not answer or a missing `postgres` extra is one `airlock-audit: ...` line and exit
+code 1, never a traceback. A Postgres error keeps libpq's words (refused, timed out, no such
+table), but every value from the DSN other than a number or a setting such as `sslmode` (the
+host, socket path, user, database or password) is blanked to `"..."`, quoted by libpq or not,
+so none of them reaches the terminal or a log.
 
 The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
 it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and

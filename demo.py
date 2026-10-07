@@ -89,7 +89,7 @@ def main() -> None:
         diff_against_live_upstream()
     finally:
         px.terminate(); up.terminate(); px.wait(); up.wait()
-    rows = [json.loads(l) for l in (EX / "audit.jsonl").read_text().splitlines()]
+    rows = [json.loads(l) for l in (EX / "audit.jsonl").read_bytes().split(b"\n") if l.strip()]
     print(f"\n▶ audit: {len(rows)} records in {EX / 'audit.jsonl'} (2 per call). Last two:")
     for r in rows[-2:]:
         print("  ", json.dumps(r, ensure_ascii=False))

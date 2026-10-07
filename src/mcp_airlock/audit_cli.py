@@ -7,42 +7,83 @@ import json
 import os
 import re
 import sys
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .audit import GENESIS, row_hash
-from .pg import psycopg_module
+from .pg import psycopg_module, with_conn_defaults
 
 FILTERS = ("principal", "tool", "verdict", "rule_id", "phase")
 _REL = re.compile(r"^(\d+)([mhd])$")
+_QUOTED = re.compile(r'"[^"]*"|(?<!\w)\'(?:[^\'\\]|\\.)*\'')  # a value libpq quotes, or one psycopg repr()s
+# DSN keys whose value is one of libpq's own settings, not something the operator chose: left in the error text
+_SETTINGS = frozenset(("sslmode", "sslnegotiation", "gssencmode", "channel_binding", "target_session_attrs",
+                       "load_balance_hosts", "require_auth", "client_encoding", "replication", "sslsni",
+                       "ssl_min_protocol_version", "ssl_max_protocol_version"))
 _UNIT = {"m": "minutes", "h": "hours", "d": "days"}
 
 
 def parse_since(s: str) -> datetime:
-    if m := _REL.match(s):
-        return datetime.now(timezone.utc) - timedelta(**{_UNIT[m[2]]: int(m[1])})
-    dt = datetime.fromisoformat(s)
+    try:
+        if m := _REL.match(s):
+            return datetime.now(timezone.utc) - timedelta(**{_UNIT[m[2]]: int(m[1])})
+        dt = datetime.fromisoformat(s)
+    except (ValueError, OverflowError):  # argparse turns only ValueError into a usage error: a huge "d" count overflows
+        raise argparse.ArgumentTypeError(f"expected 30m, 2h, 7d or an ISO 8601 time, got {s!r}") from None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def count(s: str) -> int:
+    try:
+        n = int(s)
+    except ValueError:
+        n = -1
+    if n < 0:  # rows[-limit:] would turn a negative N into "drop the oldest N", and Postgres rejects it
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {s!r}")
+    return n
+
+
+def _skip(path: str, n: int, why: str) -> None:
+    sys.stderr.write(f"airlock-audit: skipped {path}:{n}: {why}\n")
 
 
 def query_jsonl(path: str, where: dict, since: datetime | None, limit: int | None) -> list[dict]:
     files = default_files(path)  # rotated files first, so the output stays oldest first
     if not files:
-        raise FileNotFoundError(path)
-    rows = []
+        raise FileNotFoundError(f"no audit file at {path}")
+    rows: deque = deque(maxlen=limit or None)  # the newest `limit` matches, without holding the whole log
     for f in files:
-        for line in Path(f).read_text(encoding="utf-8").splitlines():  # ponytail: full scan; fine up to ~1M lines
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            if all(r.get(k) == v for k, v in where.items()) and (since is None or datetime.fromisoformat(r["ts"]) >= since):
+        # Bytes split on \n alone, as verify reads them: str.splitlines also splits on U+2028, U+2029, U+0085 and a
+        # few control characters, which the writer leaves raw inside client-chosen strings.
+        with open(f, "rb") as fh:  # ponytail: full scan; fine up to ~1M lines
+            for n, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:  # a torn line, or garbage: the rest of the log is still readable
+                    _skip(f, n, "not JSON")
+                    continue
+                if not isinstance(r, dict):
+                    _skip(f, n, "not a record")
+                    continue
+                if not all(r.get(k) == v for k, v in where.items()):
+                    continue
+                if since is not None:
+                    try:
+                        if datetime.fromisoformat(r["ts"]) < since:
+                            continue
+                    except (KeyError, TypeError, ValueError):
+                        _skip(f, n, "bad ts")
+                        continue
                 rows.append(r)
-    return rows[-limit:] if limit else rows
+    return list(rows)
 
 
-def query_pg(dsn: str, where: dict, since: datetime | None, limit: int | None) -> list[dict]:
+def query_pg(dsn: str, where: dict, since: datetime | None, limit: int | None, var: str = "--dsn") -> list[dict]:
     psycopg = psycopg_module()
+    dsn = with_conn_defaults(dsn, var)  # a connect timeout, and a fixed message for a bad DSN: libpq's quotes part of it
     conds, params = [f"{k} = %s" for k in where], list(where.values())  # keys come from FILTERS, values are bound
     if since is not None:
         conds.append("ts >= %s"), params.append(since)
@@ -50,8 +91,29 @@ def query_pg(dsn: str, where: dict, since: datetime | None, limit: int | None) -
     if limit:
         sql += " LIMIT %s"
         params.append(limit)
-    with psycopg.connect(dsn) as conn:
-        return [rec for (rec,) in reversed(conn.execute(sql, params).fetchall())]
+    try:
+        with psycopg.connect(dsn) as conn:
+            return [rec for (rec,) in reversed(conn.execute(sql, params).fetchall())]
+    except psycopg.Error as e:  # unreachable, refused, no table: one line for main(), libpq's text is several
+        text = e.diag.message_primary or str(e)  # the server's one line, without the `LINE 1: ...` context under it
+        raise RuntimeError("Postgres: " + _blanked(text, psycopg.conninfo.conninfo_to_dict(dsn))) from None
+
+
+def _blanked(text: str, conninfo: dict) -> str:
+    """libpq's or psycopg's error text on one line with every value from the DSN blanked. What they quote (a host,
+    a socket path, a user, a database) is what the operator typed, and a URI whose password holds an unescaped '@'
+    is parsed with a slice of the password as the host, so that is where a secret would leak. The values go first,
+    longest first and in their repr() form too: libpq does not escape a '"' inside what it quotes and psycopg
+    escapes a "'", so a quote inside a value would end the quoted span early. Numbers (port, timeouts) and libpq's
+    own settings stay, and so do its words: refused, timed out or no such table."""
+    values = set()
+    for k, v in conninfo.items():
+        if len(v) > 1 and not v.isdigit() and k not in _SETTINGS:  # a one-character value would blank every word
+            values.update((v, repr(v)[1:-1]))
+    for v in sorted(values, key=len, reverse=True):
+        text = text.replace(v, "...")  # on the original text: a value with a tab or two spaces still matches
+    text = " ".join(text.split())
+    return _QUOTED.sub('"..."', text)
 
 
 def default_files(live: str = "audit.jsonl") -> list[str]:
@@ -134,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--rule", dest="rule_id")
     q.add_argument("--phase", choices=("intent", "outcome"))
     q.add_argument("--since", type=parse_since, help="30m | 2h | 7d | ISO8601")
-    q.add_argument("--limit", type=int)
+    q.add_argument("--limit", type=count, help="keep the newest N matching records (0: all)")
     q.add_argument("--stats", action="store_true", help="counts grouped by verdict and rule_id instead of records")
     v = sub.add_parser("verify", help="check the hash chain of audit files given oldest first (default: audit.jsonl and its rotated files)")
     v.add_argument("files", nargs="*")
@@ -155,7 +217,14 @@ def main(argv: list[str] | None = None) -> int:
     where = {k: v for k in FILTERS if (v := getattr(a, k)) is not None}
     limit = None if a.stats else a.limit
     dsn = a.dsn or (None if a.jsonl else os.environ.get("AIRLOCK_AUDIT_DSN"))
-    rows = query_pg(dsn, where, a.since, limit) if dsn else query_jsonl(a.jsonl or "audit.jsonl", where, a.since, limit)
+    try:
+        if dsn:
+            rows = query_pg(dsn, where, a.since, limit, var="--dsn" if a.dsn else "AIRLOCK_AUDIT_DSN")
+        else:
+            rows = query_jsonl(a.jsonl or "audit.jsonl", where, a.since, limit)
+    except (RuntimeError, OSError, ValueError) as e:  # no file, no extra, a bad DSN or no Postgres: one line, as verify
+        sys.stderr.write(f"airlock-audit: {e}\n")
+        return 1
     if a.stats:
         counts = Counter((r.get("verdict"), r.get("rule_id")) for r in rows)
         rows = [{"verdict": v, "rule_id": rid, "count": n} for (v, rid), n in counts.most_common()]
