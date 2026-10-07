@@ -69,7 +69,8 @@
 * A store query that waited on a lock kept its server backend after the client gave up on it, so
   one replica could use up `max_connections`. Pooled connections now get `statement_timeout` and
   `lock_timeout` just under the connect timeout in force, and a cut connection also sends a cancel
-  request (with libpq 17 or newer), so a replica is meant to hold no more than its pool size of backends.
+  request (with libpq 17 or newer), so a replica is meant to hold no more than its pool size of
+  backends.
 * The Postgres store creates its tables again when they are gone (a database recreated empty)
   instead of failing every gated call with 500 until a restart, and `/readyz` checks that they
   exist and reports 503 while they cannot be created. Confirmation keys already used are
