@@ -586,20 +586,26 @@ async def s24():
 
 @check("14 upstream killed mid-call: clean error, outcome audited")
 async def s14():
+    # An upstream failure on a tool call is a tool error carrying the rule and saying whether the call may have run,
+    # audited as verdict error: never a made-up 502 audited as allow.
     crash = await rpc(A, "tools/call", {"name": "crash", "arguments": {}}, tok=token("alice"), rid="crash-1")
-    body = crash.json()
-    assert crash.status_code == 502 and body["error"]["code"] == -32603 and "Traceback" not in crash.text, crash.text
+    body = result(crash)
+    crash_msg = body["content"][0]["text"]
+    assert body["isError"] and body["_meta"][M + "rule_id"] == "upstream.unreachable" and "Traceback" not in crash.text, crash.text
+    assert crash_msg.startswith("airlock: upstream unreachable: ") and "the call itself may have run" in crash_msg, crash_msg
     await asyncio.sleep(0.5)
-    down_read = await rpc(B, "tools/call", {"name": "list_rows", "arguments": {}}, tok=token("alice"))
-    down_msg = down_read.json()["error"]["message"]
-    head, _, cls = down_msg.partition(": ")
-    assert down_read.status_code == 502 and head == "upstream unreachable" and cls.isidentifier(), down_read.text
+    down_read = result(await rpc(B, "tools/call", {"name": "list_rows", "arguments": {}}, tok=token("alice")))
+    down_msg = down_read["content"][0]["text"]
+    cls = down_msg.removeprefix("airlock: upstream unreachable: ").partition(";")[0]
+    assert down_read["_meta"][M + "rule_id"] == "upstream.unreachable" and cls.isidentifier(), down_msg
+    assert "nothing reached the upstream" in down_msg, down_msg  # a refused connection: the window is not charged
     down_gated = result(await rpc(A, "tools/call", {"name": "delete_rows", "arguments": {"ids": [80]}}, tok=token("alice")))
     assert down_gated["_meta"][M + "rule_id"] == "catalog.unavailable", down_gated
-    row = aq("SELECT upstream_status, verdict FROM airlock_audit WHERE tool = 'crash' AND phase = 'outcome'")
-    assert row == [(502, "allow")], row
+    row = aq("SELECT upstream_status, verdict, rule_id FROM airlock_audit WHERE tool = 'crash' AND phase = 'outcome'")
+    assert row == [(None, "error", "upstream.unreachable")], row
     assert aq("SELECT count(*) FROM airlock_audit WHERE tool = 'crash' AND phase = 'intent'")[0][0] == 1
-    return f"crash: HTTP 502 -32603 '{body['error']['message']}'; later read 502 '{down_msg}'; L2 call catalog.unavailable; audit outcome upstream_status=502"
+    return (f"crash: tool error upstream.unreachable '{crash_msg}'; later read '{down_msg}'; L2 call catalog.unavailable; "
+            f"audit outcome verdict=error upstream_status=null")
 
 
 @check("13 audit in Postgres: intent/outcome pairs, stats CLI, redaction")

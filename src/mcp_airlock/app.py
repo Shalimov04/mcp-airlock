@@ -30,15 +30,16 @@ from mcp.shared.inbound import (
 from mcp_types.jsonrpc import INVALID_PARAMS, INVALID_REQUEST, INTERNAL_ERROR, METHOD_NOT_FOUND, PARSE_ERROR
 from opentelemetry import trace
 from opentelemetry.propagate import extract, inject
-from opentelemetry.trace import SpanKind, format_trace_id
+from opentelemetry.trace import SpanKind, StatusCode, format_trace_id
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, Response
+from starlette.responses import JSONResponse as _JSONResponse
 from starlette.routing import Route
 
 from . import approvals, guard
 from . import pins as tool_pins
-from .audit import audit_from_env, redact, scrub
+from .audit import audit_from_env, redact, scrub, wellformed
 from .identity import IdentityConfig, Principal, resolve
 from .policy import Engine, Policy
 from .store import store_from_env
@@ -53,6 +54,7 @@ TOKEN_PREFIX = "al1."  # requestState: held by the agent
 APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derived key the agent never sees
 CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
+NAME_MAX = 128  # chars of a client-chosen method or tool name kept in a pre-auth audit record
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 # The message is cut shorter still (approvals.TEXT_MAX), so the rest is not there:
 # the audit intent record has it.
@@ -68,6 +70,8 @@ APPROVE_PAGE_HEADERS = {
 READY_TIMEOUT_S = 2.0  # a hung store must not hang the readiness probe
 DEFAULT_MAX_REQUEST_BYTES = 1 << 20  # AIRLOCK_MAX_REQUEST_BYTES
 DEFAULT_MAX_UPSTREAM_BYTES = 8 << 20  # AIRLOCK_MAX_UPSTREAM_BYTES
+MAX_DEPTH = 64  # JSON nesting of the whole request body; far below the recursion limit of the parser and the audit
+W3C_META = ("traceparent", "tracestate", "baggage")  # trace context a client may put in _meta
 _tracer = trace.get_tracer("mcp-airlock")
 
 
@@ -92,6 +96,37 @@ class ReloadResult:
     error: str | None = None
 
 
+class JSONResponse(_JSONResponse):
+    """Every JSON answer the proxy sends. JSON allows a lone surrogate ("\\ud800"), and json.loads keeps it, but UTF-8
+    cannot encode it: Starlette's renderer then raises after the upstream already acted. Escaping the whole document
+    is lossless and still valid JSON, so the caller gets the result and not a bare 500."""
+
+    def render(self, content: Any) -> bytes:
+        try:
+            return super().render(content)
+        except UnicodeEncodeError:
+            return json.dumps(content, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("ascii")
+
+
+class StoreUnavailable(Exception):
+    """The store did not answer a step of a gated call. Fails closed by design (the README says a store outage denies
+    the call), so it is a denial with a rule id, not an internal error with a traceback."""
+
+    def __init__(self, cause: BaseException):
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _is_store_error(e: BaseException) -> bool:
+    """A store that did not answer, as opposed to one that answered with a complaint: a DataError (a NUL in a
+    principal), an IntegrityError or a missing table is a bug or a broken schema, which a retry never cures."""
+    pg = sys.modules.get("psycopg")  # imported only when a Postgres store or sink is configured
+    # the pool's PoolTimeout and PoolClosed are OperationalErrors
+    if pg is not None and isinstance(e, (pg.OperationalError, pg.InterfaceError)):
+        return True
+    return isinstance(e, RuntimeError) and "store is closed" in str(e)  # PostgresStore after aclose()
+
+
 class CatalogUnavailable(Exception):
     """The upstream did not give us a usable tools/list; we cannot tell whether a tool has dry_run."""
 
@@ -102,6 +137,15 @@ class UpstreamTooLarge(Exception):
     def __init__(self, status: int, limit: int):
         super().__init__(f"upstream response exceeded {limit} bytes")
         self.status, self.limit = status, limit
+
+
+class UpstreamFailed(Exception):
+    """The upstream gave no usable answer. `sent` says whether the request reached it: after a connect failure there
+    is nothing to charge, anything later may have run. `status` is what the upstream sent, None when it sent nothing."""
+
+    def __init__(self, rule: str, detail: str, *, sent: bool, status: int | None = None):
+        super().__init__(detail)
+        self.rule, self.detail, self.sent, self.status = rule, detail, sent, status
 
 
 def _b64(b: bytes) -> str:
@@ -314,11 +358,17 @@ class Airlock:
         who = await self._resolve(headers)
         sub = who.sub if who else None
         try:
-            body = json.loads(raw)
-        except ValueError:
+            # NaN/Infinity are not JSON and 1e400 overflows to inf: both would be forwarded, written to the audit file
+            # as non-JSON and refused by the Postgres sink. A body nested past the interpreter's limit raises
+            # RecursionError, which is not a ValueError.
+            body = _loads(raw)
+        except (ValueError, RecursionError):
             return self._reject(None, PARSE_ERROR, "Parse error", sub, None, None)
         if not isinstance(body, dict) or "id" not in body or not isinstance(body.get("method"), str):
             return self._reject(None, INVALID_REQUEST, "Body must be a single JSON-RPC request", sub, None, None)
+        if _depth(body) > MAX_DEPTH:  # redaction and the audit write recurse over the arguments
+            rid = body["id"] if isinstance(body["id"], (str, int, float)) or body["id"] is None else None
+            return self._reject(rid, INVALID_REQUEST, f"Body nested deeper than {MAX_DEPTH} levels", sub, None, None)
         rid, method = body["id"], body["method"]
         params = body.get("params")
         tool = params.get("name") if method == "tools/call" and isinstance(params, dict) else None
@@ -333,25 +383,28 @@ class Airlock:
         if method == "tools/call" and (not isinstance(tool, str) or not isinstance(args, dict)):
             return self._reject(rid, INVALID_PARAMS, "tools/call needs string 'name' and object 'arguments'", sub, method, None)
 
-        parent = extract(headers) if "traceparent" in headers else extract(params.get("_meta") or {})
-        span_name = f"execute_tool {tool}" if tool else method
+        parent = extract(headers) if "traceparent" in headers else extract(_trace_carrier(params))
+        span_name = _span_text(f"execute_tool {tool}" if tool else method)
         with _tracer.start_as_current_span(span_name, context=parent, kind=SpanKind.SERVER) as span:
-            span.set_attribute("gen_ai.operation.name", "execute_tool" if tool else method)
-            span.set_attribute("rpc.method", method)
-            if tool:
-                span.set_attribute("gen_ai.tool.name", tool)
-                span.set_attribute("gen_ai.tool.call.id", str(rid))
+            _request_attributes(span, method, tool, rid, who)
             trace_id = format_trace_id(span.get_span_context().trace_id)
             base = dict(call_id=uuid.uuid4().hex, principal=sub, method=method, tool=tool, args=args, trace_id=trace_id)
             if who is None:
-                self._audit_deny(base, "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
-                span.set_attribute("airlock.verdict", "deny")
+                # args=None and clipped names as for every other pre-auth denial: anyone can send these, and two records
+                # of up to the request limit each would let an unauthenticated client fill the disk or rotate the real
+                # history away
+                self._audit_deny(dict(base, args=None, method=_clip_name(method), tool=_clip_name(tool)),
+                                 "principal.missing", None, "no principal in Authorization/X-Airlock-Principal")
                 return _rpc_error(rid, PRINCIPAL_REQUIRED, "airlock: principal required", status=401)
-            span.set_attribute("enduser.id", who.sub)
             try:
                 if method == "tools/call":
                     return await self._call(rid, body, params, headers, who, tool, args, base, span, engine)
                 return await self._passthrough(body, headers, who, method, base, engine.policy, pins)
+            except StoreUnavailable as e:
+                # The documented behaviour: a store outage denies the gated call. A class name in the log, no traceback.
+                log.warning("store unavailable, denying %s for %s: %s", tool, who.sub, type(e.cause).__name__)
+                self._audit_deny(base, "store.unavailable", engine.policy.tier(tool, who.sub, who.groups), _exc_text(e.cause))
+                return _tool_error(rid, "airlock: denied (store.unavailable): the store did not answer; retry later", "store.unavailable")
             except Exception as e:  # never leak a traceback; try hard to leave an outcome record
                 log.exception("airlock internal error")
                 self._outcome(verdict="error", rule_id="internal.error", detail=_exc_text(e), **base)
@@ -392,19 +445,27 @@ class Airlock:
             self._outcome(verdict="error", rule_id="upstream.too_large", upstream_status=e.status, latency_ms=_ms(t0),
                           detail=f"limit {e.limit} bytes", **base)
             return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: the upstream response exceeded {e.limit} bytes", status=502)
-        if method == "tools/list" and isinstance(reply.get("result"), dict):
-            self._filter_tools(reply["result"], who, policy)
-            self._vet_tools(reply["result"], base, pins)
+        except UpstreamFailed as e:
+            self._outcome(verdict="error", rule_id=e.rule, upstream_status=e.status, latency_ms=_ms(t0), detail=e.detail, **base)
+            return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: {e.detail}", status=502)
+        result = reply.get("result")
+        if isinstance(result, dict):
+            _strip_meta(result)
+        if method == "tools/list" and isinstance(result, dict):
+            for t in result.get("tools") if isinstance(result.get("tools"), list) else ():
+                if isinstance(t, dict):
+                    _strip_meta(t)  # each tool has its own _meta; the pins leave it out, so this changes no hash
+            self._filter_tools(result, who, policy)
+            self._vet_tools(result, base, pins)
         self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
         return JSONResponse(reply, status_code=status)
 
     async def _call(self, rid, body, params, headers, who: Principal, tool, args, base, span, engine: Engine) -> Response:
         policy = engine.policy
-        mode, claims = await self.verify_confirmation(params, who.sub, tool, args)
+        mode, claims = await self._store_step(self.verify_confirmation(params, who.sub, tool, args))
         if mode.startswith("deny:"):
             rule = mode[5:]
             self._audit_deny(base, rule, policy.tier(tool, who.sub, who.groups), "confirmation rejected")
-            span.set_attribute("airlock.verdict", "deny")
             return _tool_error(rid, f"airlock: denied ({rule})", rule)
         tier = policy.tier(tool, who.sub, who.groups)
         dry_run_prop: dict[str, Any] | None = None
@@ -414,8 +475,8 @@ class Airlock:
             except CatalogUnavailable as e:
                 self._audit_deny(base, "catalog.unavailable", tier, str(e))
                 return _tool_error(rid, f"airlock: denied (catalog.unavailable): {e}", "catalog.unavailable")
-        d = await engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups,
-                                       dry_run_supported=dry_run_prop is not None)
+        d = await self._store_step(engine.evaluate(tool, args, who.sub, confirmed=mode == "accepted", groups=who.groups,
+                                                   dry_run_supported=dry_run_prop is not None))
         span.set_attributes({"airlock.verdict": d.verdict, "airlock.rule_id": d.rule_id, "airlock.tier": d.tier or ""})
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
@@ -423,8 +484,8 @@ class Airlock:
         if d.verdict == "confirm" and mode.startswith("pending"):
             # Waiting for the out-of-band approval: same key, no new prompt (a client would re-ask the human), nothing burned.
             detail = "in-band accept ignored (approval mode oob)" if mode == "pending:ignored" else None
-            for phase in ("intent", "outcome"):
-                self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
+            self.audit.write(phase="intent", verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
+            self._outcome(verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)  # and the span
             message = ("Awaiting approval. " + ("The in-band accept was ignored (approval mode oob). " if detail else "")
                        + "Retry with this requestState once the approver has confirmed.")
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
@@ -432,10 +493,10 @@ class Airlock:
                 "_meta": {META + "status": "pending", META + "idempotency_key": claims["k"], META + "message": message,
                           META + "verdict": "confirm", META + "rule_id": "mrtr.pending"}}})
         if d.rule_id == "tier.L2.confirmed":  # the one path that executes for real: burn the key first, atomically
-            if not await self.engine.store.consume_once(claims["k"], claims["exp"]):
+            if not await self._store_step(self.engine.store.consume_once(claims["k"], claims["exp"])):
                 self._audit_deny(base, "mrtr.replay", d.tier, "idempotency key already used")
                 return _tool_error(rid, "airlock: denied (mrtr.replay)", "mrtr.replay")
-        d = await engine.reserve(who.sub, tool, d)  # atomic window charge; a replay never gets this far
+        d = await self._store_step(engine.reserve(who.sub, tool, d))  # atomic window charge; a replay never gets this far
         if d.verdict == "deny":
             self._audit_deny(base, d.rule_id, d.tier, d.message)
             return _tool_error(rid, f"airlock: denied ({d.rule_id}): {d.message}", d.rule_id)
@@ -466,7 +527,24 @@ class Airlock:
             ran = "the dry run itself ran, nothing was executed" if d.dry_run else "the call itself ran"
             if d.verdict == "confirm":  # the preview is gone: no prompt without it, and a retry costs nothing
                 ran += " and no confirmation was issued"
-            return _tool_error(rid, f"airlock: the upstream response exceeded {e.limit} bytes and was dropped; {ran}", "upstream.too_large")
+            return _tool_error(rid, f"airlock: the upstream response exceeded {e.limit} bytes and was dropped; {ran}",
+                               "upstream.too_large", verdict="error")
+        except UpstreamFailed as e:
+            self._outcome(verdict="error", rule_id=e.rule, tier=d.tier, dry_run=d.dry_run, upstream_status=e.status,
+                          latency_ms=_ms(t0), detail=e.detail, **base)
+            if e.sent:
+                ran = "the dry run itself may have run, nothing was executed" if d.dry_run else "the call itself may have run"
+            else:
+                ran = "nothing reached the upstream"
+                try:  # the window charge was for an execution that did not happen
+                    await engine.refund(who.sub, tool, d)
+                except Exception as e2:  # the answer matters more than the refund
+                    log.warning("blast-radius refund failed: %s", type(e2).__name__)
+            if d.verdict == "confirm":
+                ran += " and no confirmation was issued"
+            elif d.rule_id == "tier.L2.confirmed" and not e.sent:  # the key was burned before forwarding and stays so
+                ran += "; the confirmation is spent, start again without requestState"
+            return _tool_error(rid, f"airlock: {e.detail}; {ran}", e.rule, verdict="error")
         result = reply.get("result")
         gated = d.verdict == "confirm" or d.rule_id == "tier.L2.confirmed"
         if gated and isinstance(result, dict) and result.get("resultType") == "input_required":
@@ -478,7 +556,10 @@ class Airlock:
             return _tool_error(rid, f"airlock: denied ({rule}): {msg}", rule)
         detail: dict[str, Any] = {}
         if isinstance(result, dict):
-            result.setdefault("_meta", {}).update({META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run})
+            result["_meta"] = {**_upstream_meta(result), META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run}
+            for block in result.get("content") if isinstance(result.get("content"), list) else ():
+                if isinstance(block, dict):
+                    _strip_meta(block)  # a content block has its own _meta, and the dry-run preview copies the blocks
             try:  # the upstream already acted: a malformed result must reach the caller, not become a 500
                 if truncated := self._cap_output(tool, result, policy):  # after the _meta additions so the cap covers the final size
                     detail.update(truncated)
@@ -496,16 +577,35 @@ class Airlock:
                       upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
 
+    async def _store_step(self, step: Any) -> Any:
+        """Await a step of the gate that talks to the store. A store that does not answer becomes StoreUnavailable;
+        any other exception passes through unchanged, so a real bug still surfaces as internal.error."""
+        try:
+            return await step
+        except Exception as e:
+            if _is_store_error(e):
+                raise StoreUnavailable(e) from e
+            raise
+
     # ---------- audit helpers ----------
     def _outcome(self, **rec: Any) -> None:
-        """Outcome records are written after the upstream acted: a failing log must not hide the result from the caller."""
+        """Outcome records are written after the upstream acted: a failing log must not hide the result from the caller.
+        The span takes the same verdict, rule and tier, so a trace never shows the first decision when a later one
+        (a replay, a window denial, an upstream failure) is what the caller and the audit got."""
+        span = trace.get_current_span()  # the request span; a no-op one outside a request, e.g. on the approve page
+        span.set_attributes({"airlock.verdict": rec.get("verdict") or "", "airlock.rule_id": rec.get("rule_id") or "",
+                             "airlock.tier": rec.get("tier") or ""})
+        if rec.get("verdict") == "error":
+            span.set_status(StatusCode.ERROR, rec.get("rule_id"))
         try:
             self.audit.write(phase="outcome", **rec)
         except Exception:
             log.exception("audit outcome write failed for call %s", rec.get("call_id"))
 
     def _reject(self, rid, code, message, principal, method, tool, data=None) -> JSONResponse:
-        base = dict(call_id=uuid.uuid4().hex, principal=principal, method=method, tool=tool, args=None, trace_id=None)
+        # A protocol denial is written for anyone who can reach /mcp: no arguments, and names cut to NAME_MAX, or a
+        # megabyte-long `method` would be written twice per unauthenticated request
+        base = dict(call_id=uuid.uuid4().hex, principal=principal, method=_clip_name(method), tool=_clip_name(tool), args=None, trace_id=None)
         self._audit_deny(base, f"protocol.{code}", None, message)
         return _rpc_error(rid, code, message, data)
 
@@ -535,6 +635,8 @@ class Airlock:
                                                     "method": "tools/list", "params": params}, list_headers, who)
             except UpstreamTooLarge as e:
                 raise CatalogUnavailable(f"upstream tools/list response exceeded {e.limit} bytes") from e
+            except UpstreamFailed as e:
+                raise CatalogUnavailable(f"upstream tools/list failed: {e.detail}") from e
             result = reply.get("result") if status == 200 else None
             if not isinstance(result, dict):
                 raise CatalogUnavailable(f"upstream tools/list failed (HTTP {status}): {_clip(str(reply.get('error') or 'no result'))}")
@@ -561,8 +663,11 @@ class Airlock:
 
     async def forward(self, body: dict[str, Any], headers: dict[str, str], who: Principal) -> tuple[int, dict[str, Any]]:
         params = dict(body["params"])
+        # traceparent and tracestate are rebuilt below from the span's context. baggage is not part of that context
+        # (the span continues the parent, it does not carry its baggage), so the client's string goes on as sent;
+        # a non-string would crash the propagator and is dropped.
         meta = {k: v for k, v in (params.get("_meta") or {}).items()
-                if not k.startswith(META) and k not in ("traceparent", "tracestate")}
+                if not k.startswith(META) and (k not in W3C_META or (k == "baggage" and isinstance(v, str)))}
         meta[META + "principal"] = who.sub  # identity travels in _meta; upstream auth is the proxy's own
         if who.groups:
             meta[META + "groups"] = list(who.groups)
@@ -579,24 +684,33 @@ class Airlock:
             async with self.http.stream("POST", self.upstream, content=json.dumps(dict(body, params=params)), headers=out_headers) as r:
                 if r.headers.get("content-encoding", "identity").strip().lower() not in ("identity", ""):
                     # Refused unread: one gzip chunk can decode to a thousand times its size before the count below sees it.
-                    return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream returned encoded content despite accept-encoding identity ({r.status_code})"}}
+                    raise UpstreamFailed("upstream.encoded", f"upstream returned encoded content despite accept-encoding identity (HTTP {r.status_code})",
+                                         sent=True, status=r.status_code)
                 async for chunk in r.aiter_bytes():
                     total += len(chunk)
                     if total > self.max_upstream_bytes:
                         raise UpstreamTooLarge(r.status_code, self.max_upstream_bytes)  # leaving the block closes the response
                     chunks.append(chunk)
         except httpx.HTTPError as e:
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream unreachable: {type(e).__name__}"}}
+            # Only a failed connect is known not to have reached the upstream; a timeout or a torn read may have.
+            raise UpstreamFailed("upstream.unreachable", f"upstream unreachable: {type(e).__name__}",
+                                 sent=not isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))) from e
         raw = b"".join(chunks)
         ctype = r.headers.get("content-type", "")
         if ctype.startswith("text/event-stream"):
-            return r.status_code, _last_sse_message(raw.decode("utf-8", errors="replace"))
+            reply = _last_sse_message(raw.decode("utf-8", errors="replace"), body["id"])
+            if reply is None:
+                raise UpstreamFailed("upstream.bad_reply", "upstream SSE stream ended without a response", sent=True, status=r.status_code)
+            return r.status_code, reply
         try:
-            reply = json.loads(raw)
-        except ValueError:
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": f"upstream returned non-JSON ({r.status_code})"}}
+            # The same strictness as for the request: NaN (what Python's json.dumps emits for float('nan')) or a reply
+            # nested past the parser's limit would otherwise surface after the call ran, as a 500 with a second outcome
+            reply = _loads(raw)
+        except (ValueError, RecursionError) as e:
+            raise UpstreamFailed("upstream.bad_reply", f"upstream returned non-JSON (HTTP {r.status_code}): {_exc_text(e)}",
+                                 sent=True, status=r.status_code) from None
         if not isinstance(reply, dict):
-            return 502, {"jsonrpc": "2.0", "id": body["id"], "error": {"code": INTERNAL_ERROR, "message": "upstream returned a non-object"}}
+            raise UpstreamFailed("upstream.bad_reply", "upstream returned a non-object", sent=True, status=r.status_code)
         return r.status_code, reply
 
     def _filter_tools(self, result: dict[str, Any], who: Principal, policy: Policy) -> None:
@@ -687,9 +801,10 @@ class Airlock:
             preview_line = f"Dry-run preview: {text or '(empty)'}"
         ask = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
                "and declining cancels the request." if self.approval_mode == "oob" else "Confirm to execute for real.")
-        message = (f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
-                   f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
-                   f"{ask} Idempotency key: {key}")
+        # U+FFFD for a lone surrogate, as the audit does: this text is posted as UTF-8 to the webhook and saved for the page
+        message = wellformed(f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
+                             f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
+                             f"{ask} Idempotency key: {key}")
         meta = {**((preview or {}).get("_meta") or {}), META + "idempotency_key": key, META + "verdict": "confirm",
                 META + "rule_id": "tier.L2.confirm"}
         if preview_blocks is not None:
@@ -716,7 +831,7 @@ class Airlock:
             await self.engine.store.save_prompt(claims["k"], stored, claims["exp"])
         except Exception as e:
             log.warning("saving the approval prompt text failed: %s", type(e).__name__)
-        text = f"mcp-airlock approval request from {principal}\n" + message
+        text = wellformed(f"mcp-airlock approval request from {principal}\n") + message
         await approvals.notify(text, self.approve_link(result["requestState"]), webhook=self.webhook,
                                http=self.notify_http, telegram_chat=self.telegram_chat)
 
@@ -836,25 +951,102 @@ def _rpc_error(rid: Any, code: int, message: str, data: Any = None, status: int 
     return JSONResponse({"jsonrpc": "2.0", "id": rid, "error": err}, status_code=status or ERROR_CODE_HTTP_STATUS.get(code, 500))
 
 
-def _tool_error(rid: Any, text: str, rule_id: str) -> JSONResponse:
-    # Policy denials are tool results with isError so the model sees them and can adapt (MCP guidance).
+def _tool_error(rid: Any, text: str, rule_id: str, verdict: str = "deny") -> JSONResponse:
+    # Policy denials are tool results with isError so the model sees them and can adapt (MCP guidance). An upstream
+    # failure is one too, with verdict "error" as in the audit: the call may have run, nothing was refused.
     return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
         "resultType": "complete", "isError": True, "content": [{"type": "text", "text": text}],
-        "_meta": {META + "verdict": "deny", META + "rule_id": rule_id}}})
+        "_meta": {META + "verdict": verdict, META + "rule_id": rule_id}}})
 
 
-def _last_sse_message(text: str) -> dict[str, Any]:
-    last: dict[str, Any] = {}
+def _last_sse_message(text: str, rid: Any) -> dict[str, Any] | None:
+    """The response to request `rid` in an SSE body, None when there is none. Notifications and server-to-client
+    requests carry `method`, and a response to another id is not ours: handed back as the answer, any of them
+    makes an SDK client wait forever for the real one."""
+    found: dict[str, Any] | None = None
     for frame in text.replace("\r\n", "\n").split("\n\n"):
         data = "\n".join(line[5:].strip() for line in frame.split("\n") if line.startswith("data:"))
-        if data:
-            try:
-                msg = json.loads(data)
-                if isinstance(msg, dict) and "id" in msg:
-                    last = msg
-            except ValueError:
-                pass
-    return last or {"jsonrpc": "2.0", "id": None, "error": {"code": INTERNAL_ERROR, "message": "empty SSE response"}}
+        if not data:
+            continue
+        try:
+            msg = _loads(data)
+        except (ValueError, RecursionError):  # not JSON, NaN, or nested past the parser: no response we can use
+            continue
+        if isinstance(msg, dict) and "method" not in msg and ("result" in msg or "error" in msg) and msg.get("id") == rid:
+            found = msg
+    return found
+
+
+def _upstream_meta(result: dict[str, Any]) -> dict[str, Any]:
+    """An upstream result's `_meta` without the proxy's namespace. Those keys are the proxy's word to the client: a
+    server could otherwise claim `status: approved`, an empty `suspicious` list or another principal."""
+    meta = result.get("_meta")
+    return {k: v for k, v in meta.items() if not k.startswith(META)} if isinstance(meta, dict) else {}
+
+
+def _strip_meta(obj: dict[str, Any]) -> None:
+    """Remove the proxy's namespace from `obj["_meta"]` in place, when there is one: a result, a tool in a
+    tools/list answer or a content block, each of which carries its own `_meta`."""
+    if "_meta" in obj:
+        obj["_meta"] = _upstream_meta(obj)
+
+
+def _span_text(text: Any) -> str:
+    """Client-chosen text on a span (tool name, method, principal, call id): the same credential scrub as the audit
+    detail, and cut like a pre-auth name, since trace backends keep spans where the audit log is rotated."""
+    return _clip_name(scrub(wellformed(str(text))))
+
+
+def _request_attributes(span: Any, method: str, tool: Any, rid: Any, who: Principal | None) -> None:
+    """The one place a request's client text reaches span attributes."""
+    span.set_attribute("gen_ai.operation.name", "execute_tool" if tool else _span_text(method))
+    span.set_attribute("rpc.method", _span_text(method))
+    if tool:
+        span.set_attribute("gen_ai.tool.name", _span_text(tool))
+        span.set_attribute("gen_ai.tool.call.id", _span_text(rid))
+    if who is not None:
+        span.set_attribute("enduser.id", _span_text(who.sub))
+
+
+def _clip_name(name: Any) -> Any:
+    """A method or tool name as kept in a pre-auth audit record: the client chose it, so it is cut at NAME_MAX."""
+    if isinstance(name, str) and len(name) > NAME_MAX:
+        return name[:NAME_MAX] + f"[cut at {NAME_MAX} characters]"
+    return name
+
+
+def _loads(raw: bytes | str) -> Any:
+    """json.loads that refuses NaN, Infinity and numbers that overflow a double, from either side of the proxy."""
+    return json.loads(raw, parse_constant=_no_constant, parse_float=_finite_float)
+
+
+def _trace_carrier(params: Any) -> dict[str, str]:
+    """The W3C trace fields of `_meta`, strings only: the propagators run re.search on the values, and a client that
+    sends `"traceparent": 123` would otherwise crash the request before the span and the audit exist."""
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    return {k: v for k, v in (meta.items() if isinstance(meta, dict) else ()) if k in W3C_META and isinstance(v, str)}
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not JSON")  # NaN, Infinity, -Infinity
+
+
+def _finite_float(text: str) -> float:
+    f = float(text)
+    if f != f or f in (float("inf"), float("-inf")):  # 1e400 parses as inf without going through parse_constant
+        raise ValueError(f"{text} does not fit a double")
+    return f
+
+
+def _depth(value: Any) -> int:
+    """Nesting depth of a decoded body, without recursion (the body may be deeper than the Python stack allows)."""
+    deepest, stack = 0, [(value, 0)]
+    while stack:
+        v, d = stack.pop()
+        if isinstance(v, (dict, list)):
+            deepest = max(deepest, d + 1)
+            stack.extend((c, d + 1) for c in (v.values() if isinstance(v, dict) else v))
+    return deepest
 
 
 def _env_limit(name: str, default: int) -> int:

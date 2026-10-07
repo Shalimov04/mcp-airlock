@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from mcp_airlock import Airlock, Policy
-from mcp_airlock.app import CONFIRM_KEY, META, TOKEN_PREFIX, _b64, _unb64
+from mcp_airlock.app import CONFIRM_KEY, META, TOKEN_PREFIX, UpstreamFailed, _b64, _unb64
 from mcp_airlock.audit import AuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
 from mcp_airlock.store import MemoryStore
@@ -488,8 +488,9 @@ async def test_forward_failure_names_the_class_only(upstream, audit_path):
 
     patch_post(al, post)
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
-    status, reply = await al.forward(body, {}, Principal("alice"))
-    assert status == 502 and reply["error"]["message"] == "upstream unreachable: ConnectError"
+    with pytest.raises(UpstreamFailed) as failed:
+        await al.forward(body, {}, Principal("alice"))
+    assert failed.value.detail == "upstream unreachable: ConnectError" and failed.value.sent is False
 
 
 async def test_upstream_unreachable_secret_reaches_neither_caller_nor_audit(upstream, audit_path):

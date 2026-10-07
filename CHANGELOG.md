@@ -19,6 +19,18 @@
   read "definition changed since it was pinned". Icons and `_meta` are deliberately not covered.
 * **Titles in the guard.** The `tools/list` scan for injection phrases now also reads the tool
   `title` and `annotations.title`, not only the description; a hit is marked in `_meta` as before.
+* **Upstream failures.** An unreachable upstream, a compressed answer or a reply that is not a
+  JSON-RPC object used to come back as a synthetic 502 audited as `allow` with no detail. A tool
+  call now gets a tool error with rule `upstream.unreachable`, `upstream.encoded` or
+  `upstream.bad_reply`, saying whether the call may have run, with verdict `error` in `_meta`
+  (`upstream.too_large` too), and the outcome record says `error` with the reason. When the
+  connection itself failed, the blast-radius charge is given back, stamped with the charge's own
+  time so the two leave the window together; the key of a confirmed `L2` call stays burned and
+  the error says to ask again. `tools/list` and `server/discover` still answer 502.
+* An SSE answer is reduced to the response carrying the call's id. A stream with only
+  notifications, a server-to-client request or a response to another id used to be passed back as
+  the answer (HTTP 200, `id: null`), on which the official SDK client hangs; it is now
+  `upstream.bad_reply`. `airlock-policy diff` refuses such a catalog too.
 
 ### Added
 
@@ -82,6 +94,54 @@
 * A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
   stored as U+FFFD.
 * `airlock-audit query` reads the rotated files too, oldest first.
+* A lone surrogate in the request id, in an upstream answer (a result, an error, an SSE frame or a
+  tool description) or in the arguments of an `L2` call no longer turns the response into a bare
+  HTTP 500 after the upstream already acted. The answer is sent with the JSON escape, the approval
+  prompt and the webhook text carry U+FFFD, and the call keeps one outcome record.
+* `NaN`, `Infinity` and numbers that overflow a double (`1e400`) in the request body are refused
+  with a parse error instead of being forwarded, written to `audit.jsonl` as non-JSON and dropped
+  by the Postgres sink. A body nested deeper than 64 levels is refused with `-32600`; one too deep
+  to parse at all is a parse error. Both used to be an unaudited bare 500.
+* The upstream's answer is read with the same strictness: a reply or an SSE frame holding `NaN`
+  (what Python's `json.dumps` emits for a NaN float), `Infinity` or `1e400`, or nested too deep to
+  parse, is `upstream.bad_reply`. It used to be an HTTP 500 after the call ran, with a second
+  outcome record `internal.error` next to the `allow`.
+* `io.mcp-airlock/*` keys that the upstream puts into a result's `_meta`, into a content block's,
+  into the dry-run preview or into a `tools/list` answer and each tool in it are removed before
+  the proxy adds its own. An upstream could otherwise show the client `status: approved`, an
+  empty `suspicious` list or another principal.
+* A request refused before it has a principal is audited without its arguments, and its `method`
+  and `tool` are cut at 128 characters. Two records of up to the request limit each let an
+  unauthenticated client fill the disk or, with rotation on, push the whole real history out of
+  the kept files; a 900 KB tool name did the same through the two name fields.
+* The `airlock.*` span attributes follow the outcome record. A blocked replay, a decline, a
+  `catalog.unavailable` denial or an upstream failure used to leave the span saying what the first
+  decision was (or nothing at all); a span whose verdict is `error` now also has status `ERROR`.
+* A `traceparent`, `tracestate` or `baggage` in `_meta` that is not a string is ignored and a new
+  trace is started, instead of an unaudited bare 500 for any caller. `traceparent` and
+  `tracestate` are rebuilt from the span's context before the call is forwarded; a string
+  `baggage` is passed on as the client sent it.
+* A store that does not answer (a pool timeout, a cut connection, a closed store) now denies the
+  gated call with rule `store.unavailable`, as the README said it would: a tool error, an intent
+  and an outcome record saying `deny` with the store's error in `detail`, and one warning line in
+  the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record. A
+  store that answers with a complaint (a bad value, a missing table) is still an internal error,
+  since retrying does not cure it.
+* A `where` regex can no longer freeze the proxy. A pattern that can take exponential time on a
+  crafted value (a repetition inside a repetition such as `(a+)+` or `(.*a){12}`, an alternation
+  inside a repetition whose alternatives can start alike, a backreference) is refused when the
+  policy loads and by `airlock-policy lint`, and so is one with three or more unbounded repeats
+  in a row that can take each other's characters (`.*-.*-.*-prod`: about a second on a
+  1024-character value, tens of seconds for four repeats); a regex is tried only on strings up to
+  1024 characters, and a longer value fails the rule. `lint` warns about two such repeats in a
+  row (`where_regex_cost`, milliseconds at the cap). The README lists the safe patterns the check
+  refuses anyway and how to rewrite them. If Python has neither `re._parser` nor `sre_parse`, the
+  policy fails to load instead of skipping the check. One `get_service` call with a 32-character
+  name used to block the event loop, `/healthz` and `SIGTERM` for over a minute.
+* Span attributes and the span name that carry client-chosen text (`gen_ai.tool.name`,
+  `gen_ai.tool.call.id`, `rpc.method`, `enduser.id`) go through the same credential scrub as the
+  audit `detail`, so a key-shaped tool name or principal no longer reaches the trace backend, and
+  they are cut at 128 characters. Patterns added to the scrub later apply to spans as well.
 * `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
   default stays `mcp-airlock`.
 * The approver of an out-of-band confirmation is recorded as `verified` only when the identity

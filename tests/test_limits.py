@@ -308,11 +308,13 @@ async def test_upstream_is_asked_for_plain_bytes_and_an_encoded_answer_is_refuse
     flood = Flood(headers={"content-encoding": encoding})
     al = fake_airlock(audit_path, flood, max_upstream_bytes=LIMIT)
     async with serving(al) as c:
-        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}})
+        res = await call(c, "get_service", {"name": "api"})
     assert flood.requests[-1].headers["accept-encoding"] == "identity"
-    assert r.status_code == 502 and "accept-encoding identity" in r.json()["error"]["message"], r.text
+    assert res["isError"] and res["_meta"][META + "rule_id"] == "upstream.encoded", res
+    assert "accept-encoding identity" in res["content"][0]["text"] and "may have run" in res["content"][0]["text"]
     assert flood.produced == 0 and flood.closed
-    assert audit_rows(audit_path)[-1]["upstream_status"] == 502
+    outcome = audit_rows(audit_path)[-1]
+    assert outcome["verdict"] == "error" and outcome["rule_id"] == "upstream.encoded" and outcome["upstream_status"] == 200
 
 
 # ---------------------------------------------------------------- configuration

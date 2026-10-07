@@ -43,7 +43,10 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
 
 Refusals come back as tool results with `isError: true`, not as protocol errors, so the
 model sees why and can do something else. Every `tools/call` result, a pending one included,
-carries the verdict and the rule that produced it in `_meta`.
+carries the verdict and the rule that produced it in `_meta`. The `io.mcp-airlock/` keys there
+are the proxy's alone: any the upstream puts into a result, one of its content blocks, a
+`tools/list` answer or a tool in it are removed before the proxy adds its own, and any the
+client sends are removed before the call is forwarded.
 
 The proxy accepts three methods: `tools/call` as above, `tools/list` and `server/discover`.
 A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of
@@ -155,7 +158,8 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 `lint` needs no network. It reports a tool without tiers (`no_tiers`, an error), a write tool
 without a description (`no_description`), a `count_arg` that relies on the global blast radius
 (`blast_radius_default`), a `where` rule for an environment no tier mentions
-(`where_env_unknown`) and an environment no tool covers (`env_unused`); `--env` adds
+(`where_env_unknown`), a `where` regex with two unbounded repeats in a row
+(`where_regex_cost`) and an environment no tool covers (`env_unused`); `--env` adds
 environments that must be covered. `diff` asks the server itself (not the proxy, which hides
 unlisted tools) for `tools/list` and tells you which allowlisted tools the server no longer has
 (`missing_upstream`, an error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`),
@@ -268,7 +272,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_OTEL_FILE` | Path of the span file, the same as `--otel-file`. |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
 | `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. A positive integer. |
-| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one with HTTP 502. A positive integer. |
+| `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one: for a tool call both are a tool error (`upstream.too_large`, `upstream.encoded`), for `tools/list` and `server/discover` an HTTP 502. A positive integer. |
 | `PGCONNECT_TIMEOUT` | libpq's own connect timeout. When set, the proxy adds no `connect_timeout` of its own to the DSNs. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Turn on OTLP span export over HTTP/protobuf (needs the `otlp` extra). The base URL gets `/v1/traces` appended; the traces URL is used as it is. Only http/protobuf is supported and `OTEL_EXPORTER_OTLP_PROTOCOL` is not read: point it at the collector's HTTP port (4318), not gRPC (4317). |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Headers for the export request, for example `authorization=Bearer <token>`. Treat it as a secret. |
@@ -367,16 +371,40 @@ Each rule has exactly one matcher: `equals`, `in`, `not_in` or `regex` (full mat
 unless it has `optional: true`. A list value must match for every element. A string argument that
 parses as JSON `null`, a list or an object is denied by any rule, because the upstream may decode
 it before it validates it. For the same reason `not_in` also denies a value whose type is not among
-the listed values (`3` against `[kube-system]`). A regex runs in the request path on every call, so
-avoid nested repetition.
+the listed values (`3` against `[kube-system]`).
+
+A regex runs in the request path, on the event loop, so its cost is the time one request can stall
+the whole proxy. A pattern that can take exponential time on a crafted value is refused when the
+policy loads (and by `lint`): a repetition inside a repetition (`(a+)+`, `(\w+\s?)+`), an
+alternation inside a repetition whose alternatives can start alike (`(a|aa)+`) and a
+backreference. A fixed outer count does not make these safe: `(.*a){12}` has about 1024^12 ways
+to split a value and is refused too. A nested repetition is fine when every iteration starts or
+ends with a character the rest of the group cannot consume (`(\.[a-z]{1,63})*`,
+`(\d{1,3}\.){3}`) or the group has a fixed width (`((ab){2})+`), and so is an alternation whose
+alternatives start apart (`(foo|bar)+`). The remaining patterns are polynomial, of a degree set
+by the unbounded repeats that run one after another and can take each other's characters
+(`.*-.*-prod` has two: `.*` can take a dash). A regex is tried only on strings up to 1024
+characters, and a longer value fails the rule with a message saying so. Measured with the stdlib
+`re` on a 1024-character worst-case value on a development machine: two such repeats take a few
+milliseconds, three (`.*-.*-.*-prod`) one to a few seconds, four (`.*.*.*.*x`) tens of seconds;
+each extra repeat multiplies the time by about the value length. So the cap is enough for two, and
+three or more are refused. `lint` warns about two (`where_regex_cost`); a repeat that must stop at
+a character it cannot match (`[^/]+/[^/]+/[^/]+`) is not counted.
+
+The refusal is a heuristic and errs on the safe side, so some safe patterns are refused too:
+`(\s*,\s*\w+)*`, `(\w+\s)*\w+`, `(?:[a-z]+ ?){1,3}` and `(.*a){2}` (a small fixed count) are all
+cheap in practice and still refused. To rewrite one: use a single character class with a length
+(`[\w\s,]{1,200}`, `[a-z ]{1,60}`), write the list so that every item is introduced by a character
+the item cannot contain (`\s*\w+(,\s*\w+)*`), or split the check over several `where` rules.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
 `tier.L2.dry_run`, `tier.L3.auto`, `blast_radius.per_call`, `blast_radius.per_principal`,
-`dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `principal.missing`,
-`protocol.<code>`, `passthrough` (a `tools/list` or `server/discover`), `mrtr.pending`,
-`mrtr.declined`, `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`, `mrtr.bad_signature`,
-`mrtr.approved_oob`, `mrtr.upstream_input_required`, `request.too_large`, `upstream.too_large`,
+`dry_run.unsupported`, `catalog.unavailable`, `catalog.pin_mismatch`, `store.unavailable`,
+`principal.missing`, `protocol.<code>`, `passthrough` (a `tools/list` or `server/discover`),
+`mrtr.pending`, `mrtr.declined`, `mrtr.replay`, `mrtr.expired`, `mrtr.mismatch`,
+`mrtr.bad_signature`, `mrtr.approved_oob`, `mrtr.upstream_input_required`, `request.too_large`,
+`upstream.too_large`, `upstream.unreachable`, `upstream.encoded`, `upstream.bad_reply`,
 `internal.error`.
 
 `SIGHUP` reloads the policy file and, if one is configured, the pins file, as one pair. A file
@@ -392,7 +420,12 @@ an expiry (10 minutes) and the approval mode. Nothing is stored when it is issue
 comes back the proxy checks the signature, checks that all of those still match the call in
 front of it, re-runs the policy, burns the key, then charges the blast-radius counter.
 Burning is an atomic insert in the store, so two replicas cannot both execute the same
-confirmation. A decline burns the key too.
+confirmation. A decline burns the key too, and so does an upstream that turns out to be
+unreachable right after the yes: the key is burned before the call is sent and is never
+un-burned, so the agent has to ask for a new prompt (the blast-radius charge is given back).
+A store failure between burning the key and reserving the blast-radius window burns the
+confirmation the same way: the call is denied with `store.unavailable` and the human approves
+again.
 
 Before the prompt is issued the proxy asks the upstream for `tools/list` and looks at the
 tool's schema. If the tool declares `dry_run`, the dry run is forwarded and its output is
@@ -480,7 +513,8 @@ with `[REDACTED]` (whole subtrees included), and so are values that look like be
 `sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
 approvers, including the dry-run preview. `detail` holds the output-cap numbers and the
 injection rules that fired, when any did. Free text in `detail` is scrubbed the same way as
-the arguments. A lone surrogate in client text (JSON allows `"\ud800"`) is stored as U+FFFD.
+the arguments. A lone surrogate in client text (JSON allows `"\ud800"`) is stored as U+FFFD and
+shown as U+FFFD to approvers; in a response it travels as the JSON escape.
 
 To read the log:
 
@@ -503,6 +537,13 @@ it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and
 hash chain continues into the new file. A record bigger than `N` is still written. Rotation
 is off by default. Lowering `--audit-keep` deletes the existing `.N` files above the new
 limit at the next rotation.
+
+A request refused before it is attributed to a principal (a malformed or oversized body, no
+credentials) is audited without its arguments, and its `method` and `tool` are cut at 128
+characters, so an unauthenticated client cannot write payloads into the log; the same cut
+applies to every protocol denial. Its two records still count toward the rotation budget: anyone
+who can reach `/mcp` can push older files out with enough requests. When the trail matters, keep
+the Postgres sink (`AIRLOCK_AUDIT_DSN`) or ship the files off the host.
 
 To check the chain:
 
@@ -532,9 +573,13 @@ the method name otherwise. A request rejected before that (a parse error, an ove
 method the proxy does not forward) produces none. The span carries the `gen_ai.*` attributes
 (`gen_ai.operation.name`, `gen_ai.tool.name`, `gen_ai.tool.call.id`), `rpc.method` and the
 principal as `enduser.id`; a `tools/call` span also carries the verdict, the rule and the tier
-as `airlock.*`, and the number of injection findings. Never the arguments. An incoming
+as `airlock.*`, and the number of injection findings. The `airlock.*` attributes are those of
+the outcome record, so a replay or a denial after the first decision shows as such, and a span
+whose verdict is `error` has status `ERROR`. Never the arguments. An incoming
 `traceparent` (header or `_meta`) is continued and a new one is put into the upstream `_meta`,
-so the audit's `trace_id` matches what the upstream sees.
+so the audit's `trace_id` matches what the upstream sees. `tracestate` is rebuilt with it; a
+string `baggage` in `_meta` is passed on as the client sent it. A value of these three that is
+not a string is ignored, and a bad `traceparent` starts a new trace.
 
 Spans go to a file with `--otel-file` (or `AIRLOCK_OTEL_FILE`), to an OTLP collector when
 `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, or to both. The
@@ -589,12 +634,15 @@ left unchanged, and then the pool wait is `PGCONNECT_TIMEOUT` or
 The connect timeout in force (the DSN's own, else `PGCONNECT_TIMEOUT`, else
 `AIRLOCK_STORE_CONNECT_TIMEOUT`, at least 2 s) bounds every store call: the wait for a pooled
 connection and the work on it. If the database is down, each store call fails after about the
-connect timeout (twice that at
-most, when the server accepts the connection and then stops answering) and the gated call is
-denied. A failed connect attempt is given up after the connect timeout, so the store recovers
-within a few seconds of the database coming back. A connection that has not answered by then is
-cut and dropped from the pool, including one that was idle in it. A saturated pool can make
-`/readyz` report 503.
+connect timeout (twice that at most, when the server accepts the connection and then stops
+answering) and the gated call is denied with `store.unavailable`: a tool error carrying the rule,
+audited as a denial like `catalog.unavailable`, with the store's error in `detail` and a one-line
+warning in the log. Only a store that does not answer is treated this way; one that answers with a
+complaint (a bad value, a missing table) is an internal error, since retrying does not cure it.
+A `tools/list` does not touch the store and is not affected. A failed connect
+attempt is given up after the connect timeout, so the store recovers within a few seconds of the
+database coming back. A connection that has not answered by then is cut and dropped from the
+pool, including one that was idle in it. A saturated pool can make `/readyz` report 503.
 
 ## Prompt injection
 
@@ -672,9 +720,25 @@ numbers are in `_meta["io.mcp-airlock/output"]`. An upstream answer over
 `AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it comes back as an error
 that says the call ran (or that only its dry run did), with rule `upstream.too_large`.
 
+An upstream that cannot be reached (`upstream.unreachable`), answers with compressed content
+(`upstream.encoded`) or sends something that is not a JSON-RPC response (`upstream.bad_reply`:
+not JSON, not an object, `NaN` or a number that does not fit a double, nesting too deep to parse,
+an SSE stream without the call's response) is reported the same way: a tool error carrying the
+rule and verdict `error` in `_meta`, audited as verdict `error` with the reason in `detail`. When
+the connection itself failed, nothing reached the upstream: the error says so and the
+blast-radius charge is given back. After anything else (a timeout, a torn read, a bad answer)
+the call may have run; the error says that too, and the charge stays. For `tools/list` and
+`server/discover` these failures are an HTTP 502.
+
 The upstream call has a 60 second timeout. Upstream responses arriving as SSE are reduced to the
-final message; progress notifications are dropped. The catalog is read in at most 10 pages.
-Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
+response that carries the call's id; notifications, server-to-client requests and responses to
+other ids are dropped, and a stream without that response is `upstream.bad_reply`. The catalog is
+read in at most 10 pages. Legacy HTTP+SSE, Roots, Sampling and Logging are not supported.
+
+The request body must be strict JSON: `NaN`, `Infinity` and a number that does not fit a double
+(`1e400`) are refused with a parse error (`-32700`), since they are not JSON and the Postgres sink
+would drop the record. A body nested deeper than 64 levels is refused with `-32600`. Both are
+audited as `protocol.<code>` denials.
 
 There is no rate limit on prompting. An agent that keeps re-sending an `L2` call gets a new
 prompt, and a new webhook message, each time.
