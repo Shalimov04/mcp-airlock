@@ -40,6 +40,8 @@ The agent sends a normal `tools/call` to the proxy instead of the server. The pr
    anything in it that smells like a prompt injection. Marking only; it does not change what
    the agent gets to see.
 6. Writes two audit records, one before the upstream call and one after, whatever happened.
+   The JSONL file gets each one before the proxy goes on; the Postgres table, when there is
+   one, is written from a queue a moment later.
 
 Refusals come back as tool results with `isError: true`, not as protocol errors, so the
 model sees why and can do something else. Every `tools/call` result, a pending one included,
@@ -217,7 +219,10 @@ The values are documented in `charts/mcp-airlock/values.yaml`. The points that m
   one file would fork the audit hash chain, and `airlock-audit verify` would report `prev
   mismatch`) and the chart refuses it with `replicaCount` above 1. With several replicas use an
   emptyDir and `AIRLOCK_AUDIT_DSN`; the hash chain is per pod, so the `airlock_audit` table holds
-  one interleaved chain per pod. Rotation flags go in `extraArgs`.
+  one interleaved chain per pod (with gaps where the sink dropped records). In that setup the
+  table is the durable copy: a record the sink drops while the audit database stalls, or one
+  still queued at shutdown or when the pod crashes, exists only in the pod's emptyDir and goes
+  with it (see [Postgres](#postgres)). Rotation flags go in `extraArgs`.
 * **Policy changes.** A new policy rolls the pods; SIGHUP reload is not used here. A pod that
   is told to stop keeps serving for `preStopSeconds` (5) first, so kube-proxy has dropped it from
   the Service before the listener closes and a rolling update refuses no connections; the native
@@ -268,7 +273,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it only together with `AIRLOCK_STORE_DSN`: replicas need the same key, but with the memory store a fixed key would let a used confirmation run again on another replica or after a restart. |
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. Needs the `postgres` extra. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. Needs the `postgres` extra. |
-| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
+| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply, and, with one second added, the longest an audit write waits for the database. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
 | `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. A positive integer. See [Postgres](#postgres). |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `https://api.telegram.org/bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
@@ -529,11 +534,21 @@ keep `audit.jsonl.torn`: it is the evidence.
 
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
-`sk-` keys, GitHub or AWS keys and JWTs. The same redaction applies to the text shown to
-approvers, including the dry-run preview. `detail` holds the output-cap numbers and the
-injection rules that fired, when any did. Free text in `detail` is scrubbed the same way as
-the arguments. A lone surrogate in client text (JSON allows `"\ud800"`) is stored as U+FFFD and
-shown as U+FFFD to approvers; in a response it travels as the JSON escape.
+`sk-` keys, GitHub or AWS keys and JWTs, also when they sit inside a longer string such as a
+note or a command line, or in an argument key. A pattern is only matched at the start of a
+word (or right after a literal `\n`, `\r` or `\t` escape in command text), so
+`disk-cleanup-prod` is not an `sk-` key and is kept as sent. The same redaction applies to the
+text shown to approvers, including the dry-run preview. `detail` holds the output-cap numbers
+and the injection rules that fired, when any did; its keys and free text, and the
+client-chosen `principal`, `method` and `tool` fields, are scrubbed the same way. Two keys that
+scrub to the same text stay apart (`[REDACTED]`, `[REDACTED]#2`). A secret that matches none
+of these patterns (a password in a URL, `access_token=...`) is stored as sent.
+
+A lone surrogate (JSON allows `"\ud800"`) or a NUL character in client text is stored as
+U+FFFD and shown as U+FFFD to approvers; in a response it travels as the JSON escape. A `NaN`
+or an infinity never comes from a client (the request parser refuses them), but one that
+reaches the audit is stored as the string `"NaN"`, `"Infinity"` or `"-Infinity"`, so both
+sinks hold the same valid JSON.
 
 To read the log:
 
@@ -651,6 +666,24 @@ a timeout of about 10 s, other applications included. Give the store a role of i
 The audit sink uses one connection of its own, with psycopg's default auto-prepare, and
 reconnects once when it drops; point `AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer
 in session mode.
+
+The audit sink writes from a thread of its own through a queue of at most 1000 records and
+about 32 MiB of serialized rows, so a slow, locked or frozen audit database never holds up a
+call, `/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's
+rows land a moment later, so an `intent` row can reach the table after the upstream call has
+run. Each write is given up after the connect timeout: the connection gets a
+`statement_timeout` and a `lock_timeout` of that length, and a server that does not answer at
+all is cut off on our side a second later. A record that fails, times out or finds the queue
+full is dropped from the table with a warning in the log; the JSONL file still holds it, so
+the table's hash chain can have gaps after a drop (the `prev` of a row names a row that is not
+there) and the file is the one to verify. At shutdown the queue is drained for up to one such
+timeout, then the worker gets 2 s more to stop, and what is left is dropped, with the count in
+the log; with a frozen database that is about the timeout plus 2 s (7 s at a timeout of 3 s,
+12 s at the default 10 s), and the wait runs off the event loop, capped at 15 s. A crash loses
+the queue too. Where the file is an emptyDir, as in the
+chart's multi-replica setup, those records live only as long as the pod. The table is created
+on first use under the same advisory lock as the store's tables, so replicas starting together
+on an empty database do not lose their first records.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),

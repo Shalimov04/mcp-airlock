@@ -52,6 +52,28 @@ def aq(sql: str, *args: Any) -> list[tuple]:
     return q(sql, *args, dsn=os.environ["AUDIT_DSN"])
 
 
+def aq_wait(sql: str, *args: Any, ok=bool, timeout: float = 8.0) -> list[tuple]:
+    """The audit table is written by a worker thread after the reply: poll until `ok(rows)` holds (or time runs out
+    and the caller's assert shows what was there)."""
+    end = time.monotonic() + timeout
+    while True:
+        rows = aq(sql, *args)
+        if ok(rows) or time.monotonic() > end:
+            return rows
+        time.sleep(0.1)
+
+
+def aq_settled(sql: str, *args: Any, quiet: float = 1.0) -> list[tuple]:
+    """For reads with no expected count: wait until the result has not changed for `quiet` seconds."""
+    rows, since = aq(sql, *args), time.monotonic()
+    while time.monotonic() - since < quiet:
+        time.sleep(0.1)
+        now = aq(sql, *args)
+        if now != rows:
+            rows, since = now, time.monotonic()
+    return rows
+
+
 def present(ids: list[int]) -> int:
     return q("SELECT count(*) FROM customers WHERE id = ANY(%s)", ids)[0][0]
 
@@ -159,7 +181,8 @@ async def s02():
     tampered = token("alice").rsplit(".", 1)[0] + ".AAAA"
     t = await rpc(A, "tools/list", tok=tampered)
     assert t.status_code == 401, t.text
-    rules = [r for (r,) in aq("SELECT rule_id FROM airlock_audit WHERE rule_id = 'principal.missing' AND phase = 'outcome'")]
+    rules = [r for (r,) in aq_wait("SELECT rule_id FROM airlock_audit WHERE rule_id = 'principal.missing' AND phase = 'outcome'",
+                                   ok=lambda rows: len(rows) >= 3)]
     assert len(rules) >= 3 and q("SELECT count(*) FROM calls")[0][0] == before and present([1]) == 1
     return f"401/-32011 for no token, wrong-key token, tampered signature; {len(rules)} principal.missing outcomes; upstream untouched"
 
@@ -220,7 +243,8 @@ async def s05():
     rules = sorted(x["_meta"][M + "rule_id"] for x in res)
     assert len(ok) == 1 and rules.count("mrtr.replay") == 9, rules
     assert present(ids) == 0 and len(real_calls("delete_rows", "carol")) == 1
-    n = aq("SELECT count(*) FROM airlock_audit WHERE principal = 'carol' AND rule_id = 'tier.L2.confirmed' AND phase = 'outcome'")[0][0]
+    n = aq_wait("SELECT count(*) FROM airlock_audit WHERE principal = 'carol' AND rule_id = 'tier.L2.confirmed' AND phase = 'outcome'",
+                ok=lambda r: r[0][0] >= 1)[0][0]
     assert n == 1, n
     return "1 executed, 9 mrtr.replay; service saw 1 real DELETE; audit has 1 tier.L2.confirmed outcome"
 
@@ -369,7 +393,8 @@ async def s18():
     assert r.is_error and rule == "args.violation" and prompts == 0, (r, prompts)
     assert q("SELECT count(*) FROM calls WHERE tool = 'drop_table'")[0][0] == before  # nothing reached the service
     assert q("SELECT to_regclass('customers')")[0][0] == "customers" and q("SELECT count(*) FROM customers")[0][0] == rows
-    deny = aq("SELECT count(*) FROM airlock_audit WHERE tool = 'drop_table' AND rule_id = 'args.violation' AND verdict = 'deny'")[0][0]
+    deny = aq_wait("SELECT count(*) FROM airlock_audit WHERE tool = 'drop_table' AND rule_id = 'args.violation' AND verdict = 'deny'",
+                   ok=lambda r: r[0][0] >= 1)[0][0]
     assert deny >= 1, deny
     return f"{rule}; 0 human prompts; service saw no drop_table call for it; customers intact ({rows} rows); denial audited"
 
@@ -384,7 +409,8 @@ async def s19():
     assert "get_note" in plain_names and "list_rows" in plain_names, plain_names
     assert "get_note" not in pinned_names and pinned_names == plain_names - {"get_note"}, (pinned_names, plain_names)
     assert pinned["_meta"][M + "pin_mismatch"] == 1 and M + "pin_mismatch" not in plain["_meta"], (pinned["_meta"], plain["_meta"])
-    rows = aq("SELECT phase, rec->>'detail' FROM airlock_audit WHERE rule_id = 'catalog.pin_mismatch' AND verdict = 'deny'")
+    rows = aq_wait("SELECT phase, rec->>'detail' FROM airlock_audit WHERE rule_id = 'catalog.pin_mismatch' AND verdict = 'deny'",
+                   ok=lambda r: {p for p, _ in r} == {"intent", "outcome"})
     assert rows and all(d.startswith("get_note:") for _, d in rows) and {p for p, _ in rows} == {"intent", "outcome"}, rows
     read = result(await rpc(PINS, "tools/call", {"name": "list_rows", "arguments": {"limit": 1}}, tok=tok))
     assert not read.get("isError") and read["_meta"][M + "rule_id"] == "tier.L0.read", read
@@ -417,12 +443,13 @@ async def s20():
 async def s21():
     who, tok = "olga", token("olga")  # fresh principal, fresh row 150
     calls_before = q("SELECT count(*) FROM calls")[0][0]
-    refused_before = aq("SELECT count(*) FROM airlock_audit WHERE rule_id = 'request.too_large'")[0][0]
+    refused_before = aq_settled("SELECT count(*) FROM airlock_audit WHERE rule_id = 'request.too_large'")[0][0]
     huge = await rpc(A, "tools/call", {"name": "update_note", "arguments": {"id": 150, "text": "z" * (3 << 19)}}, tok=tok)  # 1.5 MiB
     err = huge.json()
     assert huge.status_code == 413 and err["id"] is None and err["error"]["code"] == -32600, (huge.status_code, huge.text[:200])
     assert q("SELECT count(*) FROM calls")[0][0] == calls_before and q("SELECT note FROM customers WHERE id = 150")[0][0] == ""
-    refused = aq("SELECT phase, principal, rec::text FROM airlock_audit WHERE rule_id = 'request.too_large' ORDER BY ts")
+    refused = aq_wait("SELECT phase, principal, rec::text FROM airlock_audit WHERE rule_id = 'request.too_large' ORDER BY ts",
+                      ok=lambda r: len(r) >= refused_before + 2)
     assert len(refused) == refused_before + 2 and {p for p, _, _ in refused[refused_before:]} == {"intent", "outcome"}, refused
     assert all(pr is None and "zzzz" not in rec for _, pr, rec in refused), refused
     # A 300000 char note: 200000 byte limit on airlock-pins, default 8 MiB on airlock-a.
@@ -434,8 +461,8 @@ async def s21():
     assert cut["isError"] and cut["_meta"][M + "rule_id"] == "upstream.too_large", cut
     assert "upstream response exceeded 200000 bytes" in text and "the call itself ran" in text and "yyyy" not in text, text
     assert len(q("SELECT 1 FROM calls WHERE tool = 'get_note' AND principal = %s", who)) == 1  # the call did reach the service
-    out = aq("SELECT verdict, upstream_status FROM airlock_audit WHERE rule_id = 'upstream.too_large' AND principal = %s "
-             "AND phase = 'outcome'", who)
+    out = aq_wait("SELECT verdict, upstream_status FROM airlock_audit WHERE rule_id = 'upstream.too_large' AND principal = %s "
+                  "AND phase = 'outcome'", who)
     assert out == [("error", 200)], out
     full = result(await rpc(A, "tools/call", read, tok=tok))
     info = full["_meta"][M + "output"]
@@ -577,7 +604,7 @@ async def s24():
     pick = paths[len(paths) // 2]
     with open(pick, encoding="utf-8") as f:
         line = next(json.loads(ln) for ln in f if '"principal.missing"' in ln and '"outcome"' in ln)
-    pg = aq("SELECT rec->>'hash', rec->>'prev' FROM airlock_audit WHERE call_id = %s AND phase = 'outcome'", line["call_id"])
+    pg = aq_wait("SELECT rec->>'hash', rec->>'prev' FROM airlock_audit WHERE call_id = %s AND phase = 'outcome'", line["call_id"])
     assert pg == [(line["hash"], line["prev"])], (pg, line["hash"], line["prev"])
     return (f"{sent} calls without a principal, {len(paths) - 1} rotated files + live; verify: {ok.stdout.strip()[:60]}...; "
             f"edited char: BREAK at {os.path.basename(middle)}:hash mismatch; deleted line: prev mismatch; "
@@ -601,9 +628,10 @@ async def s14():
     assert "nothing reached the upstream" in down_msg, down_msg  # a refused connection: the window is not charged
     down_gated = result(await rpc(A, "tools/call", {"name": "delete_rows", "arguments": {"ids": [80]}}, tok=token("alice")))
     assert down_gated["_meta"][M + "rule_id"] == "catalog.unavailable", down_gated
-    row = aq("SELECT upstream_status, verdict, rule_id FROM airlock_audit WHERE tool = 'crash' AND phase = 'outcome'")
+    row = aq_wait("SELECT upstream_status, verdict, rule_id FROM airlock_audit WHERE tool = 'crash' AND phase = 'outcome'")
     assert row == [(None, "error", "upstream.unreachable")], row
-    assert aq("SELECT count(*) FROM airlock_audit WHERE tool = 'crash' AND phase = 'intent'")[0][0] == 1
+    assert aq_wait("SELECT count(*) FROM airlock_audit WHERE tool = 'crash' AND phase = 'intent'",
+                   ok=lambda r: r[0][0] >= 1)[0][0] == 1
     return (f"crash: tool error upstream.unreachable '{crash_msg}'; later read '{down_msg}'; L2 call catalog.unavailable; "
             f"audit outcome verdict=error upstream_status=null")
 
@@ -613,17 +641,18 @@ async def s13():
     secret = "sk-e2eSECRETvalue1234567890"
     # Upstream is dead after 14 (HTTP 502), but the intent/outcome records still carry the (redacted) args.
     await rpc(B, "tools/call", {"name": "update_note", "arguments": {"id": 90, "text": secret}}, tok=token("alice"))
-    phases = aq("SELECT call_id, array_agg(phase ORDER BY phase) FROM airlock_audit GROUP BY call_id")
+    phases = aq_wait("SELECT call_id, array_agg(phase ORDER BY phase) FROM airlock_audit GROUP BY call_id",
+                     ok=lambda rows: all(p == ["intent", "outcome"] for _, p in rows))
     broken = [(c, p) for c, p in phases if p != ["intent", "outcome"]]
     assert not broken, broken[:5]
-    out = subprocess.run(["airlock-audit", "query", "--dsn", os.environ["AUDIT_DSN"], "--stats"],
+    sql = {(v, rid): n for v, rid, n in aq_settled("SELECT verdict, rule_id, count(*) FROM airlock_audit GROUP BY 1, 2")}
+    out = subprocess.run(["airlock-audit", "query", "--dsn", os.environ["AUDIT_DSN"], "--stats"],  # after the table settled
                          capture_output=True, text=True, check=True).stdout
     stats = {(s["verdict"], s["rule_id"]): s["count"] for s in map(json.loads, out.splitlines())}
-    sql = {(v, rid): n for v, rid, n in aq("SELECT verdict, rule_id, count(*) FROM airlock_audit GROUP BY 1, 2")}
     assert stats == sql, (stats, sql)
     assert stats[("allow", "tier.L2.confirmed")] >= 5 and stats[("deny", "mrtr.replay")] >= 2 * 11, stats
-    leaked = aq("SELECT count(*) FROM airlock_audit WHERE rec::text LIKE %s", f"%{secret}%")[0][0]
-    red = aq("SELECT rec->'args'->>'text' FROM airlock_audit WHERE tool = 'update_note' AND rec->'args'->>'id' = '90'")
+    leaked = aq_settled("SELECT count(*) FROM airlock_audit WHERE rec::text LIKE %s", f"%{secret}%")[0][0]
+    red = aq_wait("SELECT rec->'args'->>'text' FROM airlock_audit WHERE tool = 'update_note' AND rec->'args'->>'id' = '90'")
     assert leaked == 0 and red and all(x == "[REDACTED]" for (x,) in red), (leaked, red)
     return (f"{len(phases)} call_ids all intent+outcome; --stats == SQL group-by ({len(stats)} rule rows, "
             f"L2.confirmed={stats[('allow', 'tier.L2.confirmed')]}, replay={stats[('deny', 'mrtr.replay')]}); secret redacted")
@@ -649,8 +678,9 @@ async def s15():
             sdk = type(e).__name__
         accepted = [p for p in c.prompts if "confirm" in p["props"]]
     assert accepted and present(ids) == 1 and not real_calls("delete_rows", who), (accepted, sdk)
-    ignored_rows = aq("SELECT count(*) FROM airlock_audit WHERE rule_id = 'mrtr.pending' AND principal = %s "
-                      "AND rec->>'detail' LIKE %s", who, "%in-band accept ignored%")[0][0]
+    ignored_rows = aq_wait("SELECT count(*) FROM airlock_audit WHERE rule_id = 'mrtr.pending' AND principal = %s "
+                           "AND rec->>'detail' LIKE %s", who, "%in-band accept ignored%",
+                           ok=lambda r: r[0][0] >= 2)[0][0]
     assert ignored_rows >= 2, ignored_rows
     async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
         text = next(m["text"] for m in (await h.get(os.environ["WEBHOOK"])).json() if key in m["text"])
@@ -670,13 +700,13 @@ async def s15():
 
 @check("16 health endpoints: no credentials, no audit rows")
 async def s16():
-    before = aq("SELECT count(*) FROM airlock_audit")[0][0]
+    before = aq_settled("SELECT count(*) FROM airlock_audit")[0][0]
     async with httpx.AsyncClient(timeout=10, trust_env=False) as h:
         for name, url in (("A", A), ("B", B), ("OOB", OOB)):
             for path in ("/healthz", "/readyz"):  # /readyz runs SELECT 1 on the replica's real Postgres store
                 r = await h.get(url.removesuffix("/mcp") + path)  # A, B and OOB are the /mcp endpoints
                 assert r.status_code == 200 and r.json() == {"status": "ok"}, (name, path, r.status_code, r.text)
-    after = aq("SELECT count(*) FROM airlock_audit")[0][0]
+    after = aq_settled("SELECT count(*) FROM airlock_audit")[0][0]
     assert after == before, (before, after)
     return f"/healthz and /readyz on A, B and OOB without credentials: 200 {{status: ok}}; airlock_audit stays at {after} rows"
 
