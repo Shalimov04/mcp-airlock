@@ -138,7 +138,9 @@ def test_the_postgres_error_blanks_every_value_from_the_dsn(no_env, monkeypatch,
     monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
     rc, rows, err = query(capsys, "--dsn", dsn)
     assert (rc, rows) == (1, []) and err.startswith("airlock-audit: Postgres: ") and err.count("\n") == 1
-    assert '"..."' in err and "failed" in err and not [s for s in secrets if s in err], err
+    assert not [s for s in secrets if s in err], err
+    # psycopg 3.2.1 looks the host up itself and reports only the resolver's error, which names no host
+    assert ('"..."' in err and "failed" in err) or err.endswith("Name or service not known\n"), err
 
 
 def test_a_dsn_nobody_listens_on_is_one_line(no_env, capsys):
