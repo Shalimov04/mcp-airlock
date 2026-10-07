@@ -54,7 +54,8 @@ APPROVE_PREFIX = "al2."  # approve link: held by the human, signed with a derive
 CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
-# The message is cut shorter still (approvals.TEXT_MAX), so it is not where the rest is: the audit intent record is.
+# The message is cut shorter still (approvals.TEXT_MAX), so the rest is not there:
+# the audit intent record has it.
 PROMPT_CUT_NOTE = f"\n[cut at {PROMPT_TEXT_MAX} characters; the full arguments are in the audit record for this key]"
 # The approve page is a capability URL behind SSO: never framed (clickjacking), never cached, never sent as a referrer.
 APPROVE_PAGE_HEADERS = {

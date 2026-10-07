@@ -144,10 +144,14 @@ async def test_the_cap_counts_the_escaped_slack_text():
     assert len(body) == approvals.TEXT_MAX + len("\n\nApprove: https://a/1") and "<" not in body
 
 
-async def test_a_text_within_the_cap_is_sent_whole():
+async def test_a_text_over_the_cap_only_once_escaped_is_cut():
     seen, h = _capture()
     text = "x" * (approvals.TEXT_MAX - 1) + "<"  # escaped it is 3 characters over: cut, since the service counts those
     assert await approvals.notify(text, "https://a/1", webhook="https://hooks.slack.com/x", http=_http(h))
     assert approvals.CUT_NOTE in httpx.Response(200, content=seen[0].content).json()["text"]
+
+
+async def test_a_text_within_the_cap_is_sent_whole():
+    seen, h = _capture()
     assert await approvals.notify("x" * approvals.TEXT_MAX, "https://a/1", webhook="https://hooks.slack.com/x", http=_http(h))
-    assert httpx.Response(200, content=seen[1].content).json()["text"] == "x" * approvals.TEXT_MAX + "\n\nApprove: https://a/1"
+    assert httpx.Response(200, content=seen[0].content).json()["text"] == "x" * approvals.TEXT_MAX + "\n\nApprove: https://a/1"

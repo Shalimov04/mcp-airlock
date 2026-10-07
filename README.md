@@ -429,8 +429,8 @@ request: once it has been executed or declined there is no button, and a `POST` 
 without recording anything; a later `POST` on an approved request changes nothing and is not
 recorded again (two clicks that reach a Postgres store at the same moment can both be recorded;
 the approval is still used once). If the store does not answer, the `POST` answers 503 and
-records nothing.
-The responses are sent with `Cache-Control: no-store`, `Referrer-Policy: no-referrer` and a
+records nothing. The responses are sent with `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a
 Content-Security-Policy that forbids framing. The approval itself is audited with
 `method: approve` and rule `mrtr.approved_oob`.
 
