@@ -120,6 +120,11 @@ def _cut(conn, cancel_timeout: float, fired: list, cancels: set) -> None:
     Shutting our end alone leaves the backend where it was: one waiting on a lock does not notice a gone client,
     and every cut used to leave one more backend behind until max_connections was exhausted. The cancel request
     goes over a connection of its own, so it is sent after the cut and bounded by its own timeout."""
+    try:
+        with socket.socket(fileno=os.dup(conn.pgconn.socket)) as s:  # a dup: the libpq fd stays open
+            s.shutdown(socket.SHUT_RDWR)
+    except Exception:  # already closed: nothing is waiting on it
+        pass
     fired.append(True)
     if psycopg_module().capabilities.has_cancel_safe():  # older libpq cancels in a blocking thread: not worth a hang
         # Its first step, which copies the cancel key, runs before the waiter sees the cut and the pool drops the connection.
@@ -128,11 +133,6 @@ def _cut(conn, cancel_timeout: float, fired: list, cancels: set) -> None:
         # shutdown, else a shutdown right after a cut logs "Task was destroyed but it is pending".
         cancels.add(task)
         task.add_done_callback(cancels.discard)
-    try:
-        with socket.socket(fileno=os.dup(conn.pgconn.socket)) as s:  # a dup: the libpq fd stays open
-            s.shutdown(socket.SHUT_RDWR)
-    except Exception:  # already closed: nothing is waiting on it
-        pass
 
 
 async def _cancel(conn, timeout: float) -> None:
@@ -203,6 +203,8 @@ class PostgresStore:
         # The pool's own check has no deadline.
         async with self._deadline(conn):
             await psycopg_pool_module().AsyncConnectionPool.check_connection(conn)
+        if conn.closed:  # the cut crossed the answer: the pool must discard it, not hand it out closed
+            raise psycopg_module().OperationalError("connection cut during the check")
 
     async def _configure(self, conn) -> None:
         """Once per new connection: the server gives a statement or a lock wait up just before the client would,
@@ -246,11 +248,14 @@ class PostgresStore:
         pool, self._pool = self._pool, None  # idempotent
         if pool is not None:
             await pool.close()
-        if self._cancels:
-            _, pending = await asyncio.wait(set(self._cancels), timeout=_CANCEL_DRAIN_S)
-            for t in pending:
-                t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+        end = time.monotonic() + _CANCEL_DRAIN_S
+        while self._cancels:  # a cut during the close adds more while we wait
+            _, pending = await asyncio.wait(set(self._cancels), timeout=max(0.0, end - time.monotonic()))
+            if pending and time.monotonic() >= end:
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                self._cancels.clear()
 
     async def ping(self) -> None:
         """Readiness: the database answers and the tables exist, else they are created again here, so /readyz

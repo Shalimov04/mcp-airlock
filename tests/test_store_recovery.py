@@ -87,6 +87,104 @@ async def test_a_connection_whose_deadline_fired_is_dropped_even_when_it_answere
     assert time.monotonic() - t < 0.5
 
 
+@needs_pg
+async def test_the_cancel_request_alone_frees_a_waiting_backend(pg_store, admin, monkeypatch):
+    # Behind PgBouncer in transaction mode the server-side timeouts may be absent: the cancel on a cut is the backstop.
+    if not psycopg.capabilities.has_cancel_safe():
+        pytest.skip("needs libpq 17 or newer")
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    app = f"airlock-cancel-{uuid.uuid4().hex[:8]}"
+    dsn = psycopg.conninfo.make_conninfo(PG, application_name=app)
+    store = pg_store(dsn, pool_size=2)
+
+    async def no_timeouts(conn):
+        pass
+
+    monkeypatch.setattr(store, "_configure", no_timeouts)
+    await store.ping()
+    mine = ("SELECT count(*) FROM pg_stat_activity WHERE application_name = %s AND wait_event_type = 'Lock'")
+    async with await psycopg.AsyncConnection.connect(PG) as locker:
+        await locker.execute("LOCK TABLE airlock_usage IN ACCESS EXCLUSIVE MODE")
+        t = time.monotonic()
+        with pytest.raises(psycopg.Error):
+            await store.usage_add("cancel", "t", 1, time.time())
+        assert time.monotonic() - t < 4
+        for _ in range(40):  # the lock is still held: only the cancel can have ended the wait
+            if (await (await admin.execute(mine, (app,))).fetchone())[0] == 0:
+                break
+            await asyncio.sleep(0.1)
+        assert (await (await admin.execute(mine, (app,))).fetchone())[0] == 0
+        await locker.rollback()
+
+
+# ------------------------------------------------------------------ the check and the retry, no server
+class _Conn:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+async def test_a_check_cut_by_its_deadline_raises_even_when_the_query_returned(monkeypatch):
+    pytest.importorskip("psycopg_pool")
+    from mcp_airlock.store import PostgresStore
+    store = PostgresStore("postgresql://x@127.0.0.1:1/x")
+    store._wait_s = 0.05
+    monkeypatch.setattr(store_mod, "_cut", lambda conn, timeout, fired, cancels: fired.append(True))
+
+    async def slow_ok(conn):
+        await asyncio.sleep(0.15)
+
+    import psycopg_pool
+    monkeypatch.setattr(psycopg_pool.AsyncConnectionPool, "check_connection", staticmethod(slow_ok))
+    conn = _Conn()
+    with pytest.raises(psycopg.OperationalError):
+        await store._check(conn)  # the pool discards the connection on this, not hands it out closed
+    assert conn.closed
+    fresh = _Conn()
+    monkeypatch.setattr(psycopg_pool.AsyncConnectionPool, "check_connection", staticmethod(lambda c: asyncio.sleep(0)))
+    await store._check(fresh)
+    assert not fresh.closed
+
+
+async def test_run_retries_once_after_a_missing_table_and_does_not_loop():
+    from contextlib import asynccontextmanager
+    from mcp_airlock.store import PostgresStore
+    store = PostgresStore("postgresql://x@127.0.0.1:1/x")
+    entered: list = []
+
+    @asynccontextmanager
+    async def conn():
+        entered.append(store._ready)
+        store._ready = True  # what a successful DDL run does
+        yield object()
+
+    store._conn = conn
+    store._ready = True
+    calls = []
+
+    async def once(c):
+        calls.append(1)
+        if len(calls) == 1:
+            raise psycopg.errors.UndefinedTable("gone")
+        return "ok"
+
+    assert await store._run(once) == "ok"
+    assert entered == [True, False]  # the DDL flag was reset before the second entry
+
+    calls.clear()
+    entered.clear()
+
+    async def always(c):
+        calls.append(1)
+        raise psycopg.errors.UndefinedTable("still gone")
+
+    with pytest.raises(psycopg.errors.UndefinedTable):
+        await store._run(always)
+    assert len(calls) == 2 and len(entered) == 2
+
+
 # ------------------------------------------------------------------ tables that vanish
 @needs_pg
 async def test_a_store_call_recreates_the_tables_when_they_are_gone(pg_store, admin):
