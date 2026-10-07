@@ -35,9 +35,33 @@
   `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.
 * `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
   bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else disable it.
+* Helm: `OTEL_EXPORTER_OTLP_HEADERS` is read from `existingSecret` like the other credentials and
+  refused in `env`; new `extraEnv` (with `valueFrom`) and `envFrom` values take entries from a
+  Secret or ConfigMap of your own. An `extraEnv` name that is also in `env`, or that is
+  `AIRLOCK_STORE_DSN` or `AIRLOCK_SECRET` with `sharedStore`, is refused at render time instead
+  of being set twice in the container, which server-side apply rejects; a non-string `value` in
+  `extraEnv` is refused too.
+* Helm: the pod sleeps `preStopSeconds` (5) before shutting down, so a rolling update, including
+  every policy change, no longer refuses connections; `terminationGracePeriodSeconds` (30) is set
+  for the sleep, the open calls and the OTLP flush. A negative or fractional value, or the sleep
+  on a cluster older than 1.30 (set `preStopSeconds=0` there), is refused with a chart message.
 
 ### Fixed
 
+* The release workflow fails when the image tag in the `docker run` examples of `README.md` and
+  `README.ru.md` is not the tag's major.minor (`scripts/check_image_tag.sh`).
+* Helm: a whole number from a values file (`env.AIRLOCK_MAX_REQUEST_BYTES: 104857600`, or in
+  `extraArgs`) rendered as `1.048576e+08` and crash-looped the pod; it now renders as `104857600`.
+* The container images compile bytecode at build time (`UV_COMPILE_BYTECODE=1` for the venv,
+  `compileall` for the standard library, which the slim base image ships without `.pyc`); the
+  filesystem is read-only at run time, so no `.pyc` could ever be written and every start paid
+  the import cost.
+* `policy.example.yaml` no longer tells approvers that `restart_service` is refused at L2: a tool
+  without `dry_run` is refused at L1 and confirmed without a preview at L2.
+* The README `docker run` example adds `--add-host=host.docker.internal:host-gateway`, without
+  which Docker Engine on Linux cannot resolve the upstream host.
+* `docs/clients.md`: the `claude mcp add` command gets `--scope user`; without it the server is
+  registered for the current project only.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to

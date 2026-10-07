@@ -92,8 +92,14 @@ uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env 
 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
+  --add-host=host.docker.internal:host-gateway \
   ghcr.io/shalimov04/mcp-airlock:0.3 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
+
+`--add-host` даёт Docker Engine на Linux имя `host.docker.internal`, которое Docker Desktop
+заводит сам. Upstream должен слушать адрес, доступный из контейнера, а не только `127.0.0.1`,
+и файрвол хоста может потребовать разрешить трафик с `docker0`; `--network host` вместе с
+`--upstream http://127.0.0.1:8080/mcp` снимает оба вопроса.
 
 В образе есть `HEALTHCHECK`: раз в 30 секунд python запрашивает `http://127.0.0.1:9000/healthz`
 (curl в образе нет), не обращая внимания на `HTTP_PROXY`. Если передаёте `--port` или `--host`
@@ -179,8 +185,14 @@ helm install airlock charts/mcp-airlock \
   `generateJwtSecret=false` и `env.AIRLOCK_TRUST_PRINCIPAL_HEADER=1` и убедитесь, что до Service
   достаёт только шлюз: NetworkPolicy чарт не ставит.
 * **Секреты кладите в `existingSecret`, не в `env`.** Это `AIRLOCK_UPSTREAM_AUTH`,
-  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN` и JWT-секрет; чарт не принимает их в `env`.
-  Учётные данные в URL `upstream` тоже не кладите, они попадут в спецификацию пода.
+  `AIRLOCK_APPROVAL_WEBHOOK`, `AIRLOCK_AUDIT_DSN`, `OTEL_EXPORTER_OTLP_HEADERS` и JWT-секрет;
+  чарт не принимает их в `env`. Секрет, который лежит в другом Secret или в ConfigMap, задаётся
+  в `extraEnv` обычной записью env Kubernetes с `valueFrom` (или через `envFrom`). Имя в
+  `extraEnv` может заменить один из необязательных ключей `existingSecret`; имя, которое есть и
+  в `env`, или `AIRLOCK_STORE_DSN` и `AIRLOCK_SECRET` при `sharedStore`, чарт не принимает: одно
+  имя в контейнере нельзя задать дважды. Учётные данные в URL `upstream` тоже не кладите, они
+  попадут в спецификацию пода. Целые числа в файле values, например лимиты в байтах в `env` и
+  `extraArgs`, можно не брать в кавычки; простое `value` в `extraEnv` должно быть строкой.
 * **Больше одной реплики.** Создайте Secret с `AIRLOCK_STORE_DSN` и `AIRLOCK_SECRET`, затем
   `--set existingSecret=airlock --set sharedStore=true --set replicaCount=3`. Без `sharedStore`
   чарт больше одной реплики не принимает. `AIRLOCK_SECRET` задаётся только вместе с общим
@@ -195,14 +207,19 @@ helm install airlock charts/mcp-airlock \
   поэтому в таблице `airlock_audit` лежит по одной перемешанной цепочке на под. Флаги ротации
   задаются в `extraArgs`.
 * **Смена политики.** Новая политика перезапускает поды; перезагрузка по SIGHUP тут не
-  используется.
+  используется. Под, которому велели остановиться, сначала ещё `preStopSeconds` (5) секунд
+  обслуживает запросы, чтобы kube-proxy успел убрать его из Service до закрытия сокета, и
+  rolling update не отказывает соединениям; родной хук `sleep` требует Kubernetes 1.30+, так что
+  на более старом кластере задайте `preStopSeconds=0` (чарт там сам не отрисует паузу, иначе
+  API-сервер отверг бы под). `terminationGracePeriodSeconds` (30) покрывает эту паузу, открытые
+  вызовы и сброс очереди OTLP.
 * **Строгий режим.** `strict` включён, так что любое
   [предупреждение при старте](#предупреждения-при-старте) останавливает под. Причина в логе.
 * **Страница approve.** `/approve` лежит на том же Service, поэтому закройте её SSO, как сказано
   в разделе [про подтверждения](#подтверждения-подробнее).
 * **Трейсинг.** Задайте `env.OTEL_EXPORTER_OTLP_ENDPOINT`, чтобы экспортировать спаны; extra в
-  образе есть. `OTEL_EXPORTER_OTLP_HEADERS` это секрет, его место в Secret, который вы
-  монтируете сами.
+  образе есть. `OTEL_EXPORTER_OTLP_HEADERS` это секрет: положите его в `existingSecret` или в
+  `extraEnv` с `secretKeyRef` на свой Secret.
 * **GitOps.** Argo CD и другие инструменты на `helm template` не выполняют `lookup`, и
   сгенерированный ключ менялся бы при каждом рендере. Там используйте `existingSecret`.
 

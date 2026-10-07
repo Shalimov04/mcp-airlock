@@ -15,8 +15,8 @@ environment: ""
 # A change rolls the pods.
 policy: ""
 # Secret with any of AIRLOCK_JWT_SECRET, AIRLOCK_UPSTREAM_AUTH, AIRLOCK_APPROVAL_WEBHOOK,
-# AIRLOCK_AUDIT_DSN (all optional); with sharedStore also AIRLOCK_STORE_DSN and AIRLOCK_SECRET
-# (required).
+# AIRLOCK_AUDIT_DSN, OTEL_EXPORTER_OTLP_HEADERS (all optional); with sharedStore also
+# AIRLOCK_STORE_DSN and AIRLOCK_SECRET (required).
 existingSecret: ""
 # Without existingSecret: make a random AIRLOCK_JWT_SECRET and keep it across upgrades.
 # Set false with JWKS or a trusted header, so no unused secret exists. Needs `lookup`: under
@@ -28,13 +28,30 @@ sharedStore: false
 # AIRLOCK_TRUST_PRINCIPAL_HEADER, AIRLOCK_APPROVAL_MODE, AIRLOCK_STORE_POOL_SIZE,
 # AIRLOCK_STORE_CONNECT_TIMEOUT, OTEL_EXPORTER_OTLP_ENDPOINT. The chart refuses the credential
 # variables here (AIRLOCK_SECRET, AIRLOCK_JWT_SECRET, the DSNs, the webhook,
-# AIRLOCK_UPSTREAM_AUTH): they go in existingSecret. OTEL_EXPORTER_OTLP_HEADERS is a credential
-# too; mount it from a Secret of your own.
+# AIRLOCK_UPSTREAM_AUTH, OTEL_EXPORTER_OTLP_HEADERS): they go in existingSecret, or in extraEnv
+# with a valueFrom. Whole numbers may be unquoted.
 env: {}
+# More env entries as Kubernetes writes them, for a value from another Secret or a ConfigMap, e.g.
+# [{name: OTEL_EXPORTER_OTLP_HEADERS, valueFrom: {secretKeyRef: {name: otel, key: headers}}}].
+# Rendered as given, so a plain `value` must be a string: quote a number. Rendered after env and
+# the existingSecret keys, so $(VAR) may refer to those. A name here replaces the optional
+# existingSecret key of that name; a name that is also in env, or AIRLOCK_STORE_DSN and
+# AIRLOCK_SECRET with sharedStore, is refused, since one container cannot set a name twice.
+extraEnv: []
+# envFrom entries (secretRef, configMapRef) as Kubernetes writes them.
+envFrom: []
 # Exit at startup on any configuration warning (--strict); the pod log says which.
 strict: true
-# More mcp-airlock flags, e.g. ["--audit-max-bytes", "104857600", "--audit-keep", "10"].
+# More mcp-airlock flags, e.g. ["--audit-max-bytes", 104857600, "--audit-keep", 10].
 extraArgs: []
+# Seconds the pod keeps serving after SIGTERM is due, so kube-proxy has dropped the endpoint
+# before uvicorn closes its listener; without it a rolling update refuses a few connects. The
+# native sleep action needs Kubernetes 1.30+: on an older cluster set 0, which leaves the hook
+# out (the chart refuses the sleep there instead of letting the API server reject the pod).
+preStopSeconds: 5
+# preStopSeconds, plus the open calls, plus the OTLP flush (up to the exporter timeout, 10 s by
+# default). Must exceed preStopSeconds.
+terminationGracePeriodSeconds: 30
 # /data holds audit.jsonl. The default emptyDir is lost with the pod; keep the audit with
 # AIRLOCK_AUDIT_DSN or a persistent volume. A non-emptyDir volume (set dataVolume.emptyDir=null,
 # Helm merges maps) means strategy Recreate and replicaCount 1: one audit.jsonl has one hash

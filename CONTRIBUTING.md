@@ -51,7 +51,8 @@ and `examples/spans.jsonl`; do not commit those unless the change is the point.
 A release is a tag `vX.Y.Z` on `main`. Before tagging, bump the version in `pyproject.toml`,
 `server.json` (both `version` fields) and `appVersion` in `charts/mcp-airlock/Chart.yaml`, move
 the `Unreleased` section of `CHANGELOG.md` under the new version, and update the image tag in the
-README `docker run` examples. The release workflow checks the three versions against the tag,
+`docker run` examples of both `README.md` and `README.ru.md` (`:X.Y`). The release workflow checks
+the three versions and the two README image tags against the tag (`scripts/check_image_tag.sh`),
 runs the tests, publishes to PyPI and pushes the image to ghcr.io tagged `X.Y.Z` and `X.Y`.
 
 ## Reporting a vulnerability
