@@ -93,8 +93,7 @@ def main() -> None:
     print(f"\n▶ audit: {len(rows)} records in {EX / 'audit.jsonl'} (2 per call). Last two:")
     for r in rows[-2:]:
         print("  ", json.dumps(r, ensure_ascii=False))
-    spans = (EX / "spans.jsonl").read_text()
-    n_spans = spans.count('"name"')
+    n_spans = len((EX / "spans.jsonl").read_text().splitlines())  # JSON Lines: one span per line
     print(f"▶ spans: {n_spans} spans in {EX / 'spans.jsonl'}")
     from mcp_airlock import audit_cli, policy_cli
     print("\n▶ airlock-audit query --stats")

@@ -81,7 +81,9 @@ proxy runs without exporting.
 
 The container image `ghcr.io/shalimov04/mcp-airlock` includes both extras. It listens on
 `0.0.0.0:9000`, runs as a non-root user and has `/data` as its working directory, so
-`audit.jsonl` lands there. Each release is tagged with its version and its major.minor
+`audit.jsonl` lands there. The user is uid 65532, so a host directory bind-mounted at `/data`
+has to be writable by that uid (`chown 65532 ./data`), or the start stops with a `Permission
+denied` message for the audit file. Each release is tagged with its version and its major.minor
 (`X.Y.Z` and `X.Y`).
 
 From a checkout, `uv sync --all-extras` installs everything including the test tools.
@@ -157,15 +159,19 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 
 `lint` needs no network. It reports a tool without tiers (`no_tiers`, an error), a write tool
 without a description (`no_description`), a `count_arg` that relies on the global blast radius
-(`blast_radius_default`), a `where` rule for an environment no tier mentions
-(`where_env_unknown`), a `where` regex with two unbounded repeats in a row
-(`where_regex_cost`) and an environment no tool covers (`env_unused`); `--env` adds
-environments that must be covered. `diff` asks the server itself (not the proxy, which hides
-unlisted tools) for `tools/list` and tells you which allowlisted tools the server no longer has
-(`missing_upstream`, an error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`),
-which `where` rules name an argument that is not in the schema (`where_unknown_arg`) and which
-server tools the policy does not mention (`not_allowlisted`). With `--pins` it also checks the
-[pins](#pinning-tool-descriptions). Both exit 1 when any finding is an error.
+(`blast_radius_default`), a `where` rule for an environment no tier mentions (`where_env_unknown`),
+a `where` regex with two unbounded repeats in a row (`where_regex_cost`) and an environment no tool
+covers (`env_unused`); `--env` adds environments that must be covered. A policy without
+`environment` lints with the first `--env` (or `AIRLOCK_ENV`) as its environment, the way the proxy
+would run it; without either it is an error. `diff` and `pin` take `--env`, then `AIRLOCK_ENV`, then
+the policy's own `environment`. A policy that cannot be read or does not validate is `ERROR invalid`
+in all three commands, and an upstream that does not answer `tools/list` like an MCP server is
+`ERROR upstream`. `diff` asks the server itself (not the proxy, which hides unlisted tools) for
+`tools/list` and tells you which allowlisted tools the server no longer has (`missing_upstream`, an
+error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`), which `where` rules name an
+argument that is not in the schema (`where_unknown_arg`) and which server tools the policy does not
+mention (`not_allowlisted`). With `--pins` it also checks the [pins](#pinning-tool-descriptions).
+Both exit 1 when any finding is an error.
 
 ### In Kubernetes
 
@@ -242,7 +248,7 @@ The values are documented in `charts/mcp-airlock/values.yaml`. The points that m
 | `--audit PATH` | The JSONL audit file. Default `audit.jsonl` in the working directory. |
 | `--audit-max-bytes N` | Rotate the audit file before a write would take it past `N` bytes. `0` or unset: never. |
 | `--audit-keep N` | Rotated audit files to keep. Default `5`, at least `1`. |
-| `--otel-file PATH` | Append spans as JSON to this file. The same as `AIRLOCK_OTEL_FILE`. |
+| `--otel-file PATH` | Append spans to this file as JSON Lines, one span per line. The same as `AIRLOCK_OTEL_FILE`. |
 | `--pins PATH` | Tool pins file written by `airlock-policy pin`. The same as `AIRLOCK_PINS`. |
 | `--strict` | Exit with status 2 if the configuration has any startup warning. |
 | `--host ADDR` | Listen address. Default `127.0.0.1`; the container image passes `0.0.0.0`. |
@@ -270,6 +276,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_PUBLIC_URL` | Base URL for approve links. Default `http://127.0.0.1:9000`. |
 | `AIRLOCK_PINS` | Path of the tool pins file, the same as `--pins`. Without it no tool is pinned. See [Pinning tool descriptions](#pinning-tool-descriptions). |
 | `AIRLOCK_OTEL_FILE` | Path of the span file, the same as `--otel-file`. |
+| `AIRLOCK_DEBUG` | Set to `1` to get the Python traceback for a startup error instead of the one-line `mcp-airlock: <message>`. |
 | `AIRLOCK_UPSTREAM_AUTH` | Value of the `Authorization` header sent to the upstream. This is the proxy's own credential; the caller's identity travels in `_meta` instead. |
 | `AIRLOCK_MAX_REQUEST_BYTES` | Largest request body accepted, in bytes. Default `1048576` (1 MiB). A bigger body is refused with HTTP 413. A positive integer. |
 | `AIRLOCK_MAX_UPSTREAM_BYTES` | Largest upstream response read, in bytes. Default `8388608` (8 MiB). The proxy stops reading at the limit and drops the response. It asks the upstream for an uncompressed answer and refuses a compressed one: for a tool call both are a tool error (`upstream.too_large`, `upstream.encoded`), for `tools/list` and `server/discover` an HTTP 502. A positive integer. |
@@ -283,8 +290,11 @@ The OpenTelemetry SDK reads the other standard variables too: the rest of
 [Tracing](#tracing).
 
 A bad value (a limit that is not a positive integer, a DSN that does not parse, an unknown
-approval mode, a policy that fails validation, an invalid pins file) stops the start with an
-error message on stderr and exit status 1.
+approval mode, a policy file that is missing, is not YAML or fails validation, an audit or span
+file that cannot be opened, an invalid pins file, an `OTEL_*` setting the SDK rejects) stops the
+start with a `mcp-airlock: <message>` line on stderr and exit status 1, with no traceback;
+`AIRLOCK_DEBUG=1` prints the traceback instead. A flag with a bad value (`--port 99999`) is
+refused by the argument parser with exit status 2.
 
 ### Startup warnings
 
@@ -601,7 +611,8 @@ not a string is ignored, and a bad `traceparent` starts a new trace.
 
 Spans go to a file with `--otel-file` (or `AIRLOCK_OTEL_FILE`), to an OTLP collector when
 `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set, or to both. The
-file is written span by span; the collector export is batched (5 seconds by default) and needs
+file is written span by span as JSON Lines (one JSON object per line, see
+`examples/spans.jsonl`); the collector export is batched (5 seconds by default) and needs
 the `otlp` extra, which the container image has. On SIGTERM the queue is flushed before the
 process exits, which can take up to the exporter timeout if the collector is down
 (`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT`, 10 by default). The

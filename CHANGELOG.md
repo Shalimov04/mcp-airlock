@@ -31,6 +31,12 @@
   notifications, a server-to-client request or a response to another id used to be passed back as
   the answer (HTTP 200, `id: null`), on which the official SDK client hangs; it is now
   `upstream.bad_reply`. `airlock-policy diff` refuses such a catalog too.
+* `--otel-file` writes JSON Lines, one span per line, instead of indented multi-line JSON that
+  no line-by-line reader could parse. `examples/spans.jsonl` is regenerated in the new format.
+* `airlock-policy diff` and `pin` read `AIRLOCK_ENV` when `--env` is not given, as the proxy does.
+  In a shell that has `AIRLOCK_ENV` set, `diff` now checks that environment's tier column instead
+  of the policy's own, and both commands accept a policy without `environment`. The pins `pin`
+  writes do not depend on the environment.
 
 ### Added
 
@@ -107,6 +113,20 @@
   to show. The Postgres connect has the proxy's connect timeout; `--since 99999999999d` is a
   usage error instead of an OverflowError; `--limit` must not be negative (a negative value used to
   drop the oldest N records).
+* `mcp-airlock` exits with one `mcp-airlock: <message>` line instead of a traceback when the policy
+  file is missing, is not YAML or is not a YAML mapping (a list or a string, which with `--env` used
+  to be a `TypeError`), the audit or span file cannot be opened, or an `OTEL_*` setting is rejected
+  by the SDK; `--port` outside 0-65535 is refused by the argument parser. A YAML syntax error or a
+  validation error is one line too, starting with the policy path, instead of PyYAML's caret
+  diagram or pydantic's block per error. `AIRLOCK_DEBUG=1` keeps the traceback.
+* `airlock-policy diff` and `pin` report a missing, unparsable or invalid policy (a list or a string
+  at the top level included) as `ERROR invalid`, like `lint`, and a `tools/list` answer that is not
+  an MCP result as `ERROR upstream`, instead of a traceback; validation errors are no longer
+  labelled `upstream`. In all three commands a YAML syntax or validation error is one `ERROR
+  invalid` line starting with the policy path, like every other finding.
+* `airlock-policy lint` accepts a policy without `environment` when `--env` or `AIRLOCK_ENV` names
+  one, as the proxy does. Without either, the error also lists the file's other validation errors
+  instead of hiding them until the environment is fixed.
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
   (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to
