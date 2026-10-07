@@ -182,7 +182,9 @@ def nested(levels: int) -> str:
 
 async def test_deeply_nested_arguments_are_refused_and_audited(upstream, audit_path):
     al = make_airlock(upstream, audit_path)
-    args = '{"names": ' + nested(1500) + ', "replicas": 1}'
+    # 500 levels parse on every supported Python (3.11's decoder gives up near 1000, a parse error below) and are
+    # far past the cap
+    args = '{"names": ' + nested(500) + ', "replicas": 1}'
     body = envelope(1, "tools/call", {"name": "set_replicas", "arguments": "ARGS"}).replace(b'"ARGS"', args.encode())
     async with serving(al) as c:
         r = await c.post("/mcp", content=body, headers=headers("tools/call", "set_replicas"))
