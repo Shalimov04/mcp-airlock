@@ -34,13 +34,13 @@ def parse_since(s: str) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def positive_int(s: str) -> int:
+def count(s: str) -> int:
     try:
         n = int(s)
     except ValueError:
-        n = 0
-    if n <= 0:  # rows[-limit:] would turn a negative N into "drop the oldest N", and Postgres rejects it
-        raise argparse.ArgumentTypeError(f"expected a positive integer, got {s!r}")
+        n = -1
+    if n < 0:  # rows[-limit:] would turn a negative N into "drop the oldest N", and Postgres rejects it
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {s!r}")
     return n
 
 
@@ -52,7 +52,7 @@ def query_jsonl(path: str, where: dict, since: datetime | None, limit: int | Non
     files = default_files(path)  # rotated files first, so the output stays oldest first
     if not files:
         raise FileNotFoundError(f"no audit file at {path}")
-    rows: deque = deque(maxlen=limit)  # the newest `limit` matches, without holding the whole log
+    rows: deque = deque(maxlen=limit or None)  # the newest `limit` matches, without holding the whole log
     for f in files:
         # Bytes split on \n alone, as verify reads them: str.splitlines also splits on U+2028, U+2029, U+0085 and a
         # few control characters, which the writer leaves raw inside client-chosen strings.
@@ -106,13 +106,13 @@ def _blanked(text: str, conninfo: dict) -> str:
     longest first and in their repr() form too: libpq does not escape a '"' inside what it quotes and psycopg
     escapes a "'", so a quote inside a value would end the quoted span early. Numbers (port, timeouts) and libpq's
     own settings stay, and so do its words: refused, timed out or no such table."""
-    text = " ".join(text.split())
     values = set()
     for k, v in conninfo.items():
         if len(v) > 1 and not v.isdigit() and k not in _SETTINGS:  # a one-character value would blank every word
             values.update((v, repr(v)[1:-1]))
     for v in sorted(values, key=len, reverse=True):
-        text = text.replace(v, "...")
+        text = text.replace(v, "...")  # on the original text: a value with a tab or two spaces still matches
+    text = " ".join(text.split())
     return _QUOTED.sub('"..."', text)
 
 
@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--rule", dest="rule_id")
     q.add_argument("--phase", choices=("intent", "outcome"))
     q.add_argument("--since", type=parse_since, help="30m | 2h | 7d | ISO8601")
-    q.add_argument("--limit", type=positive_int, help="keep the newest N matching records")
+    q.add_argument("--limit", type=count, help="keep the newest N matching records (0: all)")
     q.add_argument("--stats", action="store_true", help="counts grouped by verdict and rule_id instead of records")
     v = sub.add_parser("verify", help="check the hash chain of audit files given oldest first (default: audit.jsonl and its rotated files)")
     v.add_argument("files", nargs="*")

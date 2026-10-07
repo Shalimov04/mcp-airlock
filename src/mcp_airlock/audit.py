@@ -184,6 +184,13 @@ class AuditLog:
         every later verify fail. The bytes are kept in <path>.torn (an audit file should lose nothing silently) and
         the file is cut back to `at`, the byte after the last newline. When the file cannot be cut (an append-only
         attribute, say) it is left as it was, and verify reports the line."""
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            size = -1
+        if size != at + len(fragment):  # another writer appended since the read: `at` is no longer the fragment's start
+            log.warning("audit: %s changed while its torn last line was being read; left as it was", self.path)
+            return
         aside = self.path.with_name(self.path.name + ".torn")
         try:
             with aside.open("ab") as f:
@@ -214,11 +221,14 @@ class AuditLog:
                 self._size, self._torn = self._size + 1, False
             if self.max_bytes and self._size and self._size + len(data) > self.max_bytes:
                 self._rotate()
+            # The file's own size, not self._size: another process may append to the same file (the append-only
+            # open allows it), and the cut must go back to where this record started.
+            start = os.fstat(self._f.fileno()).st_size
             if (n := self._f.write(data)) != len(data):  # a full disk: the record is not chained
                 try:  # the half line comes back off, so it is not a `not JSON` break for every later verify
-                    # From the file's own size, not self._size: another process appending to the same file (the
-                    # append-only open makes that work) would otherwise have its records cut off too.
-                    os.ftruncate(self._f.fileno(), os.fstat(self._f.fileno()).st_size - n)
+                    if os.fstat(self._f.fileno()).st_size != start + n:  # someone appended after us: cut nothing
+                        raise OSError("file changed")
+                    os.ftruncate(self._f.fileno(), start)
                 except OSError:  # the file cannot shrink: the torn line gets its newline before the next record
                     self._size, self._torn = self._size + n, n > 0
                 raise OSError(f"short write to {self.path}")

@@ -675,6 +675,44 @@ def test_a_short_write_that_cannot_be_cut_back_gives_the_torn_line_its_newline(t
     assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:2: not JSON")
 
 
+def test_a_short_write_cuts_nothing_when_another_writer_appended_right_after_it(tmp_path):
+    path = chained(tmp_path / "a.jsonl", 1)
+    sink = AuditLog(path)
+    other = AuditLog(path)
+
+    class Racing(ShortFile):
+        def write(self, b):
+            n = super().write(b)
+            write_n(other, 1, start=5)  # lands between our partial write and the cut
+            return n
+
+    sink._f.close()
+    sink._f = Racing(path)
+    with pytest.raises(OSError, match="short write"):
+        write_n(sink, 1, start=1)
+    other.close()
+    sink.close()
+    assert b'"call_id": "c005"' in path.read_bytes() and path.read_bytes().endswith(b"}\n")  # not cut into
+
+
+def test_a_torn_tail_is_not_cut_when_the_file_grew_since_it_was_read(tmp_path, caplog, monkeypatch):
+    path = chained(tmp_path / "a.jsonl", 1)
+    with path.open("ab") as f:
+        f.write(TORN)
+    real = AuditLog._cut_torn
+
+    def appended_first(self, fragment, at):
+        with path.open("ab") as f:  # another writer finishes the line and adds a record
+            f.write(b'x"}\n')
+        real(self, fragment, at)
+
+    monkeypatch.setattr(AuditLog, "_cut_torn", appended_first)
+    before = path.read_bytes()
+    AuditLog(path).close()
+    assert path.read_bytes() == before + b'x"}\n' and not path.with_name("a.jsonl.torn").exists()
+    assert "changed while" in caplog.text
+
+
 TORN = b'{"ts": "2026-09-14T06:54:08.340+00:00", "ph'  # a crash in the middle of a record
 
 

@@ -58,6 +58,8 @@ def test_query_skips_a_torn_line_and_reads_the_records_after_it(tmp_path, capsys
     assert rc == 0 and rows == [{"verdict": "allow", "rule_id": "r", "count": 4}]
     rc, rows, _ = query(capsys, "--jsonl", str(path), "--limit", "1")
     assert rc == 0 and [r["call_id"] for r in rows] == ["c003"]
+    rc, rows, _ = query(capsys, "--jsonl", str(path), "--limit", "0")  # 0 is no limit, as it always was
+    assert rc == 0 and len(rows) == 4
 
 
 def test_query_skips_a_record_without_a_usable_ts_only_when_since_needs_it(tmp_path, capsys):
@@ -75,9 +77,8 @@ def test_query_skips_a_record_without_a_usable_ts_only_when_since_needs_it(tmp_p
 # --- bad arguments ---------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("argv, msg", [
-    (["--limit", "-2"], "argument --limit: expected a positive integer, got '-2'"),
-    (["--limit", "0"], "argument --limit: expected a positive integer, got '0'"),
-    (["--limit", "x"], "argument --limit: expected a positive integer, got 'x'"),
+    (["--limit", "-2"], "argument --limit: expected a non-negative integer, got '-2'"),
+    (["--limit", "x"], "argument --limit: expected a non-negative integer, got 'x'"),
     (["--since", "99999999999d"], "argument --since: expected 30m, 2h, 7d or an ISO 8601 time, got '99999999999d'"),
     (["--since", "yesterday"], "argument --since: expected 30m, 2h, 7d or an ISO 8601 time, got 'yesterday'"),
 ])
@@ -169,3 +170,9 @@ def test_a_dsn_without_the_postgres_extra_names_it(no_env, monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "psycopg", None)  # makes `import psycopg` raise ImportError
     rc, rows, err = query(capsys, "--dsn", "postgresql://x/y")
     assert (rc, rows) == (1, []) and err.startswith("airlock-audit: ") and "mcp-airlock[postgres]" in err and err.count("\n") == 1
+
+
+def test_a_dsn_value_with_a_tab_or_two_spaces_is_still_blanked():
+    from mcp_airlock.audit_cli import _blanked
+    out = _blanked('connection to "se\tcret  host" failed:\n\tno route', {"host": "se\tcret  host"})
+    assert out == 'connection to "..." failed: no route'

@@ -105,7 +105,7 @@
   (host, socket path, user, database, password) is blanked to `"..."`, quoted by libpq or not: a
   URI password with an unescaped `@` is parsed with its tail as the host, which libpq's text used
   to show. The Postgres connect has the proxy's connect timeout; `--since 99999999999d` is a
-  usage error instead of an OverflowError; `--limit` must be positive (a negative value used to
+  usage error instead of an OverflowError; `--limit` must not be negative (a negative value used to
   drop the oldest N records).
 * The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
   `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
