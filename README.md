@@ -780,9 +780,9 @@ call itself ran (or, on a dry run, that the dry run ran and nothing was executed
 does not repeat a write because its output was too long, and the numbers are in
 `_meta["io.mcp-airlock/output"]`. A dry-run preview over the cap is trimmed the same way and the
 L2 prompt still goes out: the preview in the confirmation and in the approval message is the
-trimmed text. Only a preview that is the upstream's own error skips the prompt. An upstream answer over
-`AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it comes back as an error
-that says the call ran (or that only its dry run did), with rule `upstream.too_large`.
+trimmed text. Only a preview that is the upstream's own error skips the prompt. An upstream
+answer over `AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool call: it comes back
+as an error that says the call ran (or that only its dry run did), with rule `upstream.too_large`.
 
 An upstream that cannot be reached (`upstream.unreachable`), answers with compressed content
 (`upstream.encoded`) or sends something that is not a JSON-RPC response (`upstream.bad_reply`:
