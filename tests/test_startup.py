@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from mcp_airlock.startup import startup_warnings
 
 KEY32 = "k" * 32
 GOOD_ID = IdentityConfig(jwt_secret=KEY32)
-GOOD = dict(secret="s", store_dsn=None, webhook=None, public_url=None)
+GOOD = dict(secret=None, store_dsn=None, webhook=None, public_url=None)
 
 
 def warn(identity=GOOD_ID, **over):
@@ -30,7 +31,8 @@ def only(ws, key):
 def test_a_correct_configuration_has_no_warnings():
     assert warn() == []
     full = IdentityConfig(jwks_url="https://idp/jwks", audience="airlock", issuer="https://idp")
-    assert warn(full, store_dsn="postgresql://x", webhook="https://hooks/x", public_url="https://airlock.example.com") == []
+    assert warn(full, secret="s", store_dsn="postgresql://x", webhook="https://hooks/x",
+                public_url="https://airlock.example.com") == []
 
 
 def test_no_identity_warns():
@@ -89,6 +91,23 @@ def test_store_dsn_without_secret_warns():
 def test_no_store_dsn_is_fine_without_a_secret():
     assert warn(store_dsn=None, secret=None) == []
     assert warn(store_dsn="", secret=None) == []
+
+
+def test_secret_without_store_dsn_warns():
+    # A fixed key makes a confirmation token valid in every process, while the memory store burns it in one.
+    only(warn(secret="s", store_dsn=None), "AIRLOCK_SECRET is set without AIRLOCK_STORE_DSN")
+    only(warn(secret="s", store_dsn=""), "AIRLOCK_SECRET is set without AIRLOCK_STORE_DSN")
+    assert warn(secret="s", store_dsn="postgresql://x") == []
+
+
+def test_the_registry_manifest_gives_the_same_advice_about_the_secret():
+    # server.json is what an MCP registry shows. It used to say "set it when running more than one replica":
+    # the advice the AIRLOCK_SECRET warning exists to correct.
+    from .conftest import ROOT
+    manifest = json.loads((ROOT / "server.json").read_text())
+    (var,) = [v for p in manifest["packages"] for v in p["environmentVariables"] if v["name"] == "AIRLOCK_SECRET"]
+    assert "AIRLOCK_STORE_DSN" in var["description"]
+    assert "more than one replica" not in var["description"]
 
 
 @pytest.mark.parametrize("public_url", [None, "", "http://127.0.0.1:9000", "http://127.0.0.1:9000/"])
@@ -165,8 +184,8 @@ def test_a_missing_otlp_extra_is_one_warning_that_names_the_variables_and_the_ex
 
 def test_warnings_are_plain_sentences_that_avoid_the_words_the_e2e_run_greps_for():
     ws = startup_warnings(WEAK_ID, **WEAK) + startup_warnings(IdentityConfig(), **GOOD)
-    ws += startup_warnings(GOOD_ID, **GOOD, otlp_missing=True)
-    assert len(ws) == 7
+    ws += startup_warnings(GOOD_ID, **GOOD, otlp_missing=True) + startup_warnings(GOOD_ID, **{**GOOD, "secret": "s"})
+    assert len(ws) == 8
     for w in ws:
         assert "\n" not in w and w.endswith(".") and not re.search(r"error|fail|traceback", w, re.I), w
 
@@ -177,7 +196,7 @@ ENV_VARS = ["AIRLOCK_JWT_SECRET", "AIRLOCK_JWKS_URL", "AIRLOCK_JWT_ISSUER", "AIR
             "AIRLOCK_SECRET", "AIRLOCK_STORE_DSN", "AIRLOCK_APPROVAL_WEBHOOK", "AIRLOCK_TELEGRAM_CHAT", "AIRLOCK_PUBLIC_URL",
             "AIRLOCK_PINS",
             "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]
-GOOD_ENV = {"AIRLOCK_JWT_SECRET": KEY32, "AIRLOCK_SECRET": "s"}
+GOOD_ENV = {"AIRLOCK_JWT_SECRET": KEY32}
 STUB_PROVIDER = SimpleNamespace(shutdown=lambda: None)
 
 
@@ -245,6 +264,7 @@ def test_a_good_configuration_prints_nothing(monkeypatch, capsys):
     ({**GOOD_ENV, "AIRLOCK_TRUST_PRINCIPAL_HEADER": "1"}, "AIRLOCK_TRUST_PRINCIPAL_HEADER"),
     ({"AIRLOCK_JWT_SECRET": KEY32, "AIRLOCK_STORE_DSN": "postgresql://x"}, "AIRLOCK_STORE_DSN"),
     ({**GOOD_ENV, "AIRLOCK_SECRET": "", "AIRLOCK_STORE_DSN": "postgresql://x"}, "AIRLOCK_STORE_DSN"),
+    ({**GOOD_ENV, "AIRLOCK_SECRET": "s"}, "AIRLOCK_SECRET is set without AIRLOCK_STORE_DSN"),
     ({**GOOD_ENV, "AIRLOCK_APPROVAL_WEBHOOK": "https://hooks/x"}, "AIRLOCK_APPROVAL_WEBHOOK"),
     ({**GOOD_ENV, "AIRLOCK_APPROVAL_WEBHOOK": "https://hooks/x", "AIRLOCK_PUBLIC_URL": "http://127.0.0.1:9000/"},
      "AIRLOCK_APPROVAL_WEBHOOK"),
@@ -259,7 +279,7 @@ def test_each_setting_is_read_from_the_environment(monkeypatch, capsys, env, key
 
 def test_a_webhook_with_a_public_url_and_a_store_with_a_secret_pass_strict(monkeypatch, capsys):
     env = {**GOOD_ENV, "AIRLOCK_APPROVAL_WEBHOOK": "https://hooks/x", "AIRLOCK_PUBLIC_URL": "https://airlock.example.com",
-           "AIRLOCK_STORE_DSN": "postgresql://x"}
+           "AIRLOCK_STORE_DSN": "postgresql://x", "AIRLOCK_SECRET": "s"}
     assert run_main(monkeypatch, env, "--strict")["ran"]
     assert capsys.readouterr().err == ""
 

@@ -255,7 +255,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_JWKS_URL`, `AIRLOCK_JWT_ISSUER`, `AIRLOCK_JWT_AUDIENCE` | Verify bearer tokens against an OIDC provider (RS256/ES256). Takes precedence over the shared secret. Set the audience; without it any token from that provider is accepted. The issuer is checked only when set. |
 | `AIRLOCK_GROUPS_CLAIM` | Claim to read groups from. Default `groups`. A list, or a string split on commas and spaces. |
 | `AIRLOCK_TRUST_PRINCIPAL_HEADER` | Set to `1` to accept `X-Airlock-Principal` and `X-Airlock-Groups` (comma or space separated). Off by default. Only turn it on behind a gateway that sets those headers itself and strips them from clients. A bearer token that fails verification never falls back to the header. |
-| `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it if you run more than one replica. |
+| `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it only together with `AIRLOCK_STORE_DSN`: replicas need the same key, but with the memory store a fixed key would let a used confirmation run again on another replica or after a restart. |
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. Needs the `postgres` extra. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. Needs the `postgres` extra. |
 | `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
@@ -292,6 +292,8 @@ At startup the proxy prints a warning to stderr for each of these:
 - `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without
   `Authorization` is trusted on the header alone
 - `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
+- `AIRLOCK_SECRET` without `AIRLOCK_STORE_DSN`: used confirmations are remembered only in this
+  process, so a confirmed call can run again on another replica or after a restart
 - `AIRLOCK_APPROVAL_WEBHOOK` while `AIRLOCK_PUBLIC_URL` is the default: nobody else can open the
   approve link
 - `AIRLOCK_APPROVAL_WEBHOOK` that is not an `http(s)` URL with a host, or a Telegram URL without
@@ -307,7 +309,7 @@ With `--strict` any warning stops the start with exit code 2.
 |---|---|
 | `POST /mcp` | The MCP endpoint the client talks to. |
 | `GET /healthz` | `{"status":"ok"}` while the process is up. |
-| `GET /readyz` | 200 `{"status":"ok"}` when the store responds, 503 `{"status":"unavailable"}` on an error or after 2 seconds. With the memory store it is always 200. |
+| `GET /readyz` | 200 `{"status":"ok"}` when the store responds and its tables exist (missing ones are created again by the probe), 503 `{"status":"unavailable"}` on an error or after 2 seconds. With the memory store it is always 200. |
 | `GET /approve/<token>` | The approve page for an out-of-band confirmation. Renders only. |
 | `POST /approve/<token>` | Records the approval. |
 
@@ -555,14 +557,26 @@ approve-page text and blast-radius counters have to live somewhere shared if you
 one replica; that is what `AIRLOCK_STORE_DSN` is for. `AIRLOCK_AUDIT_DSN` adds a Postgres sink
 for the audit log next to the file. Both need the `postgres` extra and may point at the same
 database. The tables (`airlock_keys`, `airlock_prompts`, `airlock_usage`, `airlock_audit`) are
-created on first use.
+created on first use, and created again when a store call or `/readyz` finds them gone (a
+database recreated empty); until that works, `/readyz` says 503. The used confirmation keys
+went with the database, so a confirmation used shortly before it was lost can be used once
+more within its TTL; the restart that used to be needed forgot them the same way.
 
 The store keeps a small connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on
 first use and closes at shutdown. Replicas times the pool size must fit the server's
-`max_connections`. Pooled connections never auto-prepare statements, so PgBouncer in
-transaction mode works for `AIRLOCK_STORE_DSN`. The audit sink uses one connection of its own,
-with psycopg's default auto-prepare, and reconnects once when it drops; point
-`AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer in session mode.
+`max_connections`, and a replica is meant to hold no more: each pooled connection gets a
+`statement_timeout` and a `lock_timeout` just under the connect timeout in force when it is
+opened, so the server gives a slow statement up before the client does, and a connection the
+client cuts anyway also gets a cancel request (only with libpq 17 or newer; the early
+`psycopg[binary]` 3.2 wheels bundle an older one, and then the two timeouts are the only
+backstop), so a backend waiting on a lock is not left behind. Pooled connections never
+auto-prepare statements, so PgBouncer in transaction mode works for `AIRLOCK_STORE_DSN`. The
+two timeouts are session settings, though: in transaction mode they stay with whichever server
+connection ran them, and any client of that PgBouncer pool (same database and user) can inherit
+a timeout of about 10 s, other applications included. Give the store a role of its own there.
+The audit sink uses one connection of its own, with psycopg's default auto-prepare, and
+reconnects once when it drops; point `AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer
+in session mode.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),

@@ -19,6 +19,7 @@ import psycopg_pool  # noqa: E402
 from psycopg.conninfo import conninfo_to_dict, make_conninfo  # noqa: E402
 
 import mcp_airlock.app as app_mod  # noqa: E402
+import mcp_airlock.store as store_mod  # noqa: E402
 from mcp_airlock import Airlock, Policy  # noqa: E402
 from mcp_airlock.audit import AuditLog, PostgresAuditLog  # noqa: E402
 from mcp_airlock.pg import effective_connect_timeout, with_conn_defaults  # noqa: E402
@@ -221,6 +222,9 @@ class FakeConn:
     async def execute(self, *a, **kw):
         return self
 
+    async def fetchone(self):
+        return (1, 1, 1)  # ping reads the three table oids: all present
+
     @asynccontextmanager
     async def transaction(self):
         yield
@@ -282,6 +286,43 @@ async def test_aclose_during_the_first_open_leaves_no_pool_behind(fake_pool, mon
     with pytest.raises(RuntimeError, match="closed"):
         await call
     assert fake_pool.instances[0].closed == 1
+
+
+async def test_cancel_requests_after_a_cut_are_kept_and_drained_at_shutdown(fake_pool, monkeypatch):
+    # The loop holds a task only weakly, so a fire-and-forget cancel request could be collected half way, and one
+    # still in flight at shutdown logged "Task was destroyed but it is pending".
+    monkeypatch.setattr(psycopg.capabilities, "has_cancel_safe", lambda: True)
+    monkeypatch.setattr(store_mod, "_CANCEL_DRAIN_S", 0.1)
+    never = asyncio.Event()
+
+    class Conn(FakeConn):
+        sent = 0
+
+        async def cancel_safe(self, timeout):
+            Conn.sent += 1
+            if Conn.sent > 1:
+                await never.wait()  # the second request goes to a server that does not answer
+
+        async def close(self):
+            pass
+
+    @asynccontextmanager
+    async def connection(self):
+        yield Conn()
+
+    monkeypatch.setattr(fake_pool, "connection", connection)
+    store = PostgresStore("host=h")
+    store._wait_s = 0.05
+    async with store._conn():
+        await asyncio.sleep(0.1)  # the deadline fires; the cancel request is answered at once
+    assert Conn.sent == 1 and store._cancels == set()  # a finished request is forgotten
+    async with store._conn():
+        await asyncio.sleep(0.1)
+    (task,) = store._cancels
+    assert Conn.sent == 2 and not task.done()
+    t = time.monotonic()
+    await store.aclose()
+    assert task.cancelled() and store._cancels == set() and time.monotonic() - t < 1
 
 
 async def test_pool_gives_up_a_failed_connect_as_fast_as_a_call_waits(fake_pool, monkeypatch):
