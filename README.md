@@ -667,23 +667,22 @@ The audit sink uses one connection of its own, with psycopg's default auto-prepa
 reconnects once when it drops; point `AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer
 in session mode.
 
-The audit sink writes from a thread of its own through a queue of at most 1000 records and
-about 32 MiB of serialized rows, so a slow, locked or frozen audit database never holds up a
-call, `/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's
-rows land a moment later, so an `intent` row can reach the table after the upstream call has
-run. Each write is given up after the connect timeout: the connection gets a
-`statement_timeout` and a `lock_timeout` of that length, and a server that does not answer at
-all is cut off on our side a second later. A record that fails, times out or finds the queue
-full is dropped from the table with a warning in the log; the JSONL file still holds it, so
-the table's hash chain can have gaps after a drop (the `prev` of a row names a row that is not
-there) and the file is the one to verify. At shutdown the queue is drained for up to one such
-timeout, then the worker gets 2 s more to stop, and what is left is dropped, with the count in
-the log; with a frozen database that is about the timeout plus 2 s (7 s at a timeout of 3 s,
-12 s at the default 10 s), and the wait runs off the event loop, capped at 15 s. A crash loses
-the queue too. Where the file is an emptyDir, as in the
-chart's multi-replica setup, those records live only as long as the pod. The table is created
-on first use under the same advisory lock as the store's tables, so replicas starting together
-on an empty database do not lose their first records.
+The audit sink writes from a thread of its own through a queue of at most 1000 records and about
+32 MiB of serialized rows, so a slow, locked or frozen audit database never holds up a call,
+`/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's rows
+land a moment later, so an `intent` row can reach the table after the upstream call has run.
+Each write is given up after the connect timeout: the connection gets a `statement_timeout` and
+a `lock_timeout` of that length, and a server that does not answer at all is cut off on our side
+a second later. A record that fails, times out or finds the queue full is dropped from the table
+with a warning in the log; the JSONL file still holds it, so the table's hash chain can have
+gaps after a drop (the `prev` of a row names a row that is not there) and the file is the one to
+verify. At shutdown the queue is drained for up to one such timeout, then the worker gets 2 s
+more to stop, and what is left is dropped, with the count in the log; with a frozen database
+that is about the timeout plus 2 s (7 s at a timeout of 3 s, 12 s at the default 10 s), and the
+wait runs off the event loop, capped at 15 s. A crash loses the queue too. Where the file is an
+emptyDir, as in the chart's multi-replica setup, those records live only as long as the pod. The
+table is created on first use under the same advisory lock as the store's tables, so replicas
+starting together on an empty database do not lose their first records.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),
