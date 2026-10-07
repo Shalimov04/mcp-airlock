@@ -500,6 +500,17 @@ async def test_a_decline_span_carries_the_rule_and_the_tier(upstream, audit_path
     assert last_span()[0] == {"airlock.verdict": "deny", "airlock.rule_id": "mrtr.declined", "airlock.tier": "L2"}
 
 
+async def test_a_pending_retry_span_says_pending(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    async with serving(al) as c:
+        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        al.approval_mode, al.webhook = "oob", "https://hooks/x"  # the link was not pressed yet
+        SPANS.clear()
+        res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": token})
+    assert res["_meta"][META + "rule_id"] == "mrtr.pending"
+    assert last_span()[0] == {"airlock.verdict": "confirm", "airlock.rule_id": "mrtr.pending", "airlock.tier": "L2"}
+
+
 async def test_a_catalog_denial_span_has_the_airlock_attributes(audit_path):
     al = mock_airlock(audit_path, Flaky())  # the upstream is down: tools/list for the dry_run check fails
     SPANS.clear()

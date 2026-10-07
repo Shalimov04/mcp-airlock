@@ -484,8 +484,8 @@ class Airlock:
         if d.verdict == "confirm" and mode.startswith("pending"):
             # Waiting for the out-of-band approval: same key, no new prompt (a client would re-ask the human), nothing burned.
             detail = "in-band accept ignored (approval mode oob)" if mode == "pending:ignored" else None
-            for phase in ("intent", "outcome"):
-                self.audit.write(phase=phase, verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
+            self.audit.write(phase="intent", verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)
+            self._outcome(verdict="confirm", rule_id="mrtr.pending", tier=d.tier, dry_run=None, detail=detail, **base)  # and the span
             message = ("Awaiting approval. " + ("The in-band accept was ignored (approval mode oob). " if detail else "")
                        + "Retry with this requestState once the approver has confirmed.")
             return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {
