@@ -513,9 +513,9 @@ a fragment can never be chained. The proxy cuts it off rather than keep it: at s
 appends the fragment to `audit.jsonl.torn`, cuts `audit.jsonl` back to the last newline and
 logs a warning naming both; a short write it notices itself is cut back at once. The chain
 goes on from the last whole record, so `verify` still passes. A fragment that cannot be cut
-(an append-only file, say) stays where it is, and `verify` reports that line as `not JSON`. A last line edited into
-non-JSON with no newline is moved the same way at the next start, so keep `audit.jsonl.torn`: it is
-the evidence.
+(an append-only file, say) stays where it is, and `verify` reports that line as `not JSON`.
+A last line edited into non-JSON with no newline is moved the same way at the next start, so
+keep `audit.jsonl.torn`: it is the evidence.
 
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
