@@ -560,13 +560,14 @@ class Airlock:
                           latency_ms=_ms(t0), detail=msg, **base)
             return _tool_error(rid, f"airlock: denied ({rule}): {msg}", rule)
         detail: dict[str, Any] = {}
+        upstream_error = isinstance(result, dict) and bool(result.get("isError"))  # the cap sets isError too; gate on this
         if isinstance(result, dict):
             result["_meta"] = {**_upstream_meta(result), META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run}
             for block in result.get("content") if isinstance(result.get("content"), list) else ():
                 if isinstance(block, dict):
                     _strip_meta(block)  # a content block has its own _meta, and the dry-run preview copies the blocks
             try:  # the upstream already acted: a malformed result must reach the caller, not become a 500
-                if truncated := self._cap_output(tool, result, policy):  # after the _meta additions so the cap covers the final size
+                if truncated := self._cap_output(tool, result, policy, dry_run=bool(d.dry_run)):  # after the _meta additions so the cap covers the final size
                     detail.update(truncated)
                 if findings := guard.scan(result, policy.tools):
                     result["_meta"][META + "suspicious"] = findings  # marked, never blocked: the client decides how to render
@@ -575,9 +576,11 @@ class Airlock:
             except Exception as e:
                 log.exception("post-processing failed; returning the upstream result as-is")
                 detail["postprocess_error"] = _exc_text(e)
-            if d.verdict == "confirm" and status == 200 and not result.get("isError"):
-                reply["result"] = self._input_required(who.sub, tool, args, result, policy)  # preview failed: no gate, just the error
+            if d.verdict == "confirm" and status == 200 and not upstream_error:
+                reply["result"] = self._input_required(who.sub, tool, args, result, policy)
                 await self._notify(reply["result"], who.sub)
+            elif d.verdict == "confirm" and upstream_error:  # preview failed: no gate, just the error
+                detail["no_prompt"] = "the dry run failed"
         self._outcome(verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
                       upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
@@ -749,7 +752,7 @@ class Airlock:
         if findings:
             meta[META + "suspicious"] = findings[:guard.MAX_FINDINGS]  # marked, never removed; one cap for the whole list
 
-    def _cap_output(self, tool: str, result: dict[str, Any], policy: Policy) -> dict[str, Any] | None:
+    def _cap_output(self, tool: str, result: dict[str, Any], policy: Policy, dry_run: bool = False) -> dict[str, Any] | None:
         cap = policy.output_cap(tool)
         size = len(json.dumps(result, ensure_ascii=False, default=str))
         if size <= cap.max_chars:
@@ -759,7 +762,8 @@ class Airlock:
             # No longer matches the tool's outputSchema; SDK clients raise on that unless the result is an error.
             result["isError"] = True
         result.setdefault("_meta", {})[META + "output"] = info
-        note = f"\n\n[airlock: output truncated to {cap.max_chars} chars from {size}; the call itself ran]"
+        ran = "the dry run itself ran, nothing was executed" if dry_run else "the call itself ran"
+        note = f"\n\n[airlock: output truncated to {cap.max_chars} chars from {size}; {ran}]"
         content = result.get("content")
         texts = [b for b in (content if isinstance(content, list) else [])
                  if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]

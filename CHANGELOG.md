@@ -70,6 +70,12 @@
   inside an unquoted `run:` line), so GitHub flagged every push and a `v*` tag would not have
   released. The step is a block scalar now, and `tests/test_workflows.py` parses every workflow
   file.
+* An L2 call whose dry-run preview was longer than `output.max_chars` and carried
+  `structuredContent` came back as a truncated error result instead of a confirmation prompt: the
+  cap marked the preview `isError` to detach it from the tool's outputSchema, and the gate read
+  that flag as a failed dry run. The prompt is now issued from the trimmed preview (its `_meta`
+  carries the cap numbers), only the upstream's own `isError` skips it (the outcome record then
+  has `detail.no_prompt`), and the truncation note on a dry run says that nothing was executed.
 * The release workflow fails when the image tag in the `docker run` examples of `README.md` and
   `README.ru.md` is not the tag's major.minor (`scripts/check_image_tag.sh`).
 * Helm: a whole number from a values file (`env.AIRLOCK_MAX_REQUEST_BYTES: 104857600`, or in

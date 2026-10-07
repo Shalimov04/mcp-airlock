@@ -660,6 +660,92 @@ async def test_upstream_input_required_after_confirmation_is_refused_not_repromp
     assert "requestState" not in res and len(sent) == 1
 
 
+def capped_airlock(upstream, audit_path, tool: str, *, env: str = "prod", max_chars: int = 400, **kw) -> Airlock:
+    import yaml
+    data = yaml.safe_load((ROOT / "policy.example.yaml").read_text())
+    data["environment"] = env
+    data["tools"][tool]["output"] = {"max_chars": max_chars}
+    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
+    return Airlock(Policy.model_validate(data), "http://localhost:9001/mcp", AuditLog(audit_path), http=http,
+                   trust_principal_header=True, **kw)
+
+
+def answer_tool(al: Airlock, tool: str, dry: dict, real: dict) -> list[dict]:
+    """Answer tools/call to `tool` with `dry` for the dry run and `real` for the real call; return what was sent."""
+    sent: list[dict] = []
+    orig = al.http.post
+
+    async def post(url, *, content, headers):
+        body = json.loads(content)
+        if body["method"] == "tools/call" and body["params"]["name"] == tool:
+            sent.append(body)
+            reply = dry if body["params"]["arguments"].get("dry_run") else real
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": dict(reply)})
+        return await orig(url, content=content, headers=headers)
+
+    patch_post(al, post)
+    return sent
+
+
+def hook_client(posted: list[str]) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: (posted.append(json.loads(r.content)["text"]), httpx.Response(200))[1]))
+
+
+def long_preview(**extra) -> dict:
+    return {"content": [{"type": "text", "text": "would delete " + "x" * 2000}], **extra}
+
+
+@pytest.mark.parametrize("structured", [True, False])
+async def test_l2_preview_over_the_cap_still_prompts(upstream, audit_path, structured):
+    posted: list[str] = []
+    al = capped_airlock(upstream, audit_path, "delete_service", webhook="https://hooks.example/x",
+                        public_url="https://a.example", notify_http=hook_client(posted))
+    dry = long_preview(**({"structuredContent": {"result": "would delete"}} if structured else {}))
+    sent = answer_tool(al, "delete_service", dry, {"content": [{"type": "text", "text": "DELETED"}]})
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+        assert res["resultType"] == "input_required" and res["requestState"] and CONFIRM_KEY in res["inputRequests"]
+        assert "isError" not in res and res["_meta"][META + "output"]["truncated"] is True
+        preview = res["_meta"][META + "dry_run_preview"][0]["text"]
+        assert len(preview) <= 400 and preview.endswith("nothing was executed]")
+        assert len(posted) == 1 and "Dry-run preview: would delete" in posted[0]
+        assert [b["params"]["arguments"]["dry_run"] for b in sent] == [True]
+        path = next(w for w in posted[0].split() if w.startswith("https://a.example/approve/")).removeprefix("https://a.example")
+        assert (await c.post(path)).status_code == 200  # webhook mode: the human approves out of band
+        res = await call(c, "delete_service", {"name": "api"}, extra={"requestState": res["requestState"]})
+    assert not res.get("isError") and res["content"][0]["text"] == "DELETED"
+    assert [b["params"]["arguments"]["dry_run"] for b in sent] == [True, False]
+
+
+@pytest.mark.parametrize("over_cap", [True, False])
+@pytest.mark.parametrize("structured", [True, False])
+async def test_l2_preview_that_is_the_upstreams_own_error_is_returned_not_prompted(upstream, audit_path, structured, over_cap):
+    posted: list[str] = []
+    al = capped_airlock(upstream, audit_path, "delete_service", webhook="https://hooks.example/x",
+                        public_url="https://a.example", notify_http=hook_client(posted))
+    dry = long_preview(isError=True, **({"structuredContent": {"result": "no"}} if structured else {}))
+    if not over_cap:
+        dry["content"][0]["text"] = "no such service"
+    sent = answer_tool(al, "delete_service", dry, {"content": [{"type": "text", "text": "DELETED"}]})
+    async with proxy_client(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+    assert "inputRequests" not in res and "requestState" not in res and "resultType" not in res
+    assert res["isError"] is True and res["_meta"][META + "rule_id"] == "tier.L2.confirm"
+    assert posted == [] and [b["params"]["arguments"]["dry_run"] for b in sent] == [True]
+    assert audit_rows(audit_path)[-1]["detail"]["no_prompt"] == "the dry run failed"
+
+
+async def test_truncation_note_names_the_dry_run(upstream, audit_path):
+    al = capped_airlock(upstream, audit_path, "set_replicas", env="staging")  # L1: forwarded with dry_run True
+    answer_tool(al, "set_replicas", long_preview(), long_preview())
+    async with proxy_client(al) as c:
+        res = await call(c, "set_replicas", {"names": ["api"], "replicas": 1})
+    text = res["content"][-1]["text"]
+    assert "truncated" in text and "the dry run itself ran, nothing was executed" in text
+    assert "the call itself ran" not in text
+
+
 async def test_upstream_input_required_at_l1_passes_through_with_its_own_state(upstream, audit_path):
     al = make_airlock(upstream, audit_path, env="staging")  # set_replicas is L1 there: no airlock prompt to tangle with
     sent = upstream_asks_back(al, "set_replicas")
