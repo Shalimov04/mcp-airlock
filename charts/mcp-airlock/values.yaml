@@ -2,7 +2,7 @@
 # values.schema.json checks the types and ranges; helm lint, template and install apply it.
 image:
   repository: ghcr.io/shalimov04/mcp-airlock
-  # Empty: the chart's appVersion. The image includes the postgres and otlp extras.
+  # Empty: the chart's appVersion. The image includes the postgres, otlp and regex extras.
   tag: ""
   pullPolicy: IfNotPresent
 # More than 1 needs sharedStore=true and an existingSecret (see below).

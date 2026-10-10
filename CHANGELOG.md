@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 - 2026-10-10
 
 ### Breaking
 
@@ -112,8 +112,8 @@
   approved` or an empty `suspicious` list.
 * **Approvals.** The approver is recorded as `verified` only when the identity came from a bearer
   token the proxy checked. A JWT with an empty or blank `sub`, a blank `X-Airlock-Principal`, or a
-  name with surrounding whitespace, is refused with 401 `principal.missing`. A principal named `group:<g>` no longer gets
-  the tier override of group `<g>`.
+  name with surrounding whitespace, is refused with 401 `principal.missing`. A principal named
+  `group:<g>` no longer gets the tier override of group `<g>`.
 * The Slack message escapes `&`, `<` and `>` in the arguments and the preview, and cuts its text at
   3500 characters so the proxy's `Approve:` line is always delivered and always last. The approve
   page is sent with `Cache-Control: no-store`, `Referrer-Policy`, `X-Frame-Options`,
