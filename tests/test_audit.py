@@ -1126,39 +1126,48 @@ def test_verify_ok_output(tmp_path, capsys):
     assert verify_cli(capsys, path) == (0, f"OK: 5 records in 1 files, chain from {GENESIS} to {rows[-1]['hash']}", "")
 
 
-def edit_tool(ls):
+def _tamper_edit_tool(ls):
     ls[2] = ls[2].replace('"tool": "get_service"', '"tool": "get_servicf"')
 
 
-def forge_tool(ls):  # the forger fixes the line's own hash but not the next record's prev
+def _tamper_forge_tool(ls):  # the forger fixes the line's own hash but not the next record's prev
     row = json.loads(ls[2])
     row["tool"] = "other"
     row["hash"] = row_hash(row)
     ls[2] = json.dumps(row, ensure_ascii=False)
 
 
-def edit_tool_past_blank(ls):
-    edit_tool(ls)
+def _tamper_edit_tool_past_blank(ls):
+    _tamper_edit_tool(ls)
     ls.insert(2, "")  # the edited line is now line 4
 
 
-def swap_pair(ls):
+def _tamper_swap_pair(ls):
     ls[2], ls[3] = ls[3], ls[2]
 
 
-def duplicate_key(ls):  # the hash still matches: json.loads keeps the last value
+def _tamper_duplicate_key(ls):  # the hash still matches: json.loads keeps the last value
     ls[1] = ls[1].replace('"principal": "alice"', '"principal": "alice", "principal": "mallory"', 1)
 
 
+def _tamper_delete(ls):
+    del ls[2]
+
+
+def _tamper_truncate(ls):
+    ls[1] = ls[1][:40]
+
+
 @pytest.mark.parametrize("n, tamper, line, reason", [
-    (5, edit_tool, 3, "hash mismatch"),
-    (5, forge_tool, 4, "prev mismatch"),
-    (5, lambda ls: ls.pop(2), 3, "prev mismatch"),
-    (5, swap_pair, 3, "prev mismatch"),
-    (5, lambda ls: ls.__setitem__(1, ls[1][:40]), 2, "not JSON"),
-    (3, duplicate_key, 2, "not JSON"),
-    (5, edit_tool_past_blank, 4, "hash mismatch"),  # the physical line number, blank lines counted
-], ids=["edited", "edited-and-rehashed", "deleted", "reordered", "truncated", "duplicate-key", "past-a-blank-line"])
+    pytest.param(5, _tamper_edit_tool, 3, "hash mismatch", id="edited"),
+    pytest.param(5, _tamper_forge_tool, 4, "prev mismatch", id="edited-and-rehashed"),
+    pytest.param(5, _tamper_delete, 3, "prev mismatch", id="deleted"),
+    pytest.param(5, _tamper_swap_pair, 3, "prev mismatch", id="reordered"),
+    pytest.param(5, _tamper_truncate, 2, "not JSON", id="truncated"),
+    pytest.param(3, _tamper_duplicate_key, 2, "not JSON", id="duplicate-key"),
+    # the physical line number, blank lines counted
+    pytest.param(5, _tamper_edit_tool_past_blank, 4, "hash mismatch", id="past-a-blank-line"),
+])
 def test_verify_reports_the_tampered_line(tmp_path, capsys, n, tamper, line, reason):
     path = chained(tmp_path / "a.jsonl", n)
     orig = lines_of(path)
