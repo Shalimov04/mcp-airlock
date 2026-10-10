@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import threading
+import tomllib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -101,6 +102,22 @@ def test_both_images_probe_healthz_on_the_exposed_port(name):
     assert cmd[:3] == ["python", "-I", "-c"]
     assert f"http://127.0.0.1:{expose}/healthz" in cmd[3]
     assert healthcheck(name) == healthcheck("Dockerfile")
+
+
+@pytest.mark.parametrize("name", FILES)
+def test_pinned_uv_is_inside_the_uv_build_range(name):
+    # outside the range uv fetches an unlocked uv_build from PyPI on every image build
+    def ver(v):
+        return tuple(int(p) for p in v.split("."))
+
+    m = re.search(r"^COPY --from=ghcr\.io/astral-sh/uv:([\d.]+)@sha256:\w+ /uv /bin/$",
+                  (ROOT / name).read_text(), re.M)
+    assert m, f"no pinned uv COPY in {name}"
+    requires = tomllib.loads((ROOT / "pyproject.toml").read_text())["build-system"]["requires"]
+    spec = next(r for r in requires if r.startswith("uv_build"))
+    lo = re.search(r">=([\d.]+)", spec).group(1)
+    hi = re.search(r"<([\d.]+)", spec).group(1)
+    assert ver(lo) <= ver(m.group(1)) < ver(hi), f"{name}: uv {m.group(1)} vs {spec}"
 
 
 def test_probe_passes_on_200_and_only_asks_for_healthz():
