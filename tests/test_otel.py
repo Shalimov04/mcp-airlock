@@ -118,6 +118,20 @@ def test_traces_endpoint_alone_turns_otlp_on(monkeypatch, made, collector):
     assert [p for p, _, _ in got] == ["/custom/traces"]  # used as-is, no /v1/traces appended
 
 
+@pytest.mark.parametrize("name, value", [
+    ("TIMEOUT", "5"), ("TIMEOUT", "2.5"),
+    ("COMPRESSION", "none"), ("COMPRESSION", "gzip"), ("COMPRESSION", "deflate"), ("COMPRESSION", "GZip"),
+])
+@pytest.mark.parametrize("prefix", ["OTEL_EXPORTER_OTLP_", "OTEL_EXPORTER_OTLP_TRACES_"])
+def test_a_valid_timeout_or_compression_is_accepted(monkeypatch, made, collector, prefix, name, value):
+    pytest.importorskip(EXPORTER)
+    url, got = collector
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", url)
+    monkeypatch.setenv(prefix + name, value)
+    emit(made())  # no ValueError, and a request arrives (the body may be compressed)
+    assert got
+
+
 def test_a_missing_extra_does_not_stop_setup(monkeypatch, made):
     monkeypatch.setitem(sys.modules, EXPORTER, None)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
