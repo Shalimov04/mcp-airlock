@@ -71,6 +71,10 @@
   inside an unquoted `run:` line), so GitHub flagged every push and a `v*` tag would not have
   released. The step is a block scalar now, and `tests/test_workflows.py` parses every workflow
   file.
+* An OTLP timeout that is not a number or a compression other than `none`, `gzip` or `deflate`
+  (`OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION` or their `TRACES_` forms) stops
+  the start with one error line again. OpenTelemetry 1.45 logs such a value and exports with its
+  default instead of raising, so the proxy now checks both variables itself.
 * The nightly Postgres e2e stack failed on every run since the image got its `HEALTHCHECK`:
   compose 2.x on the GitHub runner refuses `up --wait` on a running container whose image check
   was turned off (`has no healthcheck configured`), which the e2e MCP service and webhook were.

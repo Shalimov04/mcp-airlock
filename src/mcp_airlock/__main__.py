@@ -37,6 +37,23 @@ def _otlp_exporter():  # the class, or None without the otlp extra
     return OTLPSpanExporter
 
 
+def _check_otlp_env() -> None:
+    # OpenTelemetry 1.44 raised on these; 1.45 logs a warning and exports with its default instead. Refuse them on
+    # both, so a typo in the timeout or compression stops the start rather than being quietly replaced.
+    for name in ("TIMEOUT", "COMPRESSION"):
+        var = next((v for v in (f"OTEL_EXPORTER_OTLP_TRACES_{name}", f"OTEL_EXPORTER_OTLP_{name}") if os.environ.get(v)), None)
+        if var is None:
+            continue
+        raw = os.environ[var]
+        if name == "TIMEOUT":
+            try:
+                float(raw)
+            except ValueError:
+                raise ValueError(f"{var} is not a number of seconds: {raw!r}") from None
+        elif raw.strip().lower() not in ("none", "gzip", "deflate"):
+            raise ValueError(f"{var} is not none, gzip or deflate: {raw!r}")
+
+
 def setup_otel(span_file: str | None) -> TracerProvider:
     # OTEL_SERVICE_NAME or service.name in OTEL_RESOURCE_ATTRIBUTES wins; "mcp-airlock" is only the default
     named = OTELResourceDetector().detect().attributes.get(SERVICE_NAME)
@@ -48,6 +65,7 @@ def setup_otel(span_file: str | None) -> TracerProvider:
             provider.add_span_processor(SimpleSpanProcessor(exporter))
         if otlp_requested() and (otlp := _otlp_exporter()) is not None:
             # endpoint, headers, timeout, TLS come from the standard OTEL_* variables
+            _check_otlp_env()
             provider.add_span_processor(BatchSpanProcessor(otlp()))
     except BaseException:
         if out:

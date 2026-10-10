@@ -36,6 +36,10 @@ def error_text(stderr: str) -> str:
     ("span file in a missing directory", {}, "spans.jsonl"),
     ("OTEL timeout", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_TIMEOUT": "abc"}, "OTEL: "),
     ("OTEL compression", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_COMPRESSION": "zstd"}, "zstd"),
+    ("OTEL traces timeout", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_EXPORTER_OTLP_TIMEOUT": "5",
+                             "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT": "5s"}, "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"),
+    ("OTEL traces compression", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1",
+                                 "OTEL_EXPORTER_OTLP_TRACES_COMPRESSION": "br"}, "br"),
     ("OTEL batch delay", {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:1", "OTEL_BSP_SCHEDULE_DELAY": "-5"}, "schedule_delay"),
 ])
 def test_bad_input_is_one_message_and_exit_1_not_a_traceback(tmp_path, case, env, expect):

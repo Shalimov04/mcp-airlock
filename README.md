@@ -296,7 +296,8 @@ The OpenTelemetry SDK reads the other standard variables too: the rest of
 
 A bad value (a limit that is not a positive integer, a DSN that does not parse, an unknown
 approval mode, a policy file that is missing, is not YAML or fails validation, an audit or span
-file that cannot be opened, an invalid pins file, an `OTEL_*` setting the SDK rejects) stops the
+file that cannot be opened, an invalid pins file, an `OTEL_*` setting the SDK rejects, an OTLP
+timeout that is not a number or a compression other than `none`, `gzip` or `deflate`) stops the
 start with a `mcp-airlock: <message>` line on stderr and exit status 1, with no traceback;
 `AIRLOCK_DEBUG=1` prints the traceback instead. A flag with a bad value (`--port 99999`) is
 refused by the argument parser with exit status 2.
