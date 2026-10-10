@@ -8,7 +8,9 @@ trap 'dc down -v --remove-orphans >/dev/null 2>&1' EXIT
 start=$(date +%s)
 docker build -q -t mcp-airlock-e2e:local ../.. >/dev/null || { echo "image build failed"; exit 1; }
 dc down -v --remove-orphans >/dev/null 2>&1
-dc up -d --wait data-db airlock-db service webhook airlock-a airlock-b airlock-oob airlock-pins airlock-reload >/dev/null 2>&1 || { dc logs --tail 50; exit 1; }
+# keep the output of a failed `up`: the reason (which container, why) is only printed there
+up=$(dc up -d --wait data-db airlock-db service webhook airlock-a airlock-b airlock-oob airlock-pins airlock-reload 2>&1) ||
+  { echo "$up" | tail -20; dc ps -a; dc logs --tail 50; exit 1; }
 dc run --rm --no-deps runner
 rc=$?
 # scenario 23 feeds airlock-reload a file that is not YAML on purpose: that one reload failure is not a failure of the run

@@ -40,7 +40,9 @@ services:
 
   service:
     image: mcp-airlock-e2e:local
-    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
+    # same image, not the proxy: probe the service's own port. Not {disable: true}: compose 2.x
+    # `up --wait` fails on a running container without a healthcheck when the image has one.
+    healthcheck: {test: ["CMD", "python", "-I", "-c", "import socket; socket.create_connection(('127.0.0.1', 8000), 2)"], interval: 1s, retries: 60}
     entrypoint: ["python", "/e2e/service.py"]
     environment: {DATA_DSN: "postgresql://app:app@data-db:5432/app"}
     volumes: ["./:/e2e:ro"]
@@ -51,7 +53,7 @@ services:
 
   webhook:
     image: mcp-airlock-e2e:local
-    healthcheck: {disable: true}  # same image, not the proxy: nothing listens on :9000
+    healthcheck: {test: ["CMD", "python", "-I", "-c", "import socket; socket.create_connection(('127.0.0.1', 8080), 2)"], interval: 1s, retries: 60}
     entrypoint: ["python", "/e2e/webhook.py"]
     volumes: ["./:/e2e:ro"]
     networks: [e2e]
