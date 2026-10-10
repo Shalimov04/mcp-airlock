@@ -1,12 +1,4 @@
-{{- if not (or (kindIs "float64" .Values.replicaCount) (kindIs "int64" .Values.replicaCount) (kindIs "int" .Values.replicaCount)) }}
-{{- fail "replicaCount must be a whole number" }}
-{{- end }}
-{{- if ne (float64 (int .Values.replicaCount)) (float64 .Values.replicaCount) }}
-{{- fail "replicaCount must be a whole number" }}
-{{- end }}
-{{- if lt (int .Values.replicaCount) 1 }}
-{{- fail "replicaCount must be at least 1" }}
-{{- end }}
+{{- /* types and ranges are in values.schema.json; these are the checks across values */}}
 {{- if and (gt (int .Values.replicaCount) 1) (not .Values.sharedStore) }}
 {{- fail "replicaCount > 1 needs sharedStore=true and an existingSecret with AIRLOCK_STORE_DSN and AIRLOCK_SECRET: without a shared store each pod burns its own confirmation keys" }}
 {{- end }}
@@ -36,9 +28,6 @@
        are the one exception: an extraEnv entry of the same name replaces them (see below). */}}
 {{- $own := list }}
 {{- range .Values.extraEnv }}
-{{- if not .name }}
-{{- fail "every extraEnv entry needs a name" }}
-{{- end }}
 {{- if has .name $own }}
 {{- fail (printf "%s is listed twice in extraEnv" .name) }}
 {{- end }}
@@ -52,29 +41,9 @@
 {{- if and (has .name $credentials) (hasKey . "value") }}
 {{- fail (printf "%s holds a credential: put it in existingSecret, or give extraEnv a valueFrom, not a value" .name) }}
 {{- end }}
-{{- /* extraEnv is rendered as given, so an unquoted number would reach the API as a number */}}
-{{- if and (hasKey . "value") (not (kindIs "string" .value)) }}
-{{- fail (printf "extraEnv value for %s must be a string: quote it" .name) }}
-{{- end }}
 {{- end }}
 {{- $preStop := .Values.preStopSeconds }}
-{{- if not (or (kindIs "int64" $preStop) (kindIs "int" $preStop) (kindIs "float64" $preStop)) }}
-{{- fail (printf "preStopSeconds must be a whole number of seconds, got %v" $preStop) }}
-{{- end }}
-{{- if ne (float64 $preStop) (floor (float64 $preStop)) }}
-{{- fail (printf "preStopSeconds must be a whole number of seconds, got %v" $preStop) }}
-{{- end }}
-{{- if lt (int $preStop) 0 }}
-{{- fail "preStopSeconds must be 0 or more" }}
-{{- end }}
-{{- $grace := .Values.terminationGracePeriodSeconds }}
-{{- if not (or (kindIs "int64" $grace) (kindIs "int" $grace) (kindIs "float64" $grace)) }}
-{{- fail (printf "terminationGracePeriodSeconds must be a number of seconds, got %v" $grace) }}
-{{- end }}
-{{- if ne (float64 $grace) (floor (float64 $grace)) }}
-{{- fail (printf "terminationGracePeriodSeconds must be a whole number of seconds, got %v" $grace) }}
-{{- end }}
-{{- if le (int $grace) (int $preStop) }}
+{{- if le (int .Values.terminationGracePeriodSeconds) (int $preStop) }}
 {{- fail "terminationGracePeriodSeconds must exceed preStopSeconds, or the shutdown and the OTLP flush get no time" }}
 {{- end }}
 {{- /* an older API server drops the sleep field and rejects a preStop with no handler; under

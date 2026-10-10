@@ -74,9 +74,10 @@ def test_set_values_still_render(tmp_path):
     assert e["AIRLOCK_TRUST_PRINCIPAL_HEADER"]["value"] == "1"
 
 
-def test_a_map_in_env_is_refused_and_points_at_extra_env(tmp_path):
+def test_a_map_in_env_is_refused(tmp_path):
+    # an entry with valueFrom goes in extraEnv; env values are scalars
     msg = refusal(tmp_path, "env:\n  X: {valueFrom: {secretKeyRef: {name: a, key: b}}}\n")
-    assert "extraEnv" in msg
+    assert "at '/env/X': got object" in msg
 
 
 def test_otlp_headers_are_a_credential(tmp_path):
@@ -116,7 +117,7 @@ def test_an_extra_env_name_that_is_also_set_elsewhere_is_refused(tmp_path):
     assert "AIRLOCK_SECRET comes from existingSecret when sharedStore=true" in msg
     msg = refusal(tmp_path, 'extraEnv: [{name: A, value: "1"}, {name: A, value: "2"}]\n')
     assert "A is listed twice in extraEnv" in msg
-    assert "needs a name" in refusal(tmp_path, 'extraEnv: [{value: "1"}]\n')
+    assert "missing property 'name'" in refusal(tmp_path, 'extraEnv: [{value: "1"}]\n')
     # without sharedStore the key is not rendered by the chart, so an own source is fine
     e = env(render(tmp_path, "extraEnv:\n  - name: AIRLOCK_SECRET\n"
                              "    valueFrom: {secretKeyRef: {name: a, key: b}}\n"))
@@ -126,7 +127,8 @@ def test_an_extra_env_name_that_is_also_set_elsewhere_is_refused(tmp_path):
 def test_an_extra_env_value_must_be_a_string(tmp_path):
     # extraEnv is rendered as given, so an unquoted number reaches the API as a number, which
     # it rejects; env goes through the scalar helper and may stay unquoted
-    assert "extraEnv value for NUM must be a string" in refusal(tmp_path, "extraEnv: [{name: NUM, value: 5}]\n")
+    msg = refusal(tmp_path, "extraEnv: [{name: NUM, value: 5}]\n")
+    assert "at '/extraEnv/0/value': got number, want string" in msg
     assert env(render(tmp_path, 'extraEnv: [{name: NUM, value: "5"}]\n'))["NUM"]["value"] == "5"
 
 
@@ -140,7 +142,8 @@ def test_pre_stop_sleep_and_grace_period(tmp_path):
     assert "terminationGracePeriodSeconds must exceed preStopSeconds" in refusal(
         tmp_path, "preStopSeconds: 10\nterminationGracePeriodSeconds: 10\n")
     # a negative sleep passed the grace-period check and was left for the API server to reject
-    assert "preStopSeconds must be 0 or more" in refusal(tmp_path, "preStopSeconds: -1\n")
+    assert "at '/preStopSeconds': minimum: got -1, want 0" in refusal(tmp_path, "preStopSeconds: -1\n")
+    assert "at '/replicaCount': minimum: got 0, want 1" in refusal(tmp_path, "", "replicaCount=0")
 
 
 def test_pre_stop_sleep_is_refused_on_a_cluster_older_than_1_30(tmp_path):
@@ -151,24 +154,18 @@ def test_pre_stop_sleep_is_refused_on_a_cluster_older_than_1_30(tmp_path):
     assert "lifecycle" in container(render(tmp_path, "", "--kube-version=1.30.0"))
 
 
-def test_prestop_must_be_whole_number(tmp_path):
-    assert "whole number" in refusal(tmp_path, "", "preStopSeconds=2.5")
-    assert "whole number" in refusal(tmp_path, "", "preStopSeconds=five")
-    assert "whole number" in refusal(tmp_path, "preStopSeconds: 2.5\n")
-    docs = render(tmp_path, "preStopSeconds: 2.0\n")
-    assert container(docs)["lifecycle"] == {"preStop": {"sleep": {"seconds": 2}}}
-
-
-def test_null_grace_period_has_its_own_message(tmp_path):
-    msg = refusal(tmp_path, "terminationGracePeriodSeconds: null\n")
-    assert "terminationGracePeriodSeconds must be a number" in msg
-
-
-def test_grace_period_must_be_whole_number(tmp_path):
-    # it used to be cut to 30 without a word
+def test_seconds_and_replicas_must_be_whole_numbers(tmp_path):
+    # values.schema.json; a whole float from a values file is an integer there and renders as one
+    assert "at '/preStopSeconds': got number, want integer" in refusal(tmp_path, "preStopSeconds: 2.5\n")
+    assert "at '/preStopSeconds': got string, want integer" in refusal(tmp_path, "", "preStopSeconds=five")
+    assert "at '/replicaCount': got string, want integer" in refusal(tmp_path, "", "replicaCount=1.5")
     msg = refusal(tmp_path, "terminationGracePeriodSeconds: 30.5\n")
-    assert "terminationGracePeriodSeconds must be a whole number" in msg
-    assert pod(render(tmp_path, "terminationGracePeriodSeconds: 40.0\n"))["terminationGracePeriodSeconds"] == 40
+    assert "at '/terminationGracePeriodSeconds': got number, want integer" in msg
+    msg = refusal(tmp_path, "terminationGracePeriodSeconds: null\n")
+    assert "missing property 'terminationGracePeriodSeconds'" in msg
+    docs = render(tmp_path, "preStopSeconds: 2.0\nterminationGracePeriodSeconds: 40.0\n")
+    assert container(docs)["lifecycle"] == {"preStop": {"sleep": {"seconds": 2}}}
+    assert pod(docs)["terminationGracePeriodSeconds"] == 40
 
 
 def test_no_prestop_comment_when_disabled(tmp_path):

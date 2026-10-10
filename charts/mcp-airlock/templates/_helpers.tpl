@@ -30,9 +30,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
        quote prints as 1.048576e+08; --set gives int64 and is fine. Whole floats go through
        int64 so the proxy gets "104857600". */ -}}
 {{- define "mcp-airlock.scalar" -}}
-{{- if or (kindIs "map" .) (kindIs "slice" .) }}
-{{- fail (printf "env values and extraArgs must be scalars, got %v; an entry with valueFrom goes in extraEnv" .) }}
-{{- else if and (kindIs "float64" .) (eq (float64 (int64 .)) .) }}
+{{- if and (kindIs "float64" .) (eq (float64 (int64 .)) .) }}
 {{- int64 . | quote }}
 {{- else }}
 {{- . | quote }}

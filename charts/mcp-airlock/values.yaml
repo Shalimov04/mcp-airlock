@@ -1,4 +1,5 @@
 # Values for the mcp-airlock chart. The README section "In Kubernetes" explains the choices.
+# values.schema.json checks the types and ranges; helm lint, template and install apply it.
 image:
   repository: ghcr.io/shalimov04/mcp-airlock
   # Empty: the chart's appVersion. The image includes the postgres and otlp extras.
