@@ -7,6 +7,11 @@
 * The Docker images are built with a pinned uv 0.12.24, so the build no longer downloads an
   unlocked `uv_build` from PyPI.
 
+### Fixed
+
+* The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII
+  and about 0.3 s for 4-byte characters (RE2 costs per byte); the cap itself is unchanged.
+
 ## 0.4.0 - 2026-10-10
 
 ### Breaking
