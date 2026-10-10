@@ -59,12 +59,14 @@
   refused in `env`; new `extraEnv` (with `valueFrom`) and `envFrom` values take entries from a
   Secret or ConfigMap of your own. An `extraEnv` name that is also in `env`, or that is
   `AIRLOCK_STORE_DSN` or `AIRLOCK_SECRET` with `sharedStore`, is refused at render time instead
-  of being set twice in the container, which server-side apply rejects; a non-string `value` in
-  `extraEnv` is refused too.
+  of being set twice in the container, which server-side apply rejects.
 * Helm: the pod sleeps `preStopSeconds` (5) before shutting down, so a rolling update, including
   every policy change, no longer refuses connections; `terminationGracePeriodSeconds` (30) is set
-  for the sleep, the open calls and the OTLP flush. A negative or fractional value, or the sleep
-  on a cluster older than 1.30 (set `preStopSeconds=0` there), is refused with a chart message.
+  for the sleep, the open calls and the OTLP flush. The sleep on a cluster older than 1.30 (set
+  `preStopSeconds=0` there) is refused with a chart message. A new `values.schema.json` refuses a
+  fraction, a negative number or a non-number in these and `replicaCount`, a map, list or `null`
+  in `env` and `extraArgs` (a `null` rendered as an empty value before), and a non-string
+  `extraEnv` value.
 
 ### Fixed
 
