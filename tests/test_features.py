@@ -605,6 +605,50 @@ async def test_intent_audit_failure_fails_closed(upstream, audit_path):
     assert upstream.CALLS == []  # nothing forwarded without an intent record
 
 
+@pytest.mark.skipif(not os.environ.get("AIRLOCK_TEST_PG_DSN"), reason="AIRLOCK_TEST_PG_DSN not set")
+async def test_intent_audit_failure_fails_closed_with_a_postgres_audit_sink(upstream, audit_path, monkeypatch):
+    import errno
+
+    import psycopg
+
+    from mcp_airlock.audit import audit_from_env
+    dsn = os.environ["AIRLOCK_TEST_PG_DSN"]
+    monkeypatch.setenv("AIRLOCK_AUDIT_DSN", dsn)
+    al = make_airlock(upstream, audit_path)
+    al.audit.close()
+    al.audit = audit_from_env(audit_path)
+    file_sink, pg = al.audit.sinks
+    call_ids = []
+
+    class Full:  # the file sink's handle on a full disk
+        def __init__(self, f):
+            self.f = f
+
+        def fileno(self):
+            return self.f.fileno()
+
+        def write(self, data):
+            call_ids.append(json.loads(data)["call_id"])
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        def close(self):
+            self.f.close()
+
+    file_sink._f = Full(file_sink._f)
+    async with proxy_client(al) as c:
+        r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}})
+    assert pg.flush(10)
+    al.audit.close()
+    assert r.status_code == 500 and r.json()["error"]["code"] == -32603
+    assert upstream.CALLS == []  # nothing forwarded without an intent record in the file
+    with psycopg.connect(dsn) as conn:  # the table keeps the intent and the internal error that followed it
+        q = "SELECT rec FROM airlock_audit WHERE call_id = %s ORDER BY ts"
+        recs = [x for (x,) in conn.execute(q, (call_ids[0],))]
+        conn.execute("DELETE FROM airlock_audit WHERE call_id = %s", (call_ids[0],))  # the database is shared
+    assert [(x["phase"], x["verdict"], x["rule_id"]) for x in recs] == [
+        ("intent", "allow", "tier.L0.read"), ("outcome", "error", "internal.error")]
+
+
 def test_redact_nested_containers_and_scrub():
     from mcp_airlock.audit import redact, scrub
     assert redact({"credentials": {"user": "x", "pass": "y"}, "tokens": ["a", "b"], "n": 1}) == {"credentials": "[REDACTED]", "tokens": "[REDACTED]", "n": 1}

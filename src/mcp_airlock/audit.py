@@ -531,21 +531,28 @@ class PostgresAuditLog:
 
 
 class MultiAudit:
-    """Fan out to every sink; a failing sink is logged and never blocks the others."""
+    """Fan out to every sink; a failing sink never blocks the others. A file sink's error is raised once every
+    sink has the row, so the intent write still fails closed and the table keeps the record and its outcome."""
 
     def __init__(self, *sinks: Any):
         self.sinks = sinks
 
     def write(self, **rec: Any) -> None:
         row = _row(rec)  # built once: the sinks store the same ts, prev and hash
+        failed: Exception | None = None
         for s in self.sinks:
             try:
                 if hasattr(s, "write_row"):
                     s.write_row(row)
                 else:
                     s.write(**rec)
-            except Exception:
-                log.exception("audit sink %s failed", type(s).__name__)
+            except Exception as e:
+                if isinstance(s, AuditLog):
+                    failed = failed or e
+                else:
+                    log.exception("audit sink %s failed", type(s).__name__)
+        if failed is not None:
+            raise failed
 
     def close(self) -> None:
         for s in self.sinks:
