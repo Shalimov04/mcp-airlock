@@ -10,6 +10,7 @@ import httpx
 from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META
 from mcp_airlock.audit import AuditLog
+from mcp_airlock.identity import IdentityConfig
 
 from .conftest import audit_rows, call
 from .test_features import PRINCIPAL_POLICY, accept, proxy_client, real_deletes, webhook_airlock
@@ -74,7 +75,7 @@ async def test_a_retry_whose_tier_dropped_below_l2_runs_without_the_proxy_token(
     p = tmp_path / "p.yaml"
     p.write_text(PRINCIPAL_POLICY)  # set_replicas is L2, L3 for the oncall group; no webhook, so inband
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
-    al = Airlock(Policy.load(p), "http://localhost:9001/mcp", AuditLog(audit_path), http=http, trust_principal_header=True)
+    al = Airlock(Policy.load(p), "http://localhost:9001/mcp", AuditLog(audit_path), http=http, identity=IdentityConfig(trust_header=True))
     args = {"names": ["api"], "replicas": 1}
     async with proxy_client(al) as c:
         first = await call(c, "set_replicas", args, principal="carol")
