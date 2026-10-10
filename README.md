@@ -168,9 +168,9 @@ without a description (`no_description`), a `count_arg` that relies on the globa
 and an environment no tool covers (`env_unused`); `--env` adds environments that must be covered.
 A policy without `environment` lints with the first `--env` (or `AIRLOCK_ENV`) as its environment,
 the way the proxy would run it; without either it is an error. `diff` and `pin` take `--env`, then
-`AIRLOCK_ENV`, then the policy's own `environment`. A policy that cannot be read or does not validate is `ERROR invalid`
-in all three commands, and an upstream that does not answer `tools/list` like an MCP server is
-`ERROR upstream`. `diff` asks the server itself (not the proxy, which hides unlisted tools) for
+`AIRLOCK_ENV`, then the policy's own `environment`. A policy that cannot be read or does not
+validate is `ERROR invalid` in all three commands, and an upstream that does not answer
+`tools/list` like an MCP server is `ERROR upstream`. `diff` asks the server itself (not the proxy, which hides unlisted tools) for
 `tools/list` and tells you which allowlisted tools the server no longer has (`missing_upstream`, an
 error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`), which `where` rules name an
 argument that is not in the schema (`where_unknown_arg`) and which server tools the policy does not
@@ -397,8 +397,8 @@ time linear in the value length, so no pattern backtracks. It is still not free 
 characters; a longer value fails the rule.
 
 A pattern RE2 cannot express does not load, and `lint` reports it: lookahead and lookbehind,
-backreferences, possessive and atomic groups, the Python spellings `\Z` (write `\z`) and `\uXXXX`
-(write `\x{41}`), and a counted repeat above 1000. `a{,3}` loads but is the literal text; write
+backreferences, possessive and atomic groups, the Python spellings `\Z` (write `\z`), `\uXXXX`
+(write `\x{41}`), `\N{...}`, `(?x)`, `(?#...)`, `(?a)` and `(?u)`, and a counted repeat above 1000. `a{,3}` loads but is the literal text; write
 `a{0,3}`. `\w`, `\d`, `\s` and `\b` are ASCII-only, so `\w+` does not match `привет` (use `\pL`),
 and `\W`, `\D`, `\S` and `\B` match the non-ASCII characters Python's `re` would not: `\W+` matches
 `привет`. A value with a lone surrogate fails the rule.
@@ -655,10 +655,10 @@ carries the `prev` and `hash` the file gave it) and its rows land a moment later
 row can reach the table after the upstream call has run. The connection gets a `statement_timeout`
 and a `lock_timeout` of the connect timeout. A record that fails or finds the queue full is
 dropped from the table with a warning; the file still holds it, so the table's chain can have gaps
-and the file is the one to verify. A server that stops answering altogether leaves the worker
+or hold a row the file failed to write, and the file is the one to verify. A server that stops answering altogether leaves the worker
 waiting; the queue fills and new records are dropped, with nothing logged until it holds 1000. At
-shutdown the queue is drained for up to the connect timeout, then the socket is cut and what is
-left is dropped, with the count in the log; that is about the timeout plus 2 s, off the event
+shutdown the queue is drained for up to the connect timeout, then the socket is cut, the worker gets 2 s
+more to stop, and what is left is dropped, with the count in the log; that is about the timeout plus 2 s, off the event
 loop, capped at 15 s. A crash loses the queue too. Where the file is an emptyDir, as in the
 chart's multi-replica setup, those records live only as long as the pod.
 
@@ -778,7 +778,8 @@ read in at most 10 pages. Legacy HTTP+SSE, Roots, Sampling and Logging are not s
 The request body must be strict JSON: `NaN`, `Infinity` and a number that does not fit a double
 (`1e400`) are refused with a parse error (`-32700`), since they are not JSON and the Postgres sink
 would drop the record. A body nested deeper than 64 levels is refused with `-32600`. Both are
-audited as `protocol.<code>` denials.
+audited as `protocol.<code>` denials. The upstream's answer is read with the same strictness; a
+violation is `upstream.bad_reply`.
 
 There is no rate limit on prompting. An agent that keeps re-sending an `L2` call gets a new
 prompt, and a new webhook message, each time.

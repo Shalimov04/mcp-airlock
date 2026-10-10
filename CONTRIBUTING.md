@@ -43,7 +43,8 @@ and `examples/spans.jsonl`; do not commit those unless the change is the point.
 ## Style
 
 * Keep comments short and about why, not what.
-* Plain ASCII punctuation in code and docs: no em-dashes, no arrows, no smart quotes.
+* Plain ASCII punctuation in code and English docs: no em-dashes, no arrows, no smart quotes.
+  `README.ru.md` is Russian prose and uses — and «».
 * Docs: lines wrapped at about 100 columns (tables and commands may run longer), short sentences,
   no marketing tone. Say what the proxy does and what it does not.
 * Commit messages: an imperative subject line, then a wrapped body that says what changed and why.

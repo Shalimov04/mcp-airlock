@@ -23,9 +23,6 @@
   A pins file in the old `sha256:` format is refused: `mcp-airlock` stops at startup,
   `airlock-policy diff --pins` reports it, and a `SIGHUP` reload keeps the current pins. Run
   `airlock-policy pin` again. Icons and `_meta` are deliberately not covered.
-* A confirmation token from before 0.3.0 (no approval mode in it) counts as `oob`: an inband
-  replica no longer accepts it in-band, so it stays pending until approved by link or it expires
-  (10 minutes).
 * The Python `Airlock` class no longer takes the legacy `trust_principal_header` and `jwt_secret`
   arguments; pass an `IdentityConfig`.
 
@@ -39,15 +36,17 @@
   hardened security context, probes on `/healthz` and `/readyz`. It refuses several replicas without
   a shared store, uses `Recreate` with a persistent `dataVolume` so two pods never share one audit
   chain, sleeps `preStopSeconds` (5) before shutdown so a rolling update refuses no connections, and
-  takes extra credentials through `extraEnv` and `envFrom`. A `values.schema.json` rejects wrong
-  types (a fraction or a `null` in `env`, for example).
+  refuses credentials such as `OTEL_EXPORTER_OTLP_HEADERS` in `env` (they go in `existingSecret`,
+  `extraEnv` or `envFrom`). A `values.schema.json` rejects wrong types (a fraction or a `null` in
+  `env`, for example).
 * The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4; the `postgres`
   extra now includes psycopg-pool). Store and audit connections get a 10 second connect timeout
   (`AIRLOCK_STORE_CONNECT_TIMEOUT`), `tcp_user_timeout` and TCP keepalives, and server-side
   `statement_timeout` and `lock_timeout`, so a black-holed database no longer stalls gated calls for
   minutes or leaves backends behind. A store that does not answer denies the gated call with rule
   `store.unavailable` (it was an HTTP 500 with no intent record). The tables are created again if
-  the database is recreated empty, and `/readyz` is 503 until they exist.
+  the database is recreated empty (confirmation keys already used are forgotten then), and `/readyz`
+  is 503 until they exist.
 * `HEALTHCHECK` in the container images (python asks `/healthz`, ignoring `HTTP_PROXY`).
 * `docs/clients.md` lists which MCP clients handle the `input_required` confirmation (#22); the
   Python SDK client 2.2.0 and 2.3.0 are tested.
@@ -83,6 +82,9 @@
   first. At shutdown the queue is drained for about the connect timeout, then the rest is dropped
   and counted in the log. The table is created under the store's advisory lock, so replicas
   starting together lose no records.
+* A confirmation token from before 0.3.0 (no approval mode in it) counts as `oob`: an inband
+  replica no longer accepts it in-band, so it stays pending until approved by link or it expires
+  (10 minutes).
 
 ### Fixed
 
@@ -109,8 +111,8 @@
   `tools/list`) are removed before the proxy adds its own, so an upstream cannot fake `status:
   approved` or an empty `suspicious` list.
 * **Approvals.** The approver is recorded as `verified` only when the identity came from a bearer
-  token the proxy checked. A JWT with an empty or blank `sub`, or a name with surrounding
-  whitespace, is refused with 401 `principal.missing`. A principal named `group:<g>` no longer gets
+  token the proxy checked. A JWT with an empty or blank `sub`, a blank `X-Airlock-Principal`, or a
+  name with surrounding whitespace, is refused with 401 `principal.missing`. A principal named `group:<g>` no longer gets
   the tier override of group `<g>`.
 * The Slack message escapes `&`, `<` and `>` in the arguments and the preview, and cuts its text at
   3500 characters so the proxy's `Approve:` line is always delivered and always last. The approve
