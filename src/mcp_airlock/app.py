@@ -41,6 +41,7 @@ from . import approvals, guard
 from . import pins as tool_pins
 from .audit import audit_from_env, redact, scrub, wellformed
 from .identity import IdentityConfig, Principal, resolve
+from .pg import positive_int_env
 from .policy import Engine, Policy
 from .store import store_from_env
 
@@ -1056,24 +1057,11 @@ def _depth(value: Any) -> int:
     return deepest
 
 
-def _env_limit(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if not raw:
-        return default
-    try:
-        n = int(raw)
-    except ValueError:
-        n = 0
-    if n <= 0:
-        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
-    return n
-
-
 def build(policy_path: str, upstream: str, audit_path: str, environment: str | None = None, pins_path: str | None = None,
           audit_max_bytes: int | None = None, audit_keep: int = 5, **kw: Any) -> Airlock:
     policy = Policy.load(policy_path, environment or os.environ.get("AIRLOCK_ENV"))
-    max_request = _env_limit("AIRLOCK_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES)  # before the audit file and store open
-    max_upstream = _env_limit("AIRLOCK_MAX_UPSTREAM_BYTES", DEFAULT_MAX_UPSTREAM_BYTES)
+    max_request = positive_int_env("AIRLOCK_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES)  # before the audit file and store open
+    max_upstream = positive_int_env("AIRLOCK_MAX_UPSTREAM_BYTES", DEFAULT_MAX_UPSTREAM_BYTES)
     secret = os.environ.get("AIRLOCK_SECRET")
     upstream_headers = {}
     if auth := os.environ.get("AIRLOCK_UPSTREAM_AUTH"):
