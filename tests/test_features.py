@@ -642,7 +642,7 @@ async def test_intent_audit_failure_fails_closed_with_a_postgres_audit_sink(upst
     assert r.status_code == 500 and r.json()["error"]["code"] == -32603
     assert upstream.CALLS == []  # nothing forwarded without an intent record in the file
     with psycopg.connect(dsn) as conn:  # the table keeps the intent and the internal error that followed it
-        q = "SELECT rec FROM airlock_audit WHERE call_id = %s ORDER BY ts"
+        q = "SELECT rec FROM airlock_audit WHERE call_id = %s ORDER BY ts, ctid"
         recs = [x for (x,) in conn.execute(q, (call_ids[0],))]
         conn.execute("DELETE FROM airlock_audit WHERE call_id = %s", (call_ids[0],))  # the database is shared
     assert [(x["phase"], x["verdict"], x["rule_id"]) for x in recs] == [
