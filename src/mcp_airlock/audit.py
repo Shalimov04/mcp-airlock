@@ -111,9 +111,6 @@ def wellformed(value: Any) -> Any:
     return value
 
 
-_wellformed = wellformed  # the old private name
-
-
 def _row(rec: dict[str, Any]) -> dict[str, Any]:
     row = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
     row.update({k: rec.get(k) for k in FIELDS})
@@ -195,8 +192,6 @@ def _ends_with_newline(path: Path) -> bool:
 
 
 class AuditLog:
-    FIELDS = FIELDS
-
     def __init__(self, path: str | Path, max_bytes: int | None = None, keep: int = 5):
         if keep < 1 or (max_bytes or 0) < 0:
             raise ValueError("audit keep must be at least 1 and max_bytes must not be negative")

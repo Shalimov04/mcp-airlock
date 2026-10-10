@@ -13,6 +13,7 @@ from opentelemetry.trace import StatusCode
 from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META
 from mcp_airlock.audit import AuditLog
+from mcp_airlock.identity import IdentityConfig
 
 from .conftest import ENVELOPE, ROOT, SPANS, V, audit_rows, call, make_airlock, patch_post, rpc
 
@@ -23,7 +24,7 @@ REPLACEMENT = "\ufffd"  # what the audit and the webhook text carry in its place
 def mock_airlock(audit_path, handler, env="prod", **kw) -> Airlock:
     """An airlock whose upstream is `handler(request) -> httpx.Response`."""
     return Airlock(Policy.load(ROOT / "policy.example.yaml", env), "http://upstream/mcp", AuditLog(audit_path),
-                   http=httpx.AsyncClient(transport=httpx.MockTransport(handler)), trust_principal_header=True, **kw)
+                   http=httpx.AsyncClient(transport=httpx.MockTransport(handler)), identity=IdentityConfig(trust_header=True), **kw)
 
 
 @asynccontextmanager
@@ -544,7 +545,7 @@ async def test_a_missing_principal_span_names_the_rule(upstream, audit_path):
 
 # ---------------------------------------------------------------- anonymous requests carry no arguments into the audit
 async def test_an_anonymous_request_is_audited_without_its_arguments(upstream, audit_path):
-    al = make_airlock(upstream, audit_path, trust_principal_header=False, jwt_secret="s" * 32)
+    al = make_airlock(upstream, audit_path, identity=IdentityConfig(jwt_secret="s" * 32))
     payload = "p" * 200_000
     async with serving(al) as c:
         r = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api", "pad": payload}}, principal=None)
@@ -556,7 +557,7 @@ async def test_an_anonymous_request_is_audited_without_its_arguments(upstream, a
 
 @pytest.mark.parametrize("field", ["tool", "method"])
 async def test_an_anonymous_request_cannot_write_a_long_name_into_the_audit(upstream, audit_path, field):
-    al = make_airlock(upstream, audit_path, trust_principal_header=False, jwt_secret="s" * 32)
+    al = make_airlock(upstream, audit_path, identity=IdentityConfig(jwt_secret="s" * 32))
     payload = "p" * 900_000
     if field == "tool":
         body = envelope(1, "tools/call", {"name": payload, "arguments": {}})
@@ -574,7 +575,7 @@ async def test_an_anonymous_request_cannot_write_a_long_name_into_the_audit(upst
 
 
 async def test_a_long_tool_name_without_a_principal_is_clipped_on_the_401_path(upstream, audit_path):
-    al = make_airlock(upstream, audit_path, trust_principal_header=False, jwt_secret="s" * 32)
+    al = make_airlock(upstream, audit_path, identity=IdentityConfig(jwt_secret="s" * 32))
     payload = "p" * 900_000
     body = envelope(1, "tools/call", {"name": payload, "arguments": {}})
     async with serving(al) as c:

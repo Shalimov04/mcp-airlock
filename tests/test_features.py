@@ -138,7 +138,7 @@ async def test_a_principal_named_like_a_group_does_not_get_the_group_tier(upstre
     p = tmp_path / "p.yaml"
     p.write_text(PRINCIPAL_POLICY)  # "group:oncall" skips confirmation in prod
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
-    al = Airlock(Policy.load(p), "http://localhost:9001/mcp", AuditLog(audit_path), http=http, trust_principal_header=True)
+    al = Airlock(Policy.load(p), "http://localhost:9001/mcp", AuditLog(audit_path), http=http, identity=IdentityConfig(trust_header=True))
     args = {"names": ["api"], "replicas": 1}
     async with proxy_client(al) as c:
         res = await call(c, "set_replicas", args, principal="group:oncall")
@@ -711,7 +711,7 @@ def capped_airlock(upstream, audit_path, tool: str, *, env: str = "prod", max_ch
     data["tools"][tool]["output"] = {"max_chars": max_chars}
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
     return Airlock(Policy.model_validate(data), "http://localhost:9001/mcp", AuditLog(audit_path), http=http,
-                   trust_principal_header=True, **kw)
+                   identity=IdentityConfig(trust_header=True), **kw)
 
 
 def answer_tool(al: Airlock, tool: str, dry: dict, real: dict) -> list[dict]:
@@ -924,19 +924,10 @@ async def test_inband_token_accepted_in_band_by_an_inband_replica(upstream, tmp_
     assert len(real_deletes(upstream)) == 1
 
 
-async def test_token_without_mode_runs_on_an_inband_replica(upstream, tmp_path):
+@pytest.mark.parametrize("mode", ["inband", "oob"])
+async def test_token_without_mode_stays_pending_until_the_link(upstream, tmp_path, mode):
     posted: list[str] = []
-    (al,) = replicas(upstream, tmp_path, posted, "inband")
-    async with proxy_client(al) as c:
-        token = resign(al, (await call(c, "delete_service", {"name": "api"}))["requestState"], m=None)
-        res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
-    assert res["isError"] is False and res["_meta"][META + "rule_id"] == "tier.L2.confirmed"
-    assert len(real_deletes(upstream)) == 1
-
-
-async def test_token_without_mode_stays_pending_on_an_oob_replica_until_the_link(upstream, tmp_path):
-    posted: list[str] = []
-    (al,) = replicas(upstream, tmp_path, posted, "oob")
+    (al,) = replicas(upstream, tmp_path, posted, mode)
     async with proxy_client(al) as c:
         token = resign(al, (await call(c, "delete_service", {"name": "api"}))["requestState"], m=None)
         res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
@@ -1148,7 +1139,7 @@ async def _hangs() -> None:
 
 
 async def test_probes_answer_without_credentials_and_write_nothing(upstream, audit_path, monkeypatch):
-    al = make_airlock(upstream, audit_path, trust_principal_header=False, jwt_secret="s" * 32)  # a principal would be required
+    al = make_airlock(upstream, audit_path, identity=IdentityConfig(jwt_secret="s" * 32))  # a principal would be required
     sent = spy(al)
     monkeypatch.setattr("mcp_airlock.app.resolve", lambda *a: pytest.fail("a probe resolved identity"))
     SPANS.clear()

@@ -17,7 +17,6 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExport
 from . import approvals, pins
 from .app import build
 from .identity import IdentityConfig
-from .pg import psycopg_module, psycopg_pool_module
 from .policy_cli import policy_error_message
 from .startup import startup_warnings
 
@@ -128,13 +127,6 @@ def main() -> None:
         print(f"mcp-airlock: warning: {w}", file=sys.stderr)
     if a.strict and warnings:
         raise SystemExit(2)
-    if os.environ.get("AIRLOCK_STORE_DSN") or os.environ.get("AIRLOCK_AUDIT_DSN"):
-        try:
-            psycopg_module()
-            if os.environ.get("AIRLOCK_STORE_DSN"):
-                psycopg_pool_module()
-        except RuntimeError as e:
-            raise _fail(e) from None
     try:
         provider = setup_otel(a.otel_file)
     except (ValueError, OSError) as e:  # the span file, or an OTEL_* setting the SDK rejects
@@ -143,7 +135,7 @@ def main() -> None:
         airlock = build(a.policy, a.upstream, a.audit, a.env, pins=tool_pins, pins_path=a.pins,
                         audit_max_bytes=a.audit_max_bytes, audit_keep=a.audit_keep,
                         on_shutdown=provider.shutdown)
-    except (ValueError, OSError, yaml.YAMLError) as e:
+    except (ValueError, OSError, RuntimeError, yaml.YAMLError) as e:  # RuntimeError: psycopg is missing
         # policy_error_message only reshapes YAML and pydantic errors; tests/test_cli_errors.py checks that only
         # policy.py raises them inside build(), so the policy path never labels another error
         raise _fail(e, policy_error_message(a.policy, e)) from None

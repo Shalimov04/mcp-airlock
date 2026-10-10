@@ -7,6 +7,7 @@ import json
 import httpx
 
 from mcp_airlock.app import CONFIRM_KEY, META, PRINCIPAL_REQUIRED
+from mcp_airlock.identity import IdentityConfig
 
 from .conftest import ENVELOPE, V, audit_rows, call, make_airlock, patch_post, rpc
 
@@ -250,7 +251,7 @@ async def test_mcp_param_headers_are_forwarded(client, upstream, airlock):
 
 async def test_jwt_principal(upstream, audit_path):
     import jwt as pyjwt
-    al = make_airlock(upstream, audit_path, jwt_secret="s3cret-s3cret-s3cret-s3cret-32b!", trust_principal_header=False)
+    al = make_airlock(upstream, audit_path, identity=IdentityConfig(jwt_secret="s3cret-s3cret-s3cret-s3cret-32b!"))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=al.app), base_url="http://localhost:9000") as c:
         tok = pyjwt.encode({"sub": "svc-bot", "exp": 4102444800}, "s3cret-s3cret-s3cret-s3cret-32b!", algorithm="HS256")
         await call(c, "get_service", {"name": "api"}, principal=None, headers={"authorization": f"Bearer {tok}"})
