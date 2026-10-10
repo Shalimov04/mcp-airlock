@@ -617,7 +617,7 @@ async def test_intent_audit_failure_fails_closed_with_a_postgres_audit_sink(upst
     al = make_airlock(upstream, audit_path)
     al.audit.close()
     al.audit = audit_from_env(audit_path)
-    file_sink, pg = al.audit.sinks
+    file_sink, pg = al.audit, al.audit.mirror
     call_ids = []
 
     class Full:  # the file sink's handle on a full disk

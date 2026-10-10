@@ -553,6 +553,32 @@ async def test_store_recovers_soon_after_the_database_is_back(monkeypatch):
 
 
 @needs_pg
+async def test_close_ends_a_worker_frozen_in_the_ddl_of_a_new_connection(monkeypatch):
+    monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
+    info = conninfo_to_dict(PG)
+    fwd = Forwarder(info.get("host", "127.0.0.1"), int(info.get("port", 5432)))
+    await fwd.on()
+    sink = PostgresAuditLog(make_conninfo(PG, host="127.0.0.1", port=fwd.port, hostaddr="127.0.0.1"))
+    real = sink._prepare
+
+    def freeze_then_prepare(conn):
+        fwd.frozen = True  # connected, then the server stops: the statements below get no answer
+        real(conn)
+
+    monkeypatch.setattr(sink, "_prepare", freeze_then_prepare)
+    try:
+        sink.write(phase="intent", call_id="c0")
+        await asyncio.sleep(0.5)  # the worker is inside _prepare
+        t = time.monotonic()
+        await asyncio.to_thread(sink.close)
+        assert time.monotonic() - t < 5
+        assert not sink._worker.is_alive()  # the cut reached the connection that was not yet in use
+    finally:
+        fwd.frozen = False
+        await fwd.off()
+
+
+@needs_pg
 @pytest.mark.parametrize("when", ["idle", "in_flight"])
 async def test_a_frozen_server_cannot_hang_a_store_call(when, monkeypatch):
     # SIGSTOP on the server: the kernel still ACKs, so keepalives and tcp_user_timeout never fire.

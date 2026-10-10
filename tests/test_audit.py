@@ -20,7 +20,7 @@ from mcp_airlock import Airlock, Policy
 from mcp_airlock import __main__ as cli
 from mcp_airlock import audit
 from mcp_airlock.app import CONFIRM_KEY, build
-from mcp_airlock.audit import GENESIS, REDACTED, AuditLog, MultiAudit, PostgresAuditLog, audit_from_env, redact, row_hash, scrub
+from mcp_airlock.audit import GENESIS, REDACTED, AuditLog, PostgresAuditLog, audit_from_env, redact, row_hash, scrub
 from mcp_airlock.audit_cli import default_files, main, query_jsonl, verify
 from mcp_airlock.identity import IdentityConfig
 
@@ -92,18 +92,15 @@ def test_jsonl_fields_and_redaction(tmp_path):
 
 def test_postgres_matches_jsonl(tmp_path, pg_dsn):
     import psycopg
-    j, p = AuditLog(tmp_path / "a.jsonl"), PostgresAuditLog(pg_dsn)
-    j.write(phase="outcome", **BASE)
-    p.write(phase="outcome", **BASE)
-    j.close(), p.close()
+    sink = AuditLog(tmp_path / "a.jsonl", mirror=PostgresAuditLog(pg_dsn))
+    sink.write(phase="outcome", **BASE)
+    sink.close()
     (jrow,) = jsonl_rows(tmp_path / "a.jsonl")
     with psycopg.connect(pg_dsn) as c:
         cols = "phase, call_id, principal, method, tool, verdict, rule_id, tier, dry_run, latency_ms, upstream_status, trace_id, rec"
         (*vals, rec), = c.execute(f"SELECT {cols} FROM airlock_audit").fetchall()
         (ts,), = c.execute("SELECT ts FROM airlock_audit").fetchall()
-    for k in ("ts", "hash"):  # the two sinks wrote at different instants, and the timestamp is part of the hash
-        jrow.pop(k), rec.pop(k)
-    assert rec == jrow  # same field set, same redaction
+    assert rec == jrow  # same field set, same redaction, same ts and chain
     assert vals == [jrow[k] for k in cols.split(", ")[:-1]]
     assert ts.tzinfo is not None and abs(ts - NOW) < timedelta(minutes=1)
 
@@ -143,54 +140,33 @@ def test_query_reads_rotated_files_oldest_first(tmp_path):
     assert [r["call_id"] for r in query_jsonl(str(tmp_path / "a.jsonl"), {}, None, 2)] == ["c6", "c7"]
 
 
-class Broken:
-    def write(self, **rec):
+class Broken:  # a mirror that cannot take the row
+    def write_row(self, row):
         raise RuntimeError("db down")
 
     def close(self):
         pass
 
 
-def test_multi_audit_survives_broken_sink(tmp_path):
-    m = MultiAudit(Broken(), AuditLog(tmp_path / "a.jsonl"))
+def test_a_failing_mirror_is_only_logged(tmp_path, caplog):
+    m = AuditLog(tmp_path / "a.jsonl", mirror=Broken())
     m.write(phase="intent", **BASE)
     m.close()
-    assert len(jsonl_rows(tmp_path / "a.jsonl")) == 1
+    assert len(jsonl_rows(tmp_path / "a.jsonl")) == 1 and "audit mirror failed" in caplog.text
 
 
-def test_multi_audit_raises_the_file_sink_error_after_the_other_sinks(tmp_path):
+def test_the_mirror_gets_the_row_before_the_file_error_is_raised(tmp_path):
     seen = []
 
-    class Recorder:
+    class Recorder(Broken):
         def write_row(self, row):
             seen.append(row)
 
-        def close(self):
-            pass
-
-    file_sink = AuditLog(tmp_path / "a.jsonl")
+    file_sink = AuditLog(tmp_path / "a.jsonl", mirror=Recorder())
     file_sink._f.close()  # a full disk or EIO: the intent write must fail closed with a mirror configured too
     with pytest.raises(ValueError):
-        MultiAudit(file_sink, Broken(), Recorder()).write(phase="intent", **BASE)
+        file_sink.write(phase="intent", **BASE)
     assert [r["call_id"] for r in seen] == [BASE["call_id"]]
-
-
-def test_multi_audit_delivers_to_a_sink_with_only_write(tmp_path):
-    class WriteOnly:  # no write_row: it gets the record the caller passed, the way the file sink does before chaining
-        def __init__(self):
-            self.seen = []
-
-        def write(self, **rec):
-            self.seen.append(rec)
-
-        def close(self):
-            pass
-
-    plain = WriteOnly()
-    m = MultiAudit(AuditLog(tmp_path / "a.jsonl"), plain)
-    m.write(phase="intent", **BASE)
-    m.close()
-    assert plain.seen == [dict(BASE, phase="intent")] and len(jsonl_rows(tmp_path / "a.jsonl")) == 1
 
 
 def test_genesis_is_sixty_four_zeros():
@@ -202,7 +178,7 @@ def test_audit_from_env(tmp_path, monkeypatch):
     assert type(audit_from_env(tmp_path / "a.jsonl")) is AuditLog
     monkeypatch.setenv("AIRLOCK_AUDIT_DSN", "postgresql://x")
     m = audit_from_env(tmp_path / "b.jsonl")
-    assert isinstance(m, MultiAudit) and [type(s) for s in m.sinks] == [AuditLog, PostgresAuditLog]
+    assert type(m) is AuditLog and type(m.mirror) is PostgresAuditLog
 
 
 # --- the Postgres sink off the event loop ----------------------------------------------------------------------
@@ -257,7 +233,7 @@ async def test_a_locked_audit_table_does_not_hold_up_calls_or_healthz(upstream, 
     import psycopg
     with psycopg.connect(pg_dsn) as lock:
         lock.execute("LOCK TABLE airlock_audit IN ACCESS EXCLUSIVE MODE")
-        async with proxy_with(upstream, MultiAudit(AuditLog(tmp_path / "a.jsonl"), pg)) as c:
+        async with proxy_with(upstream, AuditLog(tmp_path / "a.jsonl", mirror=pg)) as c:
             t0 = time.monotonic()
             res = await call(c, "list_services", {}, principal="alice")
             assert (await c.get("/healthz")).status_code == 200
@@ -268,7 +244,7 @@ async def test_a_locked_audit_table_does_not_hold_up_calls_or_healthz(upstream, 
             assert pg.flush(15)  # statement_timeout or lock_timeout ends each wait, about one deadline per record
         lock.rollback()
     assert caplog.text.count("dropped") == 2 and "due to statement timeout" in caplog.text and "Traceback" not in caplog.text
-    assert pg._conn is conn and not conn.closed  # the server ended the wait before the cut: the connection is kept
+    assert pg._conn is conn and not conn.closed  # the server ended the wait itself: the connection is kept
     assert table_count(pg_dsn, principal="alice") == 0 and len(jsonl_rows(tmp_path / "a.jsonl")) == 2  # the file has them
     pg.write(phase="outcome", **dict(BASE, call_id="after"))  # the sink is usable again once the lock is gone
     pg.close()
@@ -420,7 +396,7 @@ def test_dumps_refuses_a_non_finite_number_that_slipped_through():
 @pytest.mark.parametrize("rec", [NUL_REC, NON_FINITE_REC], ids=["nul", "non-finite"])
 def test_both_sinks_hold_the_record(tmp_path, pg_dsn, rec):
     # Used to leave 0 table rows: jsonb refuses \u0000 and NaN, the text columns refuse NUL, and the failure was only logged.
-    m = MultiAudit(AuditLog(tmp_path / "a.jsonl"), PostgresAuditLog(pg_dsn))
+    m = AuditLog(tmp_path / "a.jsonl", mirror=PostgresAuditLog(pg_dsn))
     m.write(phase="intent", **rec)
     m.write(phase="outcome", **rec)
     m.close()
@@ -434,7 +410,7 @@ def test_both_sinks_hold_the_record(tmp_path, pg_dsn, rec):
 
 async def test_nul_in_a_call_reaches_both_sinks(upstream, tmp_path, pg_dsn):
     pg = PostgresAuditLog(pg_dsn)
-    async with proxy_with(upstream, MultiAudit(AuditLog(tmp_path / "a.jsonl"), pg)) as c:
+    async with proxy_with(upstream, AuditLog(tmp_path / "a.jsonl", mirror=pg)) as c:
         await call(c, "get_service", {"name": "api\x00"}, principal="mallory")
         await call(c, "rm_rf\x00", {"path": "x"}, principal="mallory")  # allowlist.deny: the tool name carries the NUL
     pg.close()
@@ -731,9 +707,9 @@ def test_audit_from_env_passes_the_rotation_settings(tmp_path, monkeypatch):
     sink.close()
     monkeypatch.setenv("AIRLOCK_AUDIT_DSN", "postgresql://x")
     multi = audit_from_env(tmp_path / "b.jsonl", 7, 3)
-    assert (multi.sinks[0].max_bytes, multi.sinks[0].keep) == (7, 3)
+    assert (multi.max_bytes, multi.keep) == (7, 3)
     multi.close()
-    assert (multi := audit_from_env(tmp_path / "c.jsonl")).sinks[0].keep == 5
+    assert (multi := audit_from_env(tmp_path / "c.jsonl")).keep == 5
     multi.close()
 
 
@@ -1357,10 +1333,7 @@ def pg_recs(dsn) -> dict[str, dict]:
 
 
 def test_postgres_record_has_the_same_prev_and_hash_as_the_file_line(tmp_path, pg_dsn):
-    seed = PostgresAuditLog(pg_dsn)  # a Postgres sink chaining on its own would continue from this row, not from GENESIS
-    seed.write(phase="intent", **dict(BASE, call_id="seed"))
-    seed.close()
-    sink = MultiAudit(AuditLog(tmp_path / "a.jsonl"), PostgresAuditLog(pg_dsn))
+    sink = AuditLog(tmp_path / "a.jsonl", mirror=PostgresAuditLog(pg_dsn))
     for i in range(3):
         sink.write(phase="intent", **dict(BASE, call_id=f"c{i}"))
     sink.close()
@@ -1372,7 +1345,7 @@ def test_postgres_record_has_the_same_prev_and_hash_as_the_file_line(tmp_path, p
 
 def test_postgres_keeps_a_record_the_file_sink_sealed_but_could_not_write(tmp_path, pg_dsn, monkeypatch):
     n = line_size(tmp_path)
-    sink = MultiAudit(AuditLog(tmp_path / "a.jsonl", max_bytes=n), PostgresAuditLog(pg_dsn))
+    sink = AuditLog(tmp_path / "a.jsonl", max_bytes=n, mirror=PostgresAuditLog(pg_dsn))
     sink.write(phase="intent", **dict(BASE, call_id="c0"))
     real = os.replace
     monkeypatch.setattr(os, "replace", boom)  # the rotation before c1 fails after the row was sealed
@@ -1386,28 +1359,6 @@ def test_postgres_keeps_a_record_the_file_sink_sealed_but_could_not_write(tmp_pa
     recs = pg_recs(pg_dsn)
     assert [recs["c0"], recs["c2"]] == old + live and recs["c1"]["prev"] == recs["c2"]["prev"] == recs["c0"]["hash"]
     assert all(r["hash"] == row_hash(r) for r in recs.values())
-
-
-def test_postgres_alone_chains_from_its_newest_row(pg_dsn):
-    for call_ids in (["c0", "c1"], ["c2"]):  # a second instance picks up where the first stopped
-        sink = PostgresAuditLog(pg_dsn)
-        for cid in call_ids:
-            sink.write(phase="intent", **dict(BASE, call_id=cid))
-        sink.close()
-    recs = pg_recs(pg_dsn)
-    assert recs["c0"]["prev"] == GENESIS
-    assert recs["c1"]["prev"] == recs["c0"]["hash"] and recs["c2"]["prev"] == recs["c1"]["hash"]
-    assert all(r["hash"] == row_hash(r) for r in recs.values())
-
-
-def test_postgres_alone_starts_at_genesis_after_a_row_without_a_hash(pg_dsn):
-    import psycopg
-    with psycopg.connect(pg_dsn, autocommit=True) as c:
-        c.execute("INSERT INTO airlock_audit (ts, rec) VALUES (now(), '{\"call_id\": \"old\"}'::jsonb)")
-    sink = PostgresAuditLog(pg_dsn)
-    sink.write(phase="intent", **BASE)
-    sink.close()
-    assert pg_recs(pg_dsn)["c1"]["prev"] == GENESIS
 
 
 def test_two_secret_shaped_keys_stay_two_arguments():

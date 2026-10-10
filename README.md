@@ -275,7 +275,7 @@ Everything else is environment variables. None are required for a single-process
 | `AIRLOCK_SECRET` | Key for signing confirmation tokens. Random per process if unset, which means a restart forgets pending confirmations. Set it only together with `AIRLOCK_STORE_DSN`: replicas need the same key, but with the memory store a fixed key would let a used confirmation run again on another replica or after a restart. |
 | `AIRLOCK_STORE_DSN` | Postgres DSN for the shared state: used confirmation keys, approvals, the prompt text shown on the approve page, blast-radius counters. Without it the state lives in process memory. Needs the `postgres` extra. |
 | `AIRLOCK_AUDIT_DSN` | Postgres DSN for the audit log, in addition to the JSONL file. Needs the `postgres` extra. |
-| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply, and, with one second added, the longest an audit write waits for the database. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
+| `AIRLOCK_STORE_CONNECT_TIMEOUT` | Connect timeout in seconds for the Postgres store and the audit sink, unless the DSN or `PGCONNECT_TIMEOUT` sets one. The connect timeout in force (at least 2 s) is also the longest a store call waits for a pooled connection or for a reply, and the `statement_timeout` and `lock_timeout` of the audit sink's connection. Default `10`. An integer from 1 to 86400. See [Postgres](#postgres). |
 | `AIRLOCK_STORE_POOL_SIZE` | Most connections the Postgres store keeps open per replica. Default `4`. A positive integer. See [Postgres](#postgres). |
 | `AIRLOCK_APPROVAL_WEBHOOK` | Slack-style incoming webhook, or a Telegram `https://api.telegram.org/bot<token>/sendMessage` URL. Confirmation prompts are posted there with an approve link. |
 | `AIRLOCK_APPROVAL_MODE` | `oob` or `inband`. With `oob` only the approve link approves; an `accept` in `inputResponses` is treated like no answer. With `inband` the client's `accept` approves; an `accept` on an `oob` token is ignored there too. Default `oob` when a webhook is set, `inband` otherwise. `oob` without a webhook is refused at startup. |
@@ -665,20 +665,23 @@ in session mode.
 
 The audit sink writes from a thread of its own through a queue of at most 1000 records and about
 32 MiB of serialized rows, so a slow, locked or frozen audit database never holds up a call,
-`/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's rows
-land a moment later, so an `intent` row can reach the table after the upstream call has run.
-Each write is given up after the connect timeout: the connection gets a `statement_timeout` and
-a `lock_timeout` of that length, and a server that does not answer at all is cut off on our side
-a second later. A record that fails, times out or finds the queue full is dropped from the table
-with a warning in the log; the JSONL file still holds it, so the table's hash chain can have
-gaps after a drop (the `prev` of a row names a row that is not there) and the file is the one to
-verify. At shutdown the queue is drained for up to one such timeout, then the worker gets 2 s
-more to stop, and what is left is dropped, with the count in the log; with a frozen database
-that is about the timeout plus 2 s (7 s at a timeout of 3 s, 12 s at the default 10 s), and the
-wait runs off the event loop, capped at 15 s. A crash loses the queue too. Where the file is an
-emptyDir, as in the chart's multi-replica setup, those records live only as long as the pod. The
-table is created on first use under the same advisory lock as the store's tables, so replicas
-starting together on an empty database do not lose their first records.
+`/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's rows land
+a moment later, so an `intent` row can reach the table after the upstream call has run. The table
+is a mirror of the file: a row carries the `prev` and `hash` the file gave it. The connection gets
+a `statement_timeout` and a `lock_timeout` of the connect timeout, so a locked or slow table ends
+each wait. A server that stops answering altogether (a paused container, a stuck proxy) leaves the
+worker waiting until it answers again; the queue fills and new records are dropped, and nothing is
+logged until it holds 1000 records. A record that fails or finds the queue full is dropped from
+the table with a warning in the log; the JSONL file still holds it, so the table's hash chain can
+have gaps after a drop (the `prev` of a row names a row that is not there), or hold a row the file
+failed to write; the file is the one to verify. At shutdown the queue is drained for up to the
+connect timeout, then the socket is cut, the worker gets 2 s more to stop, and what is left is
+dropped, with the count in the log; with a frozen database that is about the timeout plus 2 s (7 s
+at a timeout of 3 s, 12 s at the default 10 s), and the wait runs off the event loop, capped at
+15 s. A crash loses the queue too. Where the file is an emptyDir, as in the chart's multi-replica
+setup, those records live only as long as the pod. The table is created on first use under the
+same advisory lock as the store's tables, so replicas starting together on an empty database do
+not lose their first records.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),

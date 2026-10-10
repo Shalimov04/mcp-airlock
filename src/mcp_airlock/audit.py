@@ -1,6 +1,6 @@
 """Append-only audit. Two records per call: `intent` before upstream, `outcome` after.
-Sinks: JSONL file (always), Postgres table `airlock_audit` (when AIRLOCK_AUDIT_DSN is set).
-Every record carries `prev` and `hash`, a sha256 chain over the records of one sink."""
+Sinks: JSONL file (always), Postgres table `airlock_audit` (when AIRLOCK_AUDIT_DSN is set, a mirror of the file).
+Every record carries `prev` and `hash`, a sha256 chain over the records of the file; the table stores the same values."""
 
 from __future__ import annotations
 
@@ -10,16 +10,14 @@ import logging
 import os
 import queue
 import re
-import socket
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .pg import effective_connect_timeout, psycopg_module, with_conn_defaults
+from .pg import DDL_LOCK, connect_wait_s, cut_socket, psycopg_module, with_conn_defaults
 
 log = logging.getLogger("mcp_airlock.audit")
 
@@ -192,12 +190,14 @@ def _ends_with_newline(path: Path) -> bool:
 
 
 class AuditLog:
-    def __init__(self, path: str | Path, max_bytes: int | None = None, keep: int = 5):
+    def __init__(self, path: str | Path, max_bytes: int | None = None, keep: int = 5,
+                 mirror: PostgresAuditLog | None = None):
         if keep < 1 or (max_bytes or 0) < 0:
             raise ValueError("audit keep must be at least 1 and max_bytes must not be negative")
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.max_bytes, self.keep = max_bytes or None, keep
+        self.mirror = mirror
         lines, torn, at = _tail(self.path)
         if torn:
             self._cut_torn(torn, at)
@@ -241,7 +241,20 @@ class AuditLog:
         self.write_row(_row(rec))
 
     def write_row(self, row: dict[str, Any]) -> None:
-        """Chains the row (sets prev and hash in place, so another sink stores the same values) and appends it."""
+        """Chains the row (sets prev and hash in place, so the mirror stores the same values) and appends it, then
+        hands it to the mirror. The mirror gets the row even when the append fails, so the table keeps the record
+        and its outcome; the append error is still raised, so the intent write fails closed. A failing mirror is
+        only logged."""
+        try:
+            self._append(row)
+        finally:
+            if self.mirror is not None:
+                try:
+                    self.mirror.write_row(row)
+                except Exception:
+                    log.exception("audit mirror failed")
+
+    def _append(self, row: dict[str, Any]) -> None:
         with self._lock:  # ponytail: one sync write per record; batch if audit I/O ever shows in a profile
             seal(row, self._last)
             data = (_dumps(row) + "\n").encode("utf-8")
@@ -282,45 +295,37 @@ class AuditLog:
             self._size = self.path.stat().st_size
 
     def close(self) -> None:
-        self._f.close()
+        try:
+            self._f.close()
+        finally:
+            if self.mirror is not None:
+                self.mirror.close()
 
 
-_DDL_LOCK = 0x41524C4B  # 'ARLK', the store's lock too: the sinks may share a database, so first-use DDL is serialised across both
 QUEUE_MAX = 1000  # records waiting for the Postgres sink; beyond that new records are dropped (the file still has them)
 # The queue holds the serialized row, about the size of the request, and is capped by bytes as well: a count alone is
 # no bound when a 1 MB request of small objects parses to 20 MB of dicts, and a locked table once took the proxy to OOM.
 QUEUE_MAX_BYTES = 32 * 1024 * 1024
-CUT_GRACE_S = 1.0  # the server's own timeouts get this long to end a wait before our end of the socket is cut
 
 
 class _Queued(NamedTuple):
-    """One record as the worker writes it: the indexed columns, the JSONB text and the hash, no row dict."""
+    """One record as the worker writes it: the indexed columns and the JSONB text, no row dict."""
     ts: str
     cols: tuple
     text: str
-    hash: str | None  # None when no file sink chained the row: the worker seals it on this table's own chain
     size: int
 
 
-def _cut(conn) -> None:
-    """Shut our end of the socket: a server that stops answering still ACKs at the kernel, so keepalives and
-    tcp_user_timeout never fire on an idle wait, and a cancel request would wait on the same silent server."""
-    try:
-        with socket.socket(fileno=os.dup(conn.pgconn.socket)) as s:  # a dup: the libpq fd stays open
-            s.shutdown(socket.SHUT_RDWR)
-    except Exception:  # already closed: nothing is waiting on it
-        pass
-
-
 class PostgresAuditLog:
-    """Same rows as AuditLog, one per INSERT. Indexed columns for querying + the full record as JSONB.
+    """The mirror of AuditLog: the same rows, already chained by the file, one per INSERT. Indexed columns for
+    querying + the full record as JSONB.
 
     The rows are written by one worker thread fed through a bounded queue: `write_row` only queues, so a slow,
-    locked or frozen database never holds the event loop, /healthz or SIGTERM. Every write (and the DDL on a new
-    connection) is given up after the connect timeout: the server gets `statement_timeout` and `lock_timeout`, and
-    our end of the socket is cut a second later when even that brings no answer. A record that fails, times out or
-    finds the queue full is dropped from the table with a warning; the JSONL sink next to it fails closed and keeps
-    the record."""
+    locked or frozen database never holds the event loop, /healthz or SIGTERM. The server gets `statement_timeout`
+    and `lock_timeout` equal to the connect timeout; a server that stops answering altogether leaves the worker
+    waiting until it thaws, the queue fills and new records are dropped, and `close()` cuts the socket. A record
+    that fails or finds the queue full is dropped from the table with a warning; the JSONL file fails closed and
+    keeps the record."""
 
     DDL = """CREATE TABLE IF NOT EXISTS airlock_audit (
         ts timestamptz NOT NULL, phase text, call_id text, principal text, method text, tool text, verdict text,
@@ -334,10 +339,9 @@ class PostgresAuditLog:
     def __init__(self, dsn: str):
         psycopg_module()  # fail at startup, not on the first record
         self.dsn = with_conn_defaults(dsn, "AIRLOCK_AUDIT_DSN")
-        self._wait_s = float(max(2, effective_connect_timeout(self.dsn)))  # libpq raises a connect timeout below 2 s to 2
+        self._wait_s = connect_wait_s(self.dsn)
         self._conn = None  # owned by the worker thread once it runs
         self._conn_lock = threading.Lock()  # a cut and a close of the same connection never overlap (the fd could be reused)
-        self._last: str | None = None  # read from the newest row at the first connect, only when this sink has to chain
         self._q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
         self._lock = threading.Lock()
         self._idle = threading.Condition(self._lock)  # notified when the worker finishes a record
@@ -357,67 +361,30 @@ class PostgresAuditLog:
     def _cut_conn(self, conn) -> None:
         with self._conn_lock:
             if not conn.closed:
-                _cut(conn)
-
-    @contextmanager
-    def _deadline(self, conn):
-        # A Timer per write: the worker is the only thread on this connection and has no loop to schedule on. The
-        # thread is cheap next to the INSERT and is cancelled as soon as the write returns.
-        hit: list = []
-        timer = threading.Timer(self._wait_s + CUT_GRACE_S, lambda: (hit.append(True), self._cut_conn(conn)))
-        timer.daemon = True
-        timer.start()
-        try:
-            yield hit
-        finally:
-            timer.cancel()
-            timer.join()  # a cut that has just started finishes before anyone touches the connection again
-            if hit:  # cut, even if the statement returned at the same moment: the socket is unusable either way
-                self._drop_conn(conn)
+                cut_socket(conn)
 
     def _connect(self):
         conn = psycopg_module().connect(self.dsn, autocommit=True)  # bounded by connect_timeout
+        self._conn = conn  # close() can cut it while the DDL below waits on a server that went silent
         try:
             self._prepare(conn)
         except BaseException:
-            conn.close()
+            self._drop_conn(conn)
             raise
         return conn
 
     def _prepare(self, conn) -> None:
         ms = str(int(self._wait_s * 1000))
-        with self._deadline(conn) as hit:
-            try:
-                # The server ends a lock wait or a slow statement itself; the cut is only for a server that says nothing.
-                conn.execute("SELECT set_config('statement_timeout', %s, false), set_config('lock_timeout', %s, false)", (ms, ms))
-                with conn.transaction():  # a lock: replicas creating the table at once used to fail on duplicate catalog rows
-                    conn.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK,))
-                    conn.execute(self.DDL)
-            except Exception:
-                if hit:
-                    raise TimeoutError(f"preparing the audit connection took longer than {self._wait_s:g} s") from None
-                raise
+        # The server ends a lock wait or a slow statement itself.
+        conn.execute("SELECT set_config('statement_timeout', %s, false), set_config('lock_timeout', %s, false)", (ms, ms))
+        with conn.transaction():  # a lock: replicas creating the table at once used to fail on duplicate catalog rows
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (DDL_LOCK,))
+            conn.execute(self.DDL)
 
     def _insert(self, item: _Queued) -> None:
         if self._conn is None or self._conn.closed:
             self._conn = self._connect()
-        conn = self._conn
-        text, h = item.text, item.hash
-        with self._deadline(conn) as hit:
-            try:
-                if h is None:  # not chained by a file sink: continue this table's own chain
-                    if self._last is None:
-                        newest = conn.execute("SELECT rec->>'hash' FROM airlock_audit ORDER BY ts DESC, ctid DESC LIMIT 1").fetchone()
-                        self._last = newest[0] if newest and newest[0] else GENESIS
-                    row = json.loads(text)  # the text is _dumps of the row, so the round trip changes nothing but prev and hash
-                    seal(row, self._last)
-                    text, h = _dumps(row), row["hash"]
-                conn.execute(self._INSERT, (item.ts, *item.cols, text))
-            except Exception:
-                if hit:  # the cut broke the connection; the next record opens a new one
-                    raise TimeoutError(f"the audit write took longer than {self._wait_s + CUT_GRACE_S:g} s") from None
-                raise
-        self._last = h
+        self._conn.execute(self._INSERT, (item.ts, *item.cols, item.text))
 
     def _write(self, item: _Queued) -> None:
         try:
@@ -440,8 +407,6 @@ class PostgresAuditLog:
                         dropped, self._dropped = self._dropped, 0
                     if dropped:
                         log.warning("Postgres audit sink caught up; %d records were not written (the file has them)", dropped)
-                except TimeoutError as e:
-                    log.warning("Postgres audit write dropped: %s", e)
                 except psycopg_module().OperationalError as e:
                     if self._closed:  # the cut close() made to end the wait: not a database error
                         log.warning("Postgres audit write dropped at shutdown (the file has it)")
@@ -465,7 +430,7 @@ class PostgresAuditLog:
     def write_row(self, row: dict[str, Any]) -> None:
         """Queues the row, serialized; the worker thread writes it. Never blocks."""
         text = _dumps(row)
-        item = _Queued(row["ts"], tuple(row[c] for c in self._COLS), text, row["hash"], sys.getsizeof(text))
+        item = _Queued(row["ts"], tuple(row[c] for c in self._COLS), text, sys.getsizeof(text))
         with self._lock:
             if self._closed:
                 log.warning("Postgres audit sink is closed; the record is dropped (the file has it)")
@@ -505,11 +470,9 @@ class PostgresAuditLog:
             self._closed = True
             worker = self._worker
         if worker is None:
-            if self._conn is not None:  # never written: nothing but a connection handed in from outside
-                self._conn.close()
             return
         if not self.flush(self._wait_s):
-            with self._lock:  # drop the backlog so the worker sees the stop sentinel; the record in flight ends at its deadline
+            with self._lock:  # drop the backlog so the worker sees the stop sentinel; the cut below ends the record in flight
                 left = self._pending
                 while True:
                     try:
@@ -525,36 +488,6 @@ class PostgresAuditLog:
         worker.join(timeout=2.0)  # a daemon thread: a worker still waiting on a connect does not hold up the exit
 
 
-class MultiAudit:
-    """Fan out to every sink; a failing sink never blocks the others. A file sink's error is raised once every
-    sink has the row, so the intent write still fails closed and the table keeps the record and its outcome."""
-
-    def __init__(self, *sinks: Any):
-        self.sinks = sinks
-
-    def write(self, **rec: Any) -> None:
-        row = _row(rec)  # built once: the sinks store the same ts, prev and hash
-        failed: Exception | None = None
-        for s in self.sinks:
-            try:
-                if hasattr(s, "write_row"):
-                    s.write_row(row)
-                else:
-                    s.write(**rec)
-            except Exception as e:
-                if isinstance(s, AuditLog):
-                    failed = failed or e
-                else:
-                    log.exception("audit sink %s failed", type(s).__name__)
-        if failed is not None:
-            raise failed
-
-    def close(self) -> None:
-        for s in self.sinks:
-            s.close()
-
-
-def audit_from_env(jsonl_path: str | Path, max_bytes: int | None = None, keep: int = 5) -> AuditLog | MultiAudit:
+def audit_from_env(jsonl_path: str | Path, max_bytes: int | None = None, keep: int = 5) -> AuditLog:
     dsn = os.environ.get("AIRLOCK_AUDIT_DSN")
-    file_sink = AuditLog(jsonl_path, max_bytes, keep)
-    return MultiAudit(file_sink, PostgresAuditLog(dsn)) if dsn else file_sink
+    return AuditLog(jsonl_path, max_bytes, keep, mirror=PostgresAuditLog(dsn) if dsn else None)
