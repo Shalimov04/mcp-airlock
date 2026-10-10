@@ -49,8 +49,9 @@
   than one replica without a shared store, uses `Recreate` with a persistent `dataVolume` so two
   pods never share one audit hash chain, and refuses such a volume with several replicas.
 * `docs/clients.md` has a table of MCP clients and whether they handle the `input_required`
-  confirmation (#22). The Python SDK client 2.2.0 is tested (`examples/sdk_client_confirm.py`,
-  `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.
+  confirmation (#22). The Python SDK client 2.2.0 and 2.3.0 are tested
+  (`examples/sdk_client_confirm.py`, `tests/test_sdk_client.py`); Claude Code, Cursor and the
+  TypeScript SDK are not tested yet.
 * `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
   bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else probe their
   own port or disable it.

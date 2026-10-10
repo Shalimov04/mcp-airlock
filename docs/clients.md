@@ -97,7 +97,7 @@ inferred from vendor documentation.
 
 | Client | Version | Prompt shown to the person | `inputResponses` sent back on accept | Decline stops the call | Tested | Evidence |
 |---|---|---|---|---|---|---|
-| MCP Python SDK (`mcp.client.Client`) | 2.2.0 (pinned in `uv.lock`) | Only through the application's `elicitation_callback` [1] | Yes: `{"airlock-confirm": {"action": "accept", "content": {"confirm": true}}}` with the same `requestState`; the call ran once as `tier.L2.confirmed` | Yes: `mrtr.declined` comes back as a tool error; only the dry run reached the upstream | 2026-10-05 | [`examples/sdk_client_confirm.py`](../examples/sdk_client_confirm.py), [`tests/test_sdk_client.py`](../tests/test_sdk_client.py), `e2e/postgres/run.sh` scenarios 04 (accept) and 15 (`oob`) |
+| MCP Python SDK (`mcp.client.Client`) | 2.3.0 (pinned in `uv.lock`), 2.2.0 | Only through the application's `elicitation_callback` [1] | Yes: `{"airlock-confirm": {"action": "accept", "content": {"confirm": true}}}` with the same `requestState`; the call ran once as `tier.L2.confirmed` | Yes: `mrtr.declined` comes back as a tool error; only the dry run reached the upstream | 2026-10-10 | [`examples/sdk_client_confirm.py`](../examples/sdk_client_confirm.py), [`tests/test_sdk_client.py`](../tests/test_sdk_client.py), `e2e/postgres/run.sh` scenarios 04 (accept) and 15 (`oob`) |
 | Claude Code | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
 | Cursor | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
 | MCP TypeScript SDK client | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
@@ -118,11 +118,11 @@ inferred from vendor documentation.
 The SDK run in full (`uv run python examples/sdk_client_confirm.py`, stdout):
 
 ```text
-== accept (mcp 2.2.0)
+== accept (mcp 2.3.0)
   prompt: [prod] delete_service: permanently delete a service (irreversible) (tier L2).
           Arguments: {"name": "api"}
           Dry-run preview: would delete api
-          Confirm to execute for real. Idempotency key: 2cb19b885cfe49cbab19a572b6e55055
+          Confirm to execute for real. Idempotency key: b927e04769934b77832985570449e52b
   retry : [{"requestState": "al1.eyJwIjoi...", "inputResponses": {"airlock-confirm": {"action": "accept", "content": {"confirm": true}}}}]
   result: is_error=False rule_id=tier.L2.confirmed text='DELETED api'
   audit : [('tier.L2.confirm', True), ('tier.L2.confirmed', False)]
@@ -131,11 +131,11 @@ The SDK run in full (`uv run python examples/sdk_client_confirm.py`, stdout):
   [ok] call ran
   [ok] audit has tier.L2.confirmed
 
-== decline (mcp 2.2.0)
+== decline (mcp 2.3.0)
   prompt: [prod] delete_service: permanently delete a service (irreversible) (tier L2).
           Arguments: {"name": "api"}
           Dry-run preview: would delete api
-          Confirm to execute for real. Idempotency key: 9965512ea1cc479e8af29fcd46f3c26e
+          Confirm to execute for real. Idempotency key: 7a56710c2f5f4f98b6a46875686bf038
   retry : [{"requestState": "al1.eyJwIjoi...", "inputResponses": {"airlock-confirm": {"action": "decline"}}}]
   result: is_error=True rule_id=mrtr.declined text='airlock: denied (mrtr.declined)'
   audit : [('tier.L2.confirm', True), ('mrtr.declined', None)]
@@ -144,7 +144,7 @@ The SDK run in full (`uv run python examples/sdk_client_confirm.py`, stdout):
   [ok] decline came back as a tool error
   [ok] audit has mrtr.declined, no confirmed run
 
-== no elicitation_callback (mcp 2.2.0)
+== no elicitation_callback (mcp 2.3.0)
   retry : none sent
   raised: MCPError: Elicitation not supported
   audit : [('tier.L2.confirm', True)]
