@@ -58,6 +58,17 @@ def test_bad_input_is_one_message_and_exit_1_not_a_traceback(tmp_path, case, env
     assert "Traceback" not in r.stderr and "mcp-airlock" not in err[len("mcp-airlock: "):], r.stderr  # one message
 
 
+@pytest.mark.parametrize("var", ["AIRLOCK_STORE_DSN", "AIRLOCK_AUDIT_DSN"])
+def test_a_postgres_dsn_without_psycopg_is_one_message_and_exit_1(tmp_path, monkeypatch, var):
+    monkeypatch.setitem(sys.modules, "psycopg", None)  # makes `import psycopg` raise ImportError
+    monkeypatch.setenv(var, "postgresql://u:p@127.0.0.1:1/db")
+    monkeypatch.setattr(sys, "argv", ["mcp-airlock", "--policy", str(EXAMPLE), "--upstream", "http://127.0.0.1:1/mcp",
+                                      "--audit", str(tmp_path / "audit.jsonl"), "--port", "0"])
+    with pytest.raises(SystemExit) as e:
+        cli.main()
+    assert str(e.value).startswith("mcp-airlock: ") and "mcp-airlock[postgres]" in str(e.value)
+
+
 def test_port_outside_0_65535_is_refused_by_the_parser(tmp_path):
     r = run_airlock("--policy", str(EXAMPLE), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"),
                     "--port", "99999")

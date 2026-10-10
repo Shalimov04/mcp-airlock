@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
@@ -227,36 +227,30 @@ class Airlock:
                 loop.add_signal_handler(hup, self.reload)
             except RuntimeError:  # a loop without signal support (NotImplementedError is one), or not in the main thread
                 hup = None
-        async def close_http() -> None:
-            if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
-                await self.http.aclose()
-
-        async def close_store() -> None:
-            close = getattr(self.engine.store, "aclose", None)  # an injected store may have none
-            if close:
-                await close()
-
-        async def close_audit() -> None:
-            # off the loop: a frozen audit database holds close() for seconds
-            try:
-                await asyncio.wait_for(asyncio.to_thread(self.audit.close), AUDIT_CLOSE_S)
-            except asyncio.TimeoutError:
-                log.warning("audit close did not finish in %g s", AUDIT_CLOSE_S)
-
-        def shutdown() -> None:
-            # uvicorn re-raises SIGTERM after this, so atexit never runs: flush spans here, after the audit
-            if self.on_shutdown is not None:
-                self.on_shutdown()
-
-        # Last in, first out, and an error in one step does not skip the next; the last error raised wins
-        async with AsyncExitStack() as stack:
-            stack.callback(shutdown)
-            stack.push_async_callback(close_audit)
-            stack.push_async_callback(close_store)
-            stack.push_async_callback(close_http)
-            if hup is not None:
-                stack.callback(loop.remove_signal_handler, hup)
+        try:
             yield
+        finally:
+            try:
+                if hup is not None:
+                    loop.remove_signal_handler(hup)
+                try:
+                    if self._owns_http:  # notify_http is never ours: it is injected or the same client as http
+                        await self.http.aclose()
+                finally:
+                    try:
+                        close = getattr(self.engine.store, "aclose", None)  # an injected store may have none
+                        if close:
+                            await close()
+                    finally:
+                        # off the loop: a frozen audit database holds close() for seconds
+                        try:
+                            await asyncio.wait_for(asyncio.to_thread(self.audit.close), AUDIT_CLOSE_S)
+                        except asyncio.TimeoutError:
+                            log.warning("audit close did not finish in %g s", AUDIT_CLOSE_S)
+            finally:
+                # uvicorn re-raises SIGTERM after this, so atexit never runs: flush spans here, after the audit
+                if self.on_shutdown is not None:
+                    self.on_shutdown()
 
     def reload(self) -> ReloadResult:
         """Load the policy file and the pins file, then swap both in together. Nothing changes unless both load.
