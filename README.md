@@ -170,12 +170,13 @@ A policy without `environment` lints with the first `--env` (or `AIRLOCK_ENV`) a
 the way the proxy would run it; without either it is an error. `diff` and `pin` take `--env`, then
 `AIRLOCK_ENV`, then the policy's own `environment`. A policy that cannot be read or does not
 validate is `ERROR invalid` in all three commands, and an upstream that does not answer
-`tools/list` like an MCP server is `ERROR upstream`. `diff` asks the server itself (not the proxy, which hides unlisted tools) for
-`tools/list` and tells you which allowlisted tools the server no longer has (`missing_upstream`, an
-error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`), which `where` rules name an
-argument that is not in the schema (`where_unknown_arg`) and which server tools the policy does not
-mention (`not_allowlisted`). With `--pins` it also checks the [pins](#pinning-tool-descriptions).
-Both exit 1 when any finding is an error.
+`tools/list` like an MCP server is `ERROR upstream`. `diff` asks the server itself (not the proxy,
+which hides unlisted tools) for `tools/list` and tells you which allowlisted tools the server no
+longer has (`missing_upstream`, an error), which L1/L2 tools have no `dry_run` argument
+(`no_dry_run`), which `where` rules name an argument that is not in the schema
+(`where_unknown_arg`) and which server tools the policy does not mention (`not_allowlisted`). With
+`--pins` it also checks the [pins](#pinning-tool-descriptions). Both exit 1 when any finding is an
+error.
 
 ### In Kubernetes
 
@@ -398,10 +399,11 @@ characters; a longer value fails the rule.
 
 A pattern RE2 cannot express does not load, and `lint` reports it: lookahead and lookbehind,
 backreferences, possessive and atomic groups, the Python spellings `\Z` (write `\z`), `\uXXXX`
-(write `\x{41}`), `\N{...}`, `(?x)`, `(?#...)`, `(?a)` and `(?u)`, and a counted repeat above 1000. `a{,3}` loads but is the literal text; write
-`a{0,3}`. `\w`, `\d`, `\s` and `\b` are ASCII-only, so `\w+` does not match `привет` (use `\pL`),
-and `\W`, `\D`, `\S` and `\B` match the non-ASCII characters Python's `re` would not: `\W+` matches
-`привет`. A value with a lone surrogate fails the rule.
+(write `\x{41}`), `\N{...}`, `(?x)`, `(?#...)`, `(?a)` and `(?u)`, and a counted repeat above
+1000. `a{,3}` loads but is the literal text; write `a{0,3}`. `\w`, `\d`, `\s` and `\b` are
+ASCII-only, so `\w+` does not match `привет` (use `\pL`), and `\W`, `\D`, `\S` and `\B` match the
+non-ASCII characters Python's `re` would not: `\W+` matches `привет`. A value with a lone
+surrogate fails the rule.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
@@ -655,12 +657,13 @@ carries the `prev` and `hash` the file gave it) and its rows land a moment later
 row can reach the table after the upstream call has run. The connection gets a `statement_timeout`
 and a `lock_timeout` of the connect timeout. A record that fails or finds the queue full is
 dropped from the table with a warning; the file still holds it, so the table's chain can have gaps
-or hold a row the file failed to write, and the file is the one to verify. A server that stops answering altogether leaves the worker
-waiting; the queue fills and new records are dropped, with nothing logged until it holds 1000. At
-shutdown the queue is drained for up to the connect timeout, then the socket is cut, the worker gets 2 s
-more to stop, and what is left is dropped, with the count in the log; that is about the timeout plus 2 s, off the event
-loop, capped at 15 s. A crash loses the queue too. Where the file is an emptyDir, as in the
-chart's multi-replica setup, those records live only as long as the pod.
+or hold a row the file failed to write, and the file is the one to verify. A server that stops
+answering altogether leaves the worker waiting; the queue fills and new records are dropped, with
+nothing logged until it holds 1000. At shutdown the queue is drained for up to the connect
+timeout, then the socket is cut, the worker gets 2 s more to stop, and what is left is dropped,
+with the count in the log; that is about the timeout plus 2 s, off the event loop, capped at 15 s.
+A crash loses the queue too. Where the file is an emptyDir, as in the chart's multi-replica setup,
+those records live only as long as the pod.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),
