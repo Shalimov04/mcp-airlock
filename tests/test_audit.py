@@ -142,18 +142,36 @@ def test_query_reads_rotated_files_oldest_first(tmp_path):
     assert [r["call_id"] for r in query_jsonl(str(tmp_path / "a.jsonl"), {}, None, 2)] == ["c6", "c7"]
 
 
+class Broken:
+    def write(self, **rec):
+        raise RuntimeError("db down")
+
+    def close(self):
+        pass
+
+
 def test_multi_audit_survives_broken_sink(tmp_path):
-    class Broken:
-        def write(self, **rec):
-            raise RuntimeError("db down")
-
-        def close(self):
-            pass
-
     m = MultiAudit(Broken(), AuditLog(tmp_path / "a.jsonl"))
     m.write(phase="intent", **BASE)
     m.close()
     assert len(jsonl_rows(tmp_path / "a.jsonl")) == 1
+
+
+def test_multi_audit_raises_the_file_sink_error_after_the_other_sinks(tmp_path):
+    seen = []
+
+    class Recorder:
+        def write_row(self, row):
+            seen.append(row)
+
+        def close(self):
+            pass
+
+    file_sink = AuditLog(tmp_path / "a.jsonl")
+    file_sink._f.close()  # a full disk or EIO: the intent write must fail closed with a mirror configured too
+    with pytest.raises(ValueError):
+        MultiAudit(file_sink, Broken(), Recorder()).write(phase="intent", **BASE)
+    assert [r["call_id"] for r in seen] == [BASE["call_id"]]
 
 
 def test_multi_audit_delivers_to_a_sink_with_only_write(tmp_path):
@@ -1356,8 +1374,9 @@ def test_postgres_keeps_a_record_the_file_sink_sealed_but_could_not_write(tmp_pa
     sink = MultiAudit(AuditLog(tmp_path / "a.jsonl", max_bytes=n), PostgresAuditLog(pg_dsn))
     sink.write(phase="intent", **dict(BASE, call_id="c0"))
     real = os.replace
-    monkeypatch.setattr(os, "replace", boom)  # the rotation before c1 fails after the row was sealed; MultiAudit logs it
-    sink.write(phase="intent", **dict(BASE, call_id="c1"))
+    monkeypatch.setattr(os, "replace", boom)  # the rotation before c1 fails after the row was sealed
+    with pytest.raises(OSError):  # the caller fails closed, the table still gets the row
+        sink.write(phase="intent", **dict(BASE, call_id="c1"))
     monkeypatch.setattr(os, "replace", real)
     sink.write(phase="intent", **dict(BASE, call_id="c2"))
     sink.close()

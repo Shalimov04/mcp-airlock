@@ -68,6 +68,10 @@
 
 ### Fixed
 
+* With `AIRLOCK_AUDIT_DSN` set, a failed write to `audit.jsonl` (a full disk, EIO) was logged and
+  the call was forwarded with no intent record in the file. The intent write now fails closed, as
+  it does without the DSN: the Postgres table still gets the record and the `internal.error`
+  outcome, and the caller gets an error.
 * The release workflow file was invalid YAML since the chart `appVersion` check was added (a `: `
   inside an unquoted `run:` line), so GitHub flagged every push and a `v*` tag would not have
   released. The step is a block scalar now, and `tests/test_workflows.py` parses every workflow
