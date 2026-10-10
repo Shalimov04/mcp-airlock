@@ -7,12 +7,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from .pg import (DDL_LOCK, DEFAULT_POOL_SIZE, effective_connect_timeout, positive_int_env, psycopg_module,
+from .pg import (DDL_LOCK, DEFAULT_POOL_SIZE, connect_wait_s, cut_socket, positive_int_env, psycopg_module,
                  psycopg_pool_module, with_conn_defaults)
 
 log = logging.getLogger("mcp_airlock.store")
@@ -119,11 +118,7 @@ def _cut(conn, cancel_timeout: float, fired: list, cancels: set) -> None:
     Shutting our end alone leaves the backend where it was: one waiting on a lock does not notice a gone client,
     and every cut used to leave one more backend behind until max_connections was exhausted. The cancel request
     goes over a connection of its own, so it is sent after the cut and bounded by its own timeout."""
-    try:
-        with socket.socket(fileno=os.dup(conn.pgconn.socket)) as s:  # a dup: the libpq fd stays open
-            s.shutdown(socket.SHUT_RDWR)
-    except Exception:  # already closed: nothing is waiting on it
-        pass
+    cut_socket(conn)
     fired.append(True)
     if psycopg_module().capabilities.has_cancel_safe():  # older libpq cancels in a blocking thread: not worth a hang
         # Its first step, which copies the cancel key, runs before the waiter sees the cut and the pool drops the connection.
@@ -148,7 +143,7 @@ class PostgresStore:
         self.dsn = with_conn_defaults(dsn, "AIRLOCK_STORE_DSN")
         self.pool_size = pool_size or positive_int_env("AIRLOCK_STORE_POOL_SIZE", DEFAULT_POOL_SIZE)
         # libpq raises a connect timeout below 2 s to 2; the DSN may set a larger one than our default.
-        self._wait_s = float(max(2, effective_connect_timeout(self.dsn)))
+        self._wait_s = connect_wait_s(self.dsn)
         self._closed = False
         self._pool = None
         self._pool_lock = asyncio.Lock()  # binds no loop at construction on 3.10+
