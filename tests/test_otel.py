@@ -53,7 +53,8 @@ def collector():
 def made(monkeypatch, request):
     """setup_otel() with a clean OTEL_* environment; every provider is shut down at teardown."""
     for k in ("OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_HEADERS",
-              "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"):
+              "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES",
+              *(f"OTEL_EXPORTER_OTLP_{t}{n}" for t in ("", "TRACES_") for n in ("TIMEOUT", "COMPRESSION"))):
         monkeypatch.delenv(k, raising=False)
     providers = []
 
@@ -118,16 +119,17 @@ def test_traces_endpoint_alone_turns_otlp_on(monkeypatch, made, collector):
     assert [p for p, _, _ in got] == ["/custom/traces"]  # used as-is, no /v1/traces appended
 
 
-@pytest.mark.parametrize("name, value", [
-    ("TIMEOUT", "5"), ("TIMEOUT", "2.5"),
-    ("COMPRESSION", "none"), ("COMPRESSION", "gzip"), ("COMPRESSION", "deflate"), ("COMPRESSION", "GZip"),
+@pytest.mark.parametrize("var, value", [
+    ("OTEL_EXPORTER_OTLP_TIMEOUT", "5"), ("OTEL_EXPORTER_OTLP_TIMEOUT", "2.5"),
+    ("OTEL_EXPORTER_OTLP_COMPRESSION", "none"), ("OTEL_EXPORTER_OTLP_COMPRESSION", "gzip"),
+    ("OTEL_EXPORTER_OTLP_COMPRESSION", "deflate"), ("OTEL_EXPORTER_OTLP_COMPRESSION", "GZip"),
+    ("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "5"), ("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "gzip"),
 ])
-@pytest.mark.parametrize("prefix", ["OTEL_EXPORTER_OTLP_", "OTEL_EXPORTER_OTLP_TRACES_"])
-def test_a_valid_timeout_or_compression_is_accepted(monkeypatch, made, collector, prefix, name, value):
+def test_a_valid_timeout_or_compression_is_accepted(monkeypatch, made, collector, var, value):
     pytest.importorskip(EXPORTER)
     url, got = collector
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", url)
-    monkeypatch.setenv(prefix + name, value)
+    monkeypatch.setenv(var, value)
     emit(made())  # no ValueError, and a request arrives (the body may be compressed)
     assert got
 
