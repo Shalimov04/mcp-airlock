@@ -52,7 +52,8 @@
   confirmation (#22). The Python SDK client 2.2.0 is tested (`examples/sdk_client_confirm.py`,
   `tests/test_sdk_client.py`); Claude Code, Cursor and the TypeScript SDK are not tested yet.
 * `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
-  bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else disable it.
+  bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else probe their
+  own port or disable it.
 * Helm: `OTEL_EXPORTER_OTLP_HEADERS` is read from `existingSecret` like the other credentials and
   refused in `env`; new `extraEnv` (with `valueFrom`) and `envFrom` values take entries from a
   Secret or ConfigMap of your own. An `extraEnv` name that is also in `env`, or that is
@@ -70,6 +71,10 @@
   inside an unquoted `run:` line), so GitHub flagged every push and a `v*` tag would not have
   released. The step is a block scalar now, and `tests/test_workflows.py` parses every workflow
   file.
+* The nightly Postgres e2e stack failed on every run since the image got its `HEALTHCHECK`:
+  compose 2.x on the GitHub runner refuses `up --wait` on a running container whose image check
+  was turned off (`has no healthcheck configured`), which the e2e MCP service and webhook were.
+  They probe their own port now, and `e2e/postgres/run.sh` prints why a failed `up` failed.
 * An L2 call whose dry-run preview was longer than `output.max_chars` and carried
   `structuredContent` came back as a truncated error result instead of a confirmation prompt: the
   cap marked the preview `isError` to detach it from the tool's outputSchema, and the gate read
