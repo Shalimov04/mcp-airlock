@@ -36,6 +36,7 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2.8"]
 otlp = ["opentelemetry-exporter-otlp-proto-http>=1.44.0"]
+regex = ["google-re2>=1.1.20240702,<2"]
 
 [project.urls]
 Repository = "https://github.com/Shalimov04/mcp-airlock"

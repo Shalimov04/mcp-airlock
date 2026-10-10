@@ -4,6 +4,22 @@
 
 ### Changed
 
+* **Breaking: `where` regexes use RE2.** A `where` regex could freeze the proxy: one
+  `get_service` call with a 32-character name blocked the event loop, `/healthz` and `SIGTERM`
+  for over a minute. A `regex` rule is now matched with google-re2, in time linear in the value
+  length, and only on strings up to 4096 characters; a longer value fails the rule (RE2's worst
+  case, `(.*a){1000}`, is about 30 us per character, so about 130 ms at the cap). It needs the
+  new `regex` extra (`pip install 'mcp-airlock[regex]'`, included in the image); a policy with a
+  `regex` rule does not load without it and says so. Patterns 0.3.0 accepted that now fail to
+  load (a startup error, `ERROR invalid` in `airlock-policy lint`, a `SIGHUP` reload keeps the
+  current policy): lookahead and lookbehind, backreferences (`\1`, `(?P=name)`), possessive and
+  atomic groups, `\Z` (write `\z`), `\uXXXX` (write `\x{41}`), `\N{...}`, `(?x)`, `(?#...)`,
+  `(?a)`, `(?u)` and a counted repeat above 1000, nested counts multiplied. `a{,3}` still loads
+  but now means the literal text (write `a{0,3}`). Matching changes both ways: `\w`, `\d`, `\s`
+  and `\b` are ASCII-only, so they deny more (`\w+` no longer matches `привет`; use `\pL`), while
+  `\W`, `\D`, `\S` and `\B` match non-ASCII characters and admit more (`\W+` now matches
+  `привет`). A value with a lone surrogate fails a `regex` rule. This replaces the unreleased cost
+  check over Python's private regex parser and the `where_regex_cost` lint warning (#74).
 * The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on
   first use and closes at shutdown, instead of a connection per call. The `postgres` extra now
   includes psycopg-pool. A failed connect is given up after the connect timeout, so the store
@@ -219,17 +235,6 @@
   the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record. A
   store that answers with a complaint (a bad value, a missing table) is still an internal error,
   since retrying does not cure it.
-* A `where` regex can no longer freeze the proxy. A pattern that can take exponential time on a
-  crafted value (a repetition inside a repetition such as `(a+)+` or `(.*a){12}`, an alternation
-  inside a repetition whose alternatives can start alike, a backreference) is refused when the
-  policy loads and by `airlock-policy lint`, and so is one with three or more unbounded repeats
-  in a row that can take each other's characters (`.*-.*-.*-prod`: about a second on a
-  1024-character value, tens of seconds for four repeats); a regex is tried only on strings up to
-  1024 characters, and a longer value fails the rule. `lint` warns about two such repeats in a
-  row (`where_regex_cost`, milliseconds at the cap). The README lists the safe patterns the check
-  refuses anyway and how to rewrite them. If Python has neither `re._parser` nor `sre_parse`, the
-  policy fails to load instead of skipping the check. One `get_service` call with a 32-character
-  name used to block the event loop, `/healthz` and `SIGTERM` for over a minute.
 * Span attributes and the span name that carry client-chosen text (`gen_ai.tool.name`,
   `gen_ai.tool.call.id`, `rpc.method`, `enduser.id`) go through the same credential scrub as the
   audit `detail`, so a key-shaped tool name or principal no longer reaches the trace backend, and

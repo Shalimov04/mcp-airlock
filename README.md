@@ -65,23 +65,26 @@ uvx mcp-airlock --help
 pip install mcp-airlock
 ```
 
-Two features are extras, so the base install stays small:
+Three features are extras, so the base install stays small:
 
 | Extra | Brings | Needed for |
 |---|---|---|
 | `postgres` | psycopg, psycopg-pool | `AIRLOCK_STORE_DSN`, `AIRLOCK_AUDIT_DSN`, `airlock-audit query --dsn` |
 | `otlp` | the OTLP HTTP span exporter | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` |
+| `regex` | google-re2 | a `where` rule with `regex` |
 
 ```
-uvx --from 'mcp-airlock[postgres,otlp]' mcp-airlock ...
-pip install 'mcp-airlock[postgres,otlp]'
+uvx --from 'mcp-airlock[postgres,otlp,regex]' mcp-airlock ...
+pip install 'mcp-airlock[postgres,otlp,regex]'
 ```
 
 A DSN without the `postgres` extra stops the proxy at startup with that hint. An OTLP
 endpoint without the `otlp` extra is a startup warning (an error under `--strict`) and the
-proxy runs without exporting.
+proxy runs without exporting. A policy with a `regex` rule does not load without the `regex`
+extra and says to install it. google-re2 ships wheels for glibc 2.27+ Linux, macOS and Windows,
+but none for musl (Alpine).
 
-The container image `ghcr.io/shalimov04/mcp-airlock` includes both extras. It listens on
+The container image `ghcr.io/shalimov04/mcp-airlock` includes all three extras. It listens on
 `0.0.0.0:9000`, runs as a non-root user and has `/data` as its working directory, so
 `audit.jsonl` lands there. The user is uid 65532, so a host directory bind-mounted at `/data`
 has to be writable by that uid (`chown 65532 ./data`), or the start stops with a `Permission
@@ -161,11 +164,10 @@ uv run airlock-policy diff examples/policies/github.yaml --upstream http://127.0
 
 `lint` needs no network. It reports a tool without tiers (`no_tiers`, an error), a write tool
 without a description (`no_description`), a `count_arg` that relies on the global blast radius
-(`blast_radius_default`), a `where` rule for an environment no tier mentions (`where_env_unknown`),
-a `where` regex with two unbounded repeats in a row (`where_regex_cost`) and an environment no tool
-covers (`env_unused`); `--env` adds environments that must be covered. A policy without
-`environment` lints with the first `--env` (or `AIRLOCK_ENV`) as its environment, the way the proxy
-would run it; without either it is an error. `diff` and `pin` take `--env`, then `AIRLOCK_ENV`, then
+(`blast_radius_default`), a `where` rule for an environment no tier mentions (`where_env_unknown`)
+and an environment no tool covers (`env_unused`); `--env` adds environments that must be covered.
+A policy without `environment` lints with the first `--env` (or `AIRLOCK_ENV`) as its environment,
+the way the proxy would run it; without either it is an error. `diff` and `pin` take `--env`, then `AIRLOCK_ENV`, then
 the policy's own `environment`. A policy that cannot be read or does not validate is `ERROR invalid`
 in all three commands, and an upstream that does not answer `tools/list` like an MCP server is
 `ERROR upstream`. `diff` asks the server itself (not the proxy, which hides unlisted tools) for
@@ -389,29 +391,22 @@ parses as JSON `null`, a list or an object is denied by any rule, because the up
 it before it validates it. For the same reason `not_in` also denies a value whose type is not among
 the listed values (`3` against `[kube-system]`).
 
-A regex runs in the request path, on the event loop, so its cost is the time one request can stall
-the whole proxy. A pattern that can take exponential time on a crafted value is refused when the
-policy loads (and by `lint`): a repetition inside a repetition (`(a+)+`, `(\w+\s?)+`), an
-alternation inside a repetition whose alternatives can start alike (`(a|aa)+`) and a
-backreference. A fixed outer count does not make these safe: `(.*a){12}` has about 1024^12 ways
-to split a value and is refused too. A nested repetition is fine when every iteration starts or
-ends with a character the rest of the group cannot consume (`(\.[a-z]{1,63})*`,
-`(\d{1,3}\.){3}`) or the group has a fixed width (`((ab){2})+`), and so is an alternation whose
-alternatives start apart (`(foo|bar)+`). The remaining patterns are polynomial, of a degree set
-by the unbounded repeats that run one after another and can take each other's characters
-(`.*-.*-prod` has two: `.*` can take a dash). A regex is tried only on strings up to 1024
-characters, and a longer value fails the rule with a message saying so. Measured with the stdlib
-`re` on a 1024-character worst-case value on a development machine: two such repeats take a few
-milliseconds, three (`.*-.*-.*-prod`) one to a few seconds, four (`.*.*.*.*x`) tens of seconds;
-each extra repeat multiplies the time by about the value length. So the cap is enough for two, and
-three or more are refused. `lint` warns about two (`where_regex_cost`); a repeat that must stop at
-a character it cannot match (`[^/]+/[^/]+/[^/]+`) is not counted.
+A regex is matched with [RE2](https://github.com/google/re2/wiki/Syntax) (the `regex` extra),
+in time linear in the value length, so no pattern backtracks. Linear is not cheap for every
+pattern: a counted repeat around an unbounded one (`(.*a){1000}`) costs about 30 us per
+character, so a regex is tried only on strings up to 4096 characters (about 130 ms for that
+worst case), and a longer value fails the rule with a message saying so.
 
-The refusal is a heuristic and errs on the safe side, so some safe patterns are refused too:
-`(\s*,\s*\w+)*`, `(\w+\s)*\w+`, `(?:[a-z]+ ?){1,3}` and `(.*a){2}` (a small fixed count) are all
-cheap in practice and still refused. To rewrite one: use a single character class with a length
-(`[\w\s,]{1,200}`, `[a-z ]{1,60}`), write the list so that every item is introduced by a character
-the item cannot contain (`\s*\w+(,\s*\w+)*`), or split the check over several `where` rules.
+RE2 has no lookahead or lookbehind, backreferences (`\1`, `(?P=name)`), possessive or atomic
+groups, and a policy using them does not load (nor does `lint` accept it); neither do the Python
+spellings `\Z` (RE2 writes `\z`), `\uXXXX` (`\x{41}`), `\N{...}`, `(?x)`, `(?#...)`, `(?a)`,
+`(?u)` and a counted repeat above 1000, where nested counts multiply (`(a{100}){11}` is refused).
+`a{,3}` loads but means the literal text `a{,3}` in RE2, not 0 to 3 `a`s; write `a{0,3}`. `\w`,
+`\d`, `\s` and `\b` are ASCII-only, so `\w+` does not match `привет` (use `\pL` or
+`\p{Cyrillic}`), and their negations `\W`, `\D`, `\S` and `\B` match the non-ASCII characters
+Python's `re` would not: `\W+` matches `привет`, `\S+` a value with a no-break space. `(?i)`
+folds Unicode case. A value with a lone surrogate (a JSON `"\ud800"`) cannot be matched and
+fails the rule.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,

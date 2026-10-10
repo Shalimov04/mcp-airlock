@@ -141,8 +141,8 @@ async def test_reload_is_reported_on_stderr_and_in_the_log_and_never_audited(ups
 
 # ---------------------------------------------------------------- a file that does not load changes nothing
 
-def broken_where(data: dict) -> str:
-    data["tools"]["delete_service"]["where"] = [{"arg": "name", "in": []}]  # parses, fails validation
+def broken_where(data: dict, rule: dict | None = None) -> str:
+    data["tools"]["delete_service"]["where"] = [rule or {"arg": "name", "in": []}]  # parses, fails validation
     return yaml.safe_dump(data)
 
 
@@ -151,6 +151,7 @@ def broken_where(data: dict) -> str:
     ("not a mapping", "- just\n- a list\n", None),
     ("unknown key", yaml.safe_dump({**policy_data(), "toolz": {}}), "toolz"),
     ("empty where list", broken_where(policy_data()), "in must not be empty"),
+    ("regex RE2 cannot run", broken_where(policy_data(), {"arg": "name", "regex": "(?=a)a"}), "RE2 syntax"),
     ("tools is a string", yaml.safe_dump({**policy_data(), "tools": "all"}), "tools"),
 ])
 async def test_a_file_that_does_not_load_keeps_the_old_policy(upstream, audit_path, tmp_path, capsys, name, body, expect):
