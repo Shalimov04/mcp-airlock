@@ -4,6 +4,9 @@
 
 ### Changed
 
+* The Postgres audit sink is now a mirror of the JSONL file: it stores the `prev` and `hash` the file
+  gave each row and keeps no chain of its own, and a write is no longer cut off by a timer (the
+  cut at shutdown stays).
 * **Breaking: `where` regexes use RE2.** A `where` regex could freeze the proxy: one
   `get_service` call with a 32-character name blocked the event loop, `/healthz` and `SIGTERM`
   for over a minute. A `regex` rule is now matched with google-re2, in time linear in the value
@@ -170,11 +173,12 @@
   one, as the proxy does. Without either, the error also lists the file's other validation errors
   instead of hiding them until the environment is fixed.
 * The Postgres audit sink writes from a worker thread through a bounded queue (1000 records, about
-  32 MiB of serialized rows), with a deadline per write equal to the connect timeout plus one
-  second for the server's own `statement_timeout` and `lock_timeout` to end the wait first. An
-  audit database that was paused, locked or black-holed used to stall every request, `/healthz`
-  and SIGTERM for as long as it stayed silent. A record that cannot be written in time is dropped
-  from the table with a warning; the JSONL file keeps it, for as long as that file lives. The
+  32 MiB of serialized rows), and the connection gets a `statement_timeout` and `lock_timeout`
+  equal to the connect timeout. An audit database that was paused, locked or black-holed used to
+  stall every request, `/healthz` and SIGTERM for as long as it stayed silent. A record that
+  fails or finds the queue full is dropped from the table with a warning; the JSONL file keeps
+  it, for as long as that file lives. A server that stops answering altogether holds the worker
+  until it answers again, and the queue drops records meanwhile. The
   table's `intent` row can now land after the upstream call; the file's is still written before.
   At shutdown the sink drains its queue off the event loop for at most about the connect timeout
   plus 2 s (capped at 15 s) and logs how many records it left out.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import socket
 
 
 def psycopg_module():
@@ -86,3 +87,21 @@ def effective_connect_timeout(dsn: str) -> int:
         except (ValueError, OverflowError):
             pass  # libpq rejects junk at connect time; fall back to ours here
     return connect_timeout_from_env()  # also for connect_timeout=0 (unbounded in libpq): the pool wait needs a bound
+
+
+DDL_LOCK = 0x41524C4B  # 'ARLK': serialises first-use DDL across replicas and across the store and the audit sink
+
+
+def connect_wait_s(dsn: str) -> float:
+    """How long a connect or a write may take: libpq raises a connect timeout below 2 s to 2."""
+    return float(max(2, effective_connect_timeout(dsn)))
+
+
+def cut_socket(conn) -> None:
+    """Shut our end of the socket: a server that stops answering still ACKs at the kernel, so keepalives and
+    tcp_user_timeout never fire on an idle wait, and a cancel request would wait on the same silent server."""
+    try:
+        with socket.socket(fileno=os.dup(conn.pgconn.socket)) as s:  # a dup: the libpq fd stays open
+            s.shutdown(socket.SHUT_RDWR)
+    except Exception:  # already closed: nothing is waiting on it
+        pass

@@ -14,7 +14,7 @@ import pytest
 
 from mcp_airlock import Airlock, Policy
 from mcp_airlock.app import CONFIRM_KEY, META, build
-from mcp_airlock.audit import AuditLog, MultiAudit, PostgresAuditLog
+from mcp_airlock.audit import AuditLog, PostgresAuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
 
 from .conftest import ENVELOPE, ROOT, audit_rows, call, make_airlock, rpc
@@ -362,13 +362,12 @@ async def run_lifespan(al: Airlock) -> None:
 
 
 async def test_shutdown_closes_what_airlock_created_and_the_audit_sinks(tmp_path):
-    a, b = Sink(), Sink()
     pg = PostgresAuditLog("postgresql://unused")
-    pg._conn = conn = Sink()
-    al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://upstream/mcp", MultiAudit(a, b, pg))
+    file_audit = AuditLog(tmp_path / "audit.jsonl", mirror=pg)
+    al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://upstream/mcp", file_audit)
     assert not al.http.is_closed
     await run_lifespan(al)
-    assert al.http.is_closed and (a.closed, b.closed, conn.closed) == (1, 1, 1)
+    assert al.http.is_closed and file_audit._f.closed and pg._closed
     file_audit = AuditLog(tmp_path / "audit.jsonl")
     await run_lifespan(Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://upstream/mcp", file_audit))
     assert file_audit._f.closed
@@ -377,14 +376,14 @@ async def test_shutdown_closes_what_airlock_created_and_the_audit_sinks(tmp_path
 @pytest.mark.skipif(not PG, reason="AIRLOCK_TEST_PG_DSN not set")
 async def test_shutdown_closes_the_postgres_audit_connection(tmp_path):
     al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://upstream/mcp",
-                 MultiAudit(AuditLog(tmp_path / "audit.jsonl"), PostgresAuditLog(PG)))
+                 AuditLog(tmp_path / "audit.jsonl", mirror=PostgresAuditLog(PG)))
     al.audit.write(phase="intent", call_id="shutdown", verdict="deny", rule_id="allowlist.deny")  # opens the connection
-    pg = al.audit.sinks[1]
+    pg = al.audit.mirror
     assert pg.flush(10)  # the worker thread opens and owns the connection
     conn = pg._conn
     assert not conn.closed
     await run_lifespan(al)
-    assert conn.closed and pg._conn is None and al.audit.sinks[0]._f.closed
+    assert conn.closed and pg._conn is None and al.audit._f.closed
     import psycopg
     with psycopg.connect(PG, autocommit=True) as c:
         c.execute("DELETE FROM airlock_audit WHERE call_id = 'shutdown'")  # the database is shared

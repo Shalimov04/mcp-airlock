@@ -12,7 +12,7 @@ import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from .pg import (DEFAULT_POOL_SIZE, effective_connect_timeout, positive_int_env, psycopg_module,
+from .pg import (DDL_LOCK, DEFAULT_POOL_SIZE, effective_connect_timeout, positive_int_env, psycopg_module,
                  psycopg_pool_module, with_conn_defaults)
 
 log = logging.getLogger("mcp_airlock.store")
@@ -104,7 +104,6 @@ CREATE TABLE IF NOT EXISTS airlock_usage (
 );
 CREATE INDEX IF NOT EXISTS airlock_usage_pt_ts ON airlock_usage (principal, tool, ts);
 """
-_DDL_LOCK = 0x41524C4B  # 'ARLK': serialises first-use DDL across replicas
 _TABLES = ("airlock_keys", "airlock_prompts", "airlock_usage")
 # The server-side timeouts end this much before the client deadline, so a slow statement normally fails with a
 # clean server error on a connection that stays usable; the cut is for a server that does not answer at all.
@@ -226,7 +225,7 @@ class PostgresStore:
             async with self._deadline(c):
                 if not self._ready:
                     async with c.transaction():
-                        await c.execute("SELECT pg_advisory_xact_lock(%s)", (_DDL_LOCK,))
+                        await c.execute("SELECT pg_advisory_xact_lock(%s)", (DDL_LOCK,))
                         await c.execute(_DDL)
                     self._ready = True
                 yield c
