@@ -394,7 +394,7 @@ the listed values (`3` against `[kube-system]`).
 
 A regex is matched with [RE2](https://github.com/google/re2/wiki/Syntax) (the `regex` extra), in
 time linear in the value length, so no pattern backtracks. It is still not free for every pattern
-(`(.*a){1000}` costs about 30 us per byte), so a regex is tried only on strings up to 4096
+(`(.*a){1000}` costs about 30 us per ASCII character), so a regex is tried only on strings up to 4096
 characters; a longer value fails the rule. The worst case at the cap is about 0.13 s per value for
 ASCII and up to about 0.3 s for 4-byte characters, since RE2 works per byte.
 
@@ -650,12 +650,12 @@ The audit sink uses one connection of its own and reconnects once when it drops;
 The audit sink is a mirror: the JSONL file is written first and is the source of truth, and
 the hash chain lives there (a table row carries the `prev` and `hash` the file gave it). A
 Postgres failure is only logged; a file failure still fails the call closed. Rows reach the table
-through a queue of at most 1000 records (about 32 MiB), so a slow or frozen audit database never
+through a queue of at most 1000 records or about 32 MiB, so a slow or frozen audit database never
 holds up a call, `/healthz` or shutdown, and an `intent` row can land after the upstream call
 has run. A record that fails or finds the queue full is dropped from the table with a warning (a
 frozen server logs nothing until the queue is full). The table's chain can therefore have gaps
-or hold a row the file failed to write: verify the file. At shutdown the queue is drained for up
-to the connect timeout plus 2 s (never past 15 s); what is left is dropped, with the count in
+or hold a row the file failed to write: verify the file. At shutdown the queue gets up
+to the connect timeout to drain and the worker 2 s more to stop (never past 15 s); what is left is dropped, with the count in
 the log. A crash loses the queue too, and where the file is an emptyDir, as in the chart's
 multi-replica setup, those records live only as long as the pod.
 

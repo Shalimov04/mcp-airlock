@@ -16,7 +16,7 @@ from .store import USAGE_RETENTION_S, MemoryStore
 
 
 # A where regex runs on the event loop, so it is matched with RE2, whose time is linear in the value length. Linear
-# is not cheap for every pattern: (.*a){1000} keeps about a thousand NFA threads alive, some 30 us per byte. The
+# is not cheap for every pattern: (.*a){1000} keeps about a thousand NFA threads alive, some 30 us per ASCII character. The
 # cap counts characters but RE2 costs bytes, so it bounds that at about 130 ms for ASCII and about 300 ms for 4-byte
 # characters; a longer value fails the rule. RE2 has no musl wheel, hence an extra.
 REGEX_MAX_CHARS = 4096
