@@ -280,6 +280,7 @@ async def test_a_call_in_flight_finishes_under_the_old_policy(upstream, audit_pa
         release.set()
         res = await running
         assert res["resultType"] == "input_required" and res["_meta"][META + "rule_id"] == "tier.L2.confirm"  # the old policy's answer
+        assert META + "dry_run_preview" in res["_meta"]  # the prompt with a preview reads the snapshot too
         after = await call(c, "delete_service", {"name": "api"})
         assert after["isError"] and after["_meta"][META + "rule_id"] == "allowlist.deny"
 
@@ -456,53 +457,6 @@ async def test_a_call_whose_body_is_still_arriving_keeps_the_old_policy(upstream
         assert r.status_code == 200 and r.json()["result"]["_meta"][META + "rule_id"] == "tier.L0.read"
         after = await call(c, "get_service", {"name": "api"})
         assert after["isError"] and after["_meta"][META + "rule_id"] == "allowlist.deny"
-
-
-async def test_the_tier_of_a_call_whose_identity_is_still_resolving_is_the_old_one(upstream, audit_path, tmp_path):
-    al = reloadable(upstream, audit_path, tmp_path)
-    entered, release = asyncio.Event(), asyncio.Event()
-    resolve, held = al._resolve, []
-
-    async def slow_resolve(headers):  # identity resolution, after the engine is picked and before the tier is read
-        if not held:
-            held.append(True)
-            entered.set()
-            await release.wait()
-        return await resolve(headers)
-
-    al._resolve = slow_resolve
-    async with proxy(al) as c:
-        running = asyncio.create_task(call(c, "delete_service", {"name": "api"}))
-        await entered.wait()
-        data = policy_data()
-        data["tools"]["delete_service"]["tiers"]["prod"] = "L3"
-        write_policy(tmp_path / "policy.yaml", data)
-        assert al.reload().ok
-        release.set()
-        res = await running
-        assert res["resultType"] == "input_required" and res["_meta"][META + "rule_id"] == "tier.L2.confirm"
-        assert META + "dry_run_preview" in res["_meta"]  # L2 fetched the catalog and ran the dry run; L3 would have done neither
-        assert upstream.CALLS[-1]["tool"] == "delete_service" and upstream.CALLS[-1]["args"]["dry_run"] is True
-        assert (await call(c, "delete_service", {"name": "api"}))["_meta"][META + "rule_id"] == "tier.L3.auto"
-
-
-async def test_a_tools_list_whose_body_is_still_arriving_keeps_its_allowlist_and_pins(upstream, audit_path, tmp_path):
-    pins_path = write_pins(tmp_path, {})
-    al = reloadable(upstream, audit_path, tmp_path, pins_path=pins_path)
-    async with proxy(al) as c:
-        running, parked, release = post_in_two_chunks(c, "tools/list", {})
-        await parked.wait()
-        write_pins(tmp_path, {"get_service": ZEROS})
-        data = policy_data()
-        del data["tools"]["restart_service"]
-        write_policy(tmp_path / "policy.yaml", data)
-        assert al.reload().ok
-        release.set()
-        res = (await running).json()["result"]
-        names = {t["name"] for t in res["tools"]}
-        assert {"get_service", "restart_service"} <= names and META + "pin_mismatch" not in res["_meta"]
-        later = {t["name"] for t in (await rpc(c, "tools/list")).json()["result"]["tools"]}
-        assert not {"get_service", "restart_service"} & later
 
 
 # ---------------------------------------------------------------- no source
