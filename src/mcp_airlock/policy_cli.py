@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from . import pins as tool_pins
 from .app import _last_sse_message
-from .policy import REGEX_MAX_CHARS, Policy, regex_unbounded_repeats
+from .policy import Policy
 
 Finding = tuple[str, str, str]  # (level, code, message)
 V = "2026-07-28"
@@ -101,11 +101,6 @@ def lint(policy_path: str | Path, envs=(), env: str | None = None) -> list[Findi
             for env in w.env or ():
                 if env not in known_envs:  # a typo (prd) would make the rule silently inert
                     out.append(("WARN", "where_env_unknown", f"{name} has a where rule for environment {env!r}, which no tier mentions: it never applies"))
-            if w.regex is not None and (n := regex_unbounded_repeats(w.regex)) >= 2:
-                # the exponential and the cubic patterns are a load error; the quadratic ones load and run on the event loop
-                out.append(("WARN", "where_regex_cost", f"{name} has a where regex with {n} unbounded repeats in a row: matching "
-                            f"can take time quadratic in the value length, milliseconds at the cap of {REGEX_MAX_CHARS} chars "
-                            "(a longer value fails the rule)"))
     for env in dict.fromkeys([*envs, p.environment]):
         if not any(env in r.tiers for r in p.tools.values()):
             out.append(("WARN", "env_unused", f"no tool has a tier for environment {env!r}"))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ import httpx
 import pytest
 
 from mcp_airlock import pins, policy_cli
+from mcp_airlock import policy as policy_mod
 
 from . import fake_upstream
 
@@ -188,11 +190,8 @@ def test_main_diff_non_json_upstream_is_an_error_line_not_a_traceback(monkeypatc
     "{arg: name, contains: x}",  # unknown matcher
     "{arg: name, in: [a], optinal: true}",  # unknown key next to a valid matcher
     "{arg: name, regex: '('}",  # invalid regex
-    "{arg: name, regex: '(a+)+$'}",  # exponential backtracking: one call would freeze the proxy
-    "{arg: name, regex: '(a|aa)+'}",
-    "{arg: name, regex: '(a)\\1'}",
-    "{arg: name, regex: '(.*?,){11}P'}",  # a fixed outer count does not help
-    "{arg: name, regex: '.*-.*-.*-prod'}",  # cubic: seconds within the length cap
+    "{arg: name, regex: '(a)\\1'}",  # RE2 has no backreferences
+    "{arg: name, regex: '(?=a)a'}",  # nor lookaround
     "{arg: name, in: [a], regex: 'a'}",  # two matchers
     "{arg: name}",  # no matcher
     "{arg: name, in: []}",  # would deny every value
@@ -214,14 +213,23 @@ def test_lint_accepts_a_good_where_rule(tmp_path):
     assert codes(f, "ERROR") == []
 
 
-def test_lint_warns_about_a_quadratic_regex(tmp_path):
-    # b: each repeat stops at a slash it cannot take; c: one repeat; d: the inner repeat is not counted
+def test_lint_has_no_regex_cost_warning_any_more(tmp_path):
+    # RE2 runs these in linear time; the old heuristic refused the first two and warned about the third
     f = policy_cli.lint(write(tmp_path, "  x:\n    description: d\n    tiers: {prod: L0}\n"
-                                        "    where: [{arg: a, regex: '.*-.*-prod'}, {arg: b, regex: '[^/]+/[^/]+/[^/]+'}, "
-                                        "{arg: c, regex: 'tmp-.*'}, {arg: d, regex: '(\\.[a-z]+)*'}, {arg: e, regex: 'a.*b.*c'}]\n"))
-    warns = [m for lvl, c, m in f if c == "where_regex_cost" and lvl == "WARN"]
-    assert len(warns) == 2 and all("2 unbounded" in w and "1024 chars" in w for w in warns)
-    assert codes(f, "ERROR") == []  # a warning: the length cap bounds these at milliseconds, unlike three or more
+                                        "    where: [{arg: a, regex: '(a+)+$'}, {arg: b, regex: '.*-.*-.*-prod'}, "
+                                        "{arg: c, regex: '.*-.*-prod'}]\n"))
+    assert f == []
+
+
+def test_lint_rejects_a_regex_without_the_extra(tmp_path, monkeypatch):
+    policy_mod._regex.cache_clear()
+    monkeypatch.setitem(sys.modules, "re2", None)  # import re2 raises ImportError
+    try:
+        f = policy_cli.lint(write(tmp_path, "  x:\n    description: d\n    tiers: {prod: L0}\n"
+                                            "    where: [{arg: a, regex: 'tmp-.*'}]\n"))
+    finally:
+        policy_mod._regex.cache_clear()
+    assert codes(f) == ["invalid"] and f[0][0] == "ERROR" and "install mcp-airlock[regex]" in f[0][2]
 
 
 def test_lint_where_env_unknown_warns_once_per_rule_and_name(tmp_path):

@@ -8,9 +8,9 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-`--all-extras` installs the `postgres` and `otlp` extras; without the `otlp` one the OTLP tests
-are skipped. Set `AIRLOCK_TEST_PG_DSN` to a Postgres DSN to also run the Postgres tests (without
-it they are skipped):
+`--all-extras` installs the `postgres`, `otlp` and `regex` extras; without the `otlp` one the
+OTLP tests are skipped. Set `AIRLOCK_TEST_PG_DSN` to a Postgres DSN to also run the Postgres
+tests (without it they are skipped):
 
 ```
 docker run -d -e POSTGRES_PASSWORD=airlock -e POSTGRES_USER=airlock -p 5432:5432 postgres:16-alpine

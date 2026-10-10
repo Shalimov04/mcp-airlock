@@ -5,7 +5,7 @@ WORKDIR /app
 ENV UV_COMPILE_BYTECODE=1
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable --extra postgres --extra otlp
+RUN uv sync --frozen --no-dev --no-editable --extra postgres --extra otlp --extra regex
 
 FROM python:3.12-slim-bookworm
 COPY --from=build /app/.venv /app/.venv
