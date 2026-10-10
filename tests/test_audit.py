@@ -1126,13 +1126,47 @@ def test_verify_ok_output(tmp_path, capsys):
     assert verify_cli(capsys, path) == (0, f"OK: 5 records in 1 files, chain from {GENESIS} to {rows[-1]['hash']}", "")
 
 
-def test_verify_catches_an_edited_line(tmp_path, capsys):
-    path = chained(tmp_path / "a.jsonl")
-    ls = lines_of(path)
+def edit_tool(ls):
     ls[2] = ls[2].replace('"tool": "get_service"', '"tool": "get_servicf"')
-    assert ls[2] != lines_of(path)[2]
+
+
+def forge_tool(ls):  # the forger fixes the line's own hash but not the next record's prev
+    row = json.loads(ls[2])
+    row["tool"] = "other"
+    row["hash"] = row_hash(row)
+    ls[2] = json.dumps(row, ensure_ascii=False)
+
+
+def edit_tool_past_blank(ls):
+    edit_tool(ls)
+    ls.insert(2, "")  # the edited line is now line 4
+
+
+def swap_pair(ls):
+    ls[2], ls[3] = ls[3], ls[2]
+
+
+def duplicate_key(ls):  # the hash still matches: json.loads keeps the last value
+    ls[1] = ls[1].replace('"principal": "alice"', '"principal": "alice", "principal": "mallory"', 1)
+
+
+@pytest.mark.parametrize("n, tamper, line, reason", [
+    (5, edit_tool, 3, "hash mismatch"),
+    (5, forge_tool, 4, "prev mismatch"),
+    (5, lambda ls: ls.pop(2), 3, "prev mismatch"),
+    (5, swap_pair, 3, "prev mismatch"),
+    (5, lambda ls: ls.__setitem__(1, ls[1][:40]), 2, "not JSON"),
+    (3, duplicate_key, 2, "not JSON"),
+    (5, edit_tool_past_blank, 4, "hash mismatch"),  # the physical line number, blank lines counted
+], ids=["edited", "edited-and-rehashed", "deleted", "reordered", "truncated", "duplicate-key", "past-a-blank-line"])
+def test_verify_reports_the_tampered_line(tmp_path, capsys, n, tamper, line, reason):
+    path = chained(tmp_path / "a.jsonl", n)
+    orig = lines_of(path)
+    ls = list(orig)
+    tamper(ls)
+    assert ls != orig
     path.write_text("\n".join(ls) + "\n")
-    assert verify_cli(capsys, path) == (1, f"BREAK: {path}:3: hash mismatch", "")
+    assert verify_cli(capsys, path) == (1, f"BREAK: {path}:{line}: {reason}", "")
 
 
 @pytest.mark.parametrize("tool", [b'"\\ud800"', b'"\xed\xa0\x80"'])  # a lone surrogate as a JSON escape and as raw bytes
@@ -1142,39 +1176,8 @@ def test_verify_reports_a_lone_surrogate_as_an_edited_line(tmp_path, capsys, too
     assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:1: hash mismatch")
 
 
-def test_verify_catches_an_edited_line_whose_hash_was_recomputed(tmp_path, capsys):
-    path = chained(tmp_path / "a.jsonl")
-    ls = lines_of(path)
-    row = json.loads(ls[2])
-    row["tool"] = "other"
-    row["hash"] = row_hash(row)  # the forger fixes the line's own hash but not the next record's prev
-    ls[2] = json.dumps(row, ensure_ascii=False)
-    path.write_text("\n".join(ls) + "\n")
-    assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:4: prev mismatch")
-
-
-def test_verify_catches_a_deleted_line(tmp_path, capsys):
-    path = chained(tmp_path / "a.jsonl")
-    ls = lines_of(path)
-    del ls[2]
-    path.write_text("\n".join(ls) + "\n")
-    assert verify_cli(capsys, path) == (1, f"BREAK: {path}:3: prev mismatch", "")
-
-
-def test_verify_catches_a_reordered_pair(tmp_path, capsys):
-    path = chained(tmp_path / "a.jsonl")
-    ls = lines_of(path)
-    ls[2], ls[3] = ls[3], ls[2]
-    path.write_text("\n".join(ls) + "\n")
-    assert verify_cli(capsys, path) == (1, f"BREAK: {path}:3: prev mismatch", "")
-
-
-def test_verify_catches_a_line_that_is_not_json(tmp_path, capsys):
-    path = chained(tmp_path / "a.jsonl")
-    ls = lines_of(path)
-    ls[1] = ls[1][:40]
-    path.write_text("\n".join(ls) + "\n")
-    assert verify_cli(capsys, path) == (1, f"BREAK: {path}:2: not JSON", "")
+def test_verify_reports_a_file_that_is_not_utf8_as_not_json(tmp_path, capsys):
+    path = tmp_path / "a.jsonl"
     path.write_bytes(b"\xff\xfe\n")
     assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:1: not JSON")
 
@@ -1226,15 +1229,6 @@ def test_verify_accepts_a_legacy_prefix_followed_by_a_genesis_record(tmp_path, c
                                            "2 unchained records skipped", "")
 
 
-def test_verify_rejects_a_duplicate_key(tmp_path, capsys):
-    path = chained(tmp_path / "a.jsonl", 3)
-    ls = lines_of(path)
-    ls[1] = ls[1].replace('"principal": "alice"', '"principal": "alice", "principal": "mallory"', 1)  # the hash still matches: json.loads keeps the last value
-    assert ls[1] != lines_of(path)[1]
-    path.write_text("\n".join(ls) + "\n")
-    assert verify_cli(capsys, path) == (1, f"BREAK: {path}:2: not JSON", "")
-
-
 @pytest.mark.parametrize("edit", [lambda r: r.pop("prev"), lambda r: r.update(prev=None), lambda r: r.update(prev=7)])
 def test_verify_reports_a_hashed_record_without_a_string_prev_as_a_prev_mismatch(tmp_path, capsys, edit):
     path = chained(tmp_path / "a.jsonl", 2)
@@ -1249,14 +1243,6 @@ def test_verify_reports_a_hashed_record_without_a_string_prev_as_a_prev_mismatch
     assert verify_cli(capsys, path) == (1, f"BREAK: {path}:1: prev mismatch", "")  # never "chain from None"
     path.write_text("\n".join([orig[0], ls[1]]) + "\n")  # the first record is fine, the second has no prev
     assert verify_cli(capsys, path)[:2] == (1, f"BREAK: {path}:2: prev mismatch")
-
-
-def test_verify_reports_the_physical_line_number_past_a_blank_line(tmp_path, capsys):
-    path = chained(tmp_path / "a.jsonl")
-    ls = lines_of(path)
-    ls[2] = ls[2].replace('"tool": "get_service"', '"tool": "get_servicf"')
-    path.write_text("\n".join([*ls[:2], "", *ls[2:]]) + "\n")  # the edited line is now line 4
-    assert verify_cli(capsys, path) == (1, f"BREAK: {path}:4: hash mismatch", "")
 
 
 def test_verify_checks_the_first_record_only_for_its_own_hash(tmp_path, capsys):
