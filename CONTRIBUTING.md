@@ -32,9 +32,9 @@ and `examples/spans.jsonl`; do not commit those unless the change is the point.
   lines and runs the probe command.
 * A change under `.github/workflows/` keeps `tests/test_workflows.py` green: it parses every
   workflow file and runs the release chart `appVersion` check against the tree.
-* Update the docs in the same pull request: `README.md` and `README.ru.md` together, section by
-  section (the Russian one is natural Russian prose, not a word-for-word calque), the env var and
-  flag tables when a variable or flag changes, `charts/mcp-airlock/values.yaml` comments when a
+* Update the docs in the same pull request. `README.md` is the full documentation, with the env var
+  and flag tables. `README.ru.md` is a short overview, updated only when what it says changes (the
+  features, the quick start, the image tag). Also `charts/mcp-airlock/values.yaml` comments when a
   value changes, `docs/clients.md` when the client-facing behaviour changes, and a line under
   `Unreleased` in `CHANGELOG.md`.
 * CI runs the suite on Python 3.11 to 3.13, against the lowest and newest allowed dependency
@@ -43,7 +43,8 @@ and `examples/spans.jsonl`; do not commit those unless the change is the point.
 ## Style
 
 * Keep comments short and about why, not what.
-* Plain ASCII punctuation in code and docs: no em-dashes, no arrows, no smart quotes.
+* Plain ASCII punctuation in code and English docs: no em-dashes, no arrows, no smart quotes.
+  `README.ru.md` is Russian prose and uses — and «».
 * Docs: lines wrapped at about 100 columns (tables and commands may run longer), short sentences,
   no marketing tone. Say what the proxy does and what it does not.
 * Commit messages: an imperative subject line, then a wrapped body that says what changed and why.
@@ -53,7 +54,7 @@ and `examples/spans.jsonl`; do not commit those unless the change is the point.
 A release is a tag `vX.Y.Z` on `main`. Before tagging, bump the version in `pyproject.toml`,
 `server.json` (both `version` fields) and `appVersion` in `charts/mcp-airlock/Chart.yaml`, move
 the `Unreleased` section of `CHANGELOG.md` under the new version, and update the image tag in the
-`docker run` examples of both `README.md` and `README.ru.md` (`:X.Y`). The release workflow checks
+`docker run` examples of `README.md` and `README.ru.md` (`:X.Y`). The release workflow checks
 the three versions and the two README image tags against the tag (`scripts/check_image_tag.sh`),
 runs the tests, publishes to PyPI and pushes the image to ghcr.io tagged `X.Y.Z` and `X.Y`.
 

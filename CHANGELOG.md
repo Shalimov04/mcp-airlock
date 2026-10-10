@@ -2,281 +2,147 @@
 
 ## Unreleased
 
-### Changed
+### Breaking
 
-* A confirmation token from before 0.3.0 (no approval mode in it) counts as `oob`: an inband
-  replica no longer accepts it in-band, so it stays pending until approved by link or it expires
-  (10 minutes).
-* **Breaking: `where` regexes use RE2.** A `where` regex could freeze the proxy: one
-  `get_service` call with a 32-character name blocked the event loop, `/healthz` and `SIGTERM`
-  for over a minute. A `regex` rule is now matched with google-re2, in time linear in the value
-  length, and only on strings up to 4096 characters; a longer value fails the rule (RE2's worst
-  case, `(.*a){1000}`, is about 30 us per character, so about 130 ms at the cap). It needs the
-  new `regex` extra (`pip install 'mcp-airlock[regex]'`, included in the image); a policy with a
-  `regex` rule does not load without it and says so. Patterns 0.3.0 accepted that now fail to
-  load (a startup error, `ERROR invalid` in `airlock-policy lint`, a `SIGHUP` reload keeps the
-  current policy): lookahead and lookbehind, backreferences (`\1`, `(?P=name)`), possessive and
-  atomic groups, `\Z` (write `\z`), `\uXXXX` (write `\x{41}`), `\N{...}`, `(?x)`, `(?#...)`,
-  `(?a)`, `(?u)` and a counted repeat above 1000, nested counts multiplied. `a{,3}` still loads
-  but now means the literal text (write `a{0,3}`). Matching changes both ways: `\w`, `\d`, `\s`
-  and `\b` are ASCII-only, so they deny more (`\w+` no longer matches `привет`; use `\pL`), while
-  `\W`, `\D`, `\S` and `\B` match non-ASCII characters and admit more (`\W+` now matches
-  `привет`). A value with a lone surrogate fails a `regex` rule. This replaces the unreleased cost
-  check over Python's private regex parser and the `where_regex_cost` lint warning (#74).
-* The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) that opens on
-  first use and closes at shutdown, instead of a connection per call. The `postgres` extra now
-  includes psycopg-pool. A failed connect is given up after the connect timeout, so the store
-  recovers within seconds of the database coming back. A store call waits for a pooled connection no
-  longer than the connect timeout in the final DSN, work on a connection is cut off after the same
-  time (a server that stops answering cannot hang a call), and a call after shutdown is refused. A
-  policy that fails validation, a bad DSN or a bad store setting exits with an error message instead
-  of a traceback.
+* **`where` regexes use RE2.** A `where` regex could freeze the proxy: one `get_service` call with
+  a 32-character name blocked the event loop, `/healthz` and `SIGTERM` for over a minute. A `regex`
+  rule is now matched with google-re2, in time linear in the value length, and only on strings up
+  to 4096 characters; a longer value fails the rule (fails closed). google-re2 is the optional
+  extra `regex` (`pip install 'mcp-airlock[regex]'`, included in the Docker image); a policy with
+  a `regex` rule does not load without it and says so.
+  * Patterns 0.3.0 accepted can now fail to load (a startup error, `ERROR invalid` in
+    `airlock-policy lint`, a `SIGHUP` reload keeps the current policy): lookahead and lookbehind,
+    backreferences, possessive and atomic groups, `\Z` (write `\z`), `\uXXXX` (write `\x{41}`),
+    `\N{...}`, `(?x)`, `(?#...)`, `(?a)`, `(?u)` and a counted repeat above 1000. `a{,3}` loads but
+    means the literal text (write `a{0,3}`).
+  * Matching changes both ways: `\w`, `\d`, `\s` and `\b` are ASCII-only, so they deny more
+    (`\w+` no longer matches `привет`; use `\pL`), while `\W`, `\D`, `\S` and `\B` match non-ASCII
+    characters and admit more (`\W+` now matches `привет`). A value with a lone surrogate fails a
+    `regex` rule.
 * **Pin format.** The tool pin hash now covers `title`, and pins are written as `sha256v2:<hex>`.
-  A pins file in the old `sha256:` format is refused: `mcp-airlock` stops at startup, `airlock-policy
-  diff --pins` reports it once, and a `SIGHUP` reload keeps the current pins. Run `airlock-policy
-  pin` again to rewrite the file. The `catalog.pin_mismatch` audit detail and the `diff` message now
-  read "definition changed since it was pinned". Icons and `_meta` are deliberately not covered.
-* **Titles in the guard.** The `tools/list` scan for injection phrases now also reads the tool
-  `title` and `annotations.title`, not only the description; a hit is marked in `_meta` as before.
-* **Upstream failures.** An unreachable upstream, a compressed answer or a reply that is not a
-  JSON-RPC object used to come back as a synthetic 502 audited as `allow` with no detail. A tool
-  call now gets a tool error with rule `upstream.unreachable`, `upstream.encoded` or
-  `upstream.bad_reply`, saying whether the call may have run, with verdict `error` in `_meta`
-  (`upstream.too_large` too), and the outcome record says `error` with the reason. When the
-  connection itself failed, the blast-radius charge is given back, stamped with the charge's own
-  time so the two leave the window together; the key of a confirmed `L2` call stays burned and
-  the error says to ask again. `tools/list` and `server/discover` still answer 502.
-* An SSE answer is reduced to the response carrying the call's id. A stream with only
-  notifications, a server-to-client request or a response to another id used to be passed back as
-  the answer (HTTP 200, `id: null`), on which the official SDK client hangs; it is now
-  `upstream.bad_reply`. `airlock-policy diff` refuses such a catalog too.
-* `--otel-file` writes JSON Lines, one span per line, instead of indented multi-line JSON that
-  no line-by-line reader could parse. `examples/spans.jsonl` is regenerated in the new format.
-* `airlock-policy diff` and `pin` read `AIRLOCK_ENV` when `--env` is not given, as the proxy does.
-  In a shell that has `AIRLOCK_ENV` set, `diff` now checks that environment's tier column instead
-  of the policy's own, and both commands accept a policy without `environment`. The pins `pin`
-  writes do not depend on the environment.
+  A pins file in the old `sha256:` format is refused: `mcp-airlock` stops at startup,
+  `airlock-policy diff --pins` reports it, and a `SIGHUP` reload keeps the current pins. Run
+  `airlock-policy pin` again. Icons and `_meta` are deliberately not covered.
+* The Python `Airlock` class no longer takes the legacy `trust_principal_header` and `jwt_secret`
+  arguments; pass an `IdentityConfig`.
 
 ### Added
 
 * OTLP span export over HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` or
-  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set. It is the `otlp` extra and the container image
-  includes it. Queued spans are flushed on shutdown, and a missing extra is a startup warning
-  (an error under `--strict`), not an exit (thanks @HarshRajSinghania, #4).
-* Helm chart in `charts/mcp-airlock/`: Deployment, Service, a ConfigMap for the policy, the keys in
-  a Secret, a hardened security context and probes on `/healthz` and `/readyz`. It refuses more
-  than one replica without a shared store, uses `Recreate` with a persistent `dataVolume` so two
-  pods never share one audit hash chain, and refuses such a volume with several replicas.
-* `docs/clients.md` has a table of MCP clients and whether they handle the `input_required`
-  confirmation (#22). The Python SDK client 2.2.0 and 2.3.0 are tested
-  (`examples/sdk_client_confirm.py`, `tests/test_sdk_client.py`); Claude Code, Cursor and the
-  TypeScript SDK are not tested yet.
-* `HEALTHCHECK` in the container image and the demo image: python asks `/healthz` on port 9000,
-  bypassing any `HTTP_PROXY`. e2e services that reuse the image for something else probe their
-  own port or disable it.
-* Helm: `OTEL_EXPORTER_OTLP_HEADERS` is read from `existingSecret` like the other credentials and
-  refused in `env`; new `extraEnv` (with `valueFrom`) and `envFrom` values take entries from a
-  Secret or ConfigMap of your own. An `extraEnv` name that is also in `env`, or that is
-  `AIRLOCK_STORE_DSN` or `AIRLOCK_SECRET` with `sharedStore`, is refused at render time instead
-  of being set twice in the container, which server-side apply rejects.
-* Helm: the pod sleeps `preStopSeconds` (5) before shutting down, so a rolling update, including
-  every policy change, no longer refuses connections; `terminationGracePeriodSeconds` (30) is set
-  for the sleep, the open calls and the OTLP flush. The sleep on a cluster older than 1.30 (set
-  `preStopSeconds=0` there) is refused with a chart message. A new `values.schema.json` refuses a
-  fraction, a negative number or a non-number in these and `replicaCount`, a map, list or `null`
-  in `env` and `extraArgs` (a `null` rendered as an empty value before), and a non-string
-  `extraEnv` value.
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set (the `otlp` extra, included in the image). Spans are
+  flushed on shutdown; a missing extra is a startup warning, an error under `--strict` (thanks
+  @HarshRajSinghania, #4). `OTEL_SERVICE_NAME` and `service.name` are honoured.
+* Helm chart in `charts/mcp-airlock/`: Deployment, Service, policy ConfigMap, a Secret for the keys,
+  hardened security context, probes on `/healthz` and `/readyz`. It refuses several replicas without
+  a shared store, uses `Recreate` with a persistent `dataVolume` so two pods never share one audit
+  chain, sleeps `preStopSeconds` (5) before shutdown so a rolling update refuses no connections, and
+  refuses credentials such as `OTEL_EXPORTER_OTLP_HEADERS` in `env` (they go in `existingSecret`,
+  `extraEnv` or `envFrom`). A `values.schema.json` rejects wrong types (a fraction or a `null` in
+  `env`, for example).
+* The Postgres store uses a connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4; the `postgres`
+  extra now includes psycopg-pool). Store and audit connections get a 10 second connect timeout
+  (`AIRLOCK_STORE_CONNECT_TIMEOUT`), `tcp_user_timeout` and TCP keepalives, and server-side
+  `statement_timeout` and `lock_timeout`, so a black-holed database no longer stalls gated calls for
+  minutes or leaves backends behind. A store that does not answer denies the gated call with rule
+  `store.unavailable` (it was an HTTP 500 with no intent record). The tables are created again if
+  the database is recreated empty (confirmation keys already used are forgotten then), and `/readyz`
+  is 503 until they exist.
+* `HEALTHCHECK` in the container images (python asks `/healthz`, ignoring `HTTP_PROXY`).
+* `docs/clients.md` lists which MCP clients handle the `input_required` confirmation (#22); the
+  Python SDK client 2.2.0 and 2.3.0 are tested.
+* The `tools/list` scan for injection phrases also reads the tool `title` and `annotations.title`.
+* `airlock-audit query` reads the rotated files too, oldest first.
+* Startup warnings (errors under `--strict`) for `AIRLOCK_SECRET` without `AIRLOCK_STORE_DSN` (a
+  fixed key with the memory store let a confirmed call run again on another replica or after a
+  restart), for an approval webhook that is not an `http(s)` URL, and for a Telegram URL and chat id
+  that do not go together.
+
+### Changed
+
+* **Upstream failures.** An unreachable upstream, a compressed answer or a reply that is not a
+  JSON-RPC object used to come back as a synthetic 502 audited as `allow`. A tool call now gets a
+  tool error with rule `upstream.unreachable`, `upstream.encoded`, `upstream.bad_reply` or
+  `upstream.too_large`, verdict `error`, saying whether the call may have run. When the connection
+  itself failed the blast-radius charge is given back; a confirmed `L2` key stays burned and the
+  agent asks again. `tools/list` and `server/discover` still answer 502.
+* An SSE answer is reduced to the response carrying the call's id; a stream without it is
+  `upstream.bad_reply` (the official SDK client used to hang on it).
+* The request and the upstream answer must be strict JSON: `NaN`, `Infinity`, numbers that
+  overflow a double (`1e400`) and nesting over 64 levels are refused (`-32700` or `-32600` for the
+  request, `upstream.bad_reply` for the answer) instead of being forwarded and breaking the audit.
+* `--otel-file` writes JSON Lines, one span per line. `airlock-policy diff` and `pin` read
+  `AIRLOCK_ENV` when `--env` is not given, as the proxy does.
+* `mcp-airlock`, `airlock-policy` and `airlock-audit` report a missing or invalid policy, an
+  unopenable file, a bad DSN or setting and an unreachable Postgres as one line instead of a
+  traceback (`AIRLOCK_DEBUG=1` keeps it). Credentials from a DSN are blanked in those messages.
+* The Postgres audit sink is a mirror of the file: the same `prev` and `hash`, written from a
+  worker thread through a bounded queue (1000 records, about 32 MiB). A record that fails or finds
+  the queue full is dropped from the table with a warning; the JSONL file keeps it and is the one
+  to verify. The table's `intent` row can land after the upstream call; the file's is still written
+  first. At shutdown the queue is drained for about the connect timeout, then the rest is dropped
+  and counted in the log. The table is created under the store's advisory lock, so replicas
+  starting together lose no records.
+* A confirmation token from before 0.3.0 (no approval mode in it) counts as `oob`: an inband
+  replica no longer accepts it in-band, so it stays pending until approved by link or it expires
+  (10 minutes).
 
 ### Fixed
 
-* With `AIRLOCK_AUDIT_DSN` set, a failed write to `audit.jsonl` (a full disk, EIO) was logged and
-  the call was forwarded with no intent record in the file. The intent write now fails closed, as
-  it does without the DSN: the Postgres table still gets the record and the `internal.error`
-  outcome, and the caller gets an error.
-* The release workflow file was invalid YAML since the chart `appVersion` check was added (a `: `
-  inside an unquoted `run:` line), so GitHub flagged every push and a `v*` tag would not have
-  released. The step is a block scalar now, and `tests/test_workflows.py` parses every workflow
-  file.
-* An OTLP timeout that is not a number or a compression other than `none`, `gzip` or `deflate`
-  (`OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION` or their `TRACES_` forms) stops
-  the start with one error line again. OpenTelemetry 1.45 logs such a value and exports with its
-  default instead of raising, so the proxy now checks both variables itself.
-* The nightly Postgres e2e stack failed on every run since the image got its `HEALTHCHECK`:
-  compose 2.x on the GitHub runner refuses `up --wait` on a running container whose image check
-  was turned off (`has no healthcheck configured`), which the e2e MCP service and webhook were.
-  They probe their own port now, and `e2e/postgres/run.sh` prints why a failed `up` failed.
-* An L2 call whose dry-run preview was longer than `output.max_chars` and carried
-  `structuredContent` came back as a truncated error result instead of a confirmation prompt: the
-  cap marked the preview `isError` to detach it from the tool's outputSchema, and the gate read
-  that flag as a failed dry run. The prompt is now issued from the trimmed preview (its `_meta`
-  carries the cap numbers), only the upstream's own `isError` skips it (the outcome record then
-  has `detail.no_prompt`), and the truncation note on a dry run says that nothing was executed.
-* The release workflow fails when the image tag in the `docker run` examples of `README.md` and
-  `README.ru.md` is not the tag's major.minor (`scripts/check_image_tag.sh`).
-* Helm: a whole number from a values file (`env.AIRLOCK_MAX_REQUEST_BYTES: 104857600`, or in
-  `extraArgs`) rendered as `1.048576e+08` and crash-looped the pod; it now renders as `104857600`.
-* The container images compile bytecode at build time (`UV_COMPILE_BYTECODE=1` for the venv,
-  `compileall` for the standard library, which the slim base image ships without `.pyc`); the
-  filesystem is read-only at run time, so no `.pyc` could ever be written and every start paid
-  the import cost.
-* `policy.example.yaml` no longer tells approvers that `restart_service` is refused at L2: a tool
-  without `dry_run` is refused at L1 and confirmed without a preview at L2.
-* The README `docker run` example adds `--add-host=host.docker.internal:host-gateway`, without
-  which Docker Engine on Linux cannot resolve the upstream host.
-* `docs/clients.md`: the `claude mcp add` command gets `--scope user`; without it the server is
-  registered for the current project only.
-* `AIRLOCK_SECRET` without `AIRLOCK_STORE_DSN` is a startup warning (an error under `--strict`):
-  the memory store remembers a used confirmation only in its own process, so a fixed key let a
-  confirmed call run again on a second replica or after a restart. The README told you to set
-  the key for replicas without saying that it needs the shared store.
-* A store query that waited on a lock kept its server backend after the client gave up on it, so
-  one replica could use up `max_connections`. Pooled connections now get `statement_timeout` and
-  `lock_timeout` just under the connect timeout in force, and a cut connection also sends a cancel
-  request (with libpq 17 or newer), so a replica is meant to hold no more than its pool size of
-  backends.
-* The Postgres store creates its tables again when they are gone (a database recreated empty)
-  instead of failing every gated call with 500 until a restart, and `/readyz` checks that they
-  exist and reports 503 while they cannot be created. Confirmation keys already used are
-  forgotten when the tables are recreated.
-* A torn last line in `audit.jsonl` (a crash or a full disk cut a record short) no longer makes
-  every later `airlock-audit verify` fail with `not JSON`: at startup the proxy moves the fragment
-  to `audit.jsonl.torn`, cuts the file back to the last newline and logs a warning, and a short
-  write it notices itself is cut back at once. A line an older version already kept this way still
-  fails `verify`; deleting that line by hand restores the chain, since the record after it chains
-  to the one before.
-* `airlock-audit query` no longer dies with a JSONDecodeError on a record whose argument holds
-  U+2028, U+2029, U+0085 or a few control characters (it split the file the way `str.splitlines`
-  does), nor on a torn line: such a line is skipped with `airlock-audit: skipped <file>:<n>: not
-  JSON` (or `not a record`, for JSON that is not an object) on stderr and the rest of the log is
-  read.
-* `airlock-audit query` prints one `airlock-audit: ...` line and exits 1, instead of a traceback,
-  for a missing file, a DSN that does not parse (the old traceback quoted part of it, password
-  included), an unreachable Postgres or a missing `postgres` extra. A Postgres error keeps
-  libpq's words, but every value from the DSN other than a number or a setting such as `sslmode`
-  (host, socket path, user, database, password) is blanked to `"..."`, quoted by libpq or not: a
-  URI password with an unescaped `@` is parsed with its tail as the host, which libpq's text used
-  to show. The Postgres connect has the proxy's connect timeout; `--since 99999999999d` is a
-  usage error instead of an OverflowError; `--limit` must not be negative (a negative value used to
-  drop the oldest N records).
-* `mcp-airlock` exits with one `mcp-airlock: <message>` line instead of a traceback when the policy
-  file is missing, is not YAML or is not a YAML mapping (a list or a string, which with `--env` used
-  to be a `TypeError`), the audit or span file cannot be opened, or an `OTEL_*` setting is rejected
-  by the SDK; `--port` outside 0-65535 is refused by the argument parser. A YAML syntax error or a
-  validation error is one line too, starting with the policy path, instead of PyYAML's caret
-  diagram or pydantic's block per error. `AIRLOCK_DEBUG=1` keeps the traceback.
-* `airlock-policy diff` and `pin` report a missing, unparsable or invalid policy (a list or a string
-  at the top level included) as `ERROR invalid`, like `lint`, and a `tools/list` answer that is not
-  an MCP result as `ERROR upstream`, instead of a traceback; validation errors are no longer
-  labelled `upstream`. In all three commands a YAML syntax or validation error is one `ERROR
-  invalid` line starting with the policy path, like every other finding.
-* `airlock-policy lint` accepts a policy without `environment` when `--env` or `AIRLOCK_ENV` names
-  one, as the proxy does. Without either, the error also lists the file's other validation errors
-  instead of hiding them until the environment is fixed.
-* The Postgres audit sink writes from a worker thread through a bounded queue (1000 records, about
-  32 MiB of serialized rows), and the connection gets a `statement_timeout` and `lock_timeout`
-  equal to the connect timeout. An audit database that was paused, locked or black-holed used to
-  stall every request, `/healthz` and SIGTERM for as long as it stayed silent. A record that
-  fails or finds the queue full is dropped from the table with a warning; the JSONL file keeps
-  it, for as long as that file lives. A server that stops answering altogether holds the worker
-  until it answers again, and the queue drops records meanwhile. The
-  table's `intent` row can now land after the upstream call; the file's is still written before.
-  At shutdown the sink drains its queue off the event loop for at most about the connect timeout
-  plus 2 s (capped at 15 s) and logs how many records it left out.
-* The audit table is created under the store's advisory lock, so replicas starting together on an
-  empty database no longer fail the DDL and lose their first audit records.
-* A NUL character in client text no longer keeps the record out of the Postgres audit table; it is
-  stored as U+FFFD in both sinks, like a lone surrogate.
-* A `NaN` or an infinity that reaches the audit (the request parser now refuses them, see below)
-  is written to both sinks as the string `"NaN"`, `"Infinity"` or `"-Infinity"`. It used to make
-  the `audit.jsonl` line non-standard JSON and was refused by the Postgres sink, which left the
-  call out of the table.
-* Credentials inside longer argument strings (a key in a note or a command line) and in argument
-  keys are redacted in the audit `args` and in the Arguments line shown to approvers, where the
-  dry-run preview next to it was already scrubbed. A pattern is matched only at the start of a
-  word or right after a literal `\n`, `\r` or `\t` escape, so a hyphenated name such as
-  `disk-cleanup-prod` is kept. Two keys that scrub to the same text stay two arguments
-  (`[REDACTED]`, `[REDACTED]#2`) instead of one overwriting the other.
-* The `principal`, `method` and `tool` audit fields and the keys in `detail` are scrubbed like the
-  free text in `detail`, so a key sent as the tool name is no longer stored in clear next to a
-  redacted detail.
-* The Postgres store and audit sink now connect with a 10 second `connect_timeout` (override with
-  `AIRLOCK_STORE_CONNECT_TIMEOUT`, at most 86400, or set it in the DSN), plus `tcp_user_timeout`
-  (the same value) and TCP keepalives unless the DSN sets them. A black-holed database host used to
-  stall every gated call for about two minutes. A `service=` DSN is left unchanged.
-* A lone surrogate in client text (JSON allows `"\ud800"`) no longer breaks the audit write; it is
-  stored as U+FFFD.
-* `airlock-audit query` reads the rotated files too, oldest first.
-* A lone surrogate in the request id, in an upstream answer (a result, an error, an SSE frame or a
-  tool description) or in the arguments of an `L2` call no longer turns the response into a bare
-  HTTP 500 after the upstream already acted. The answer is sent with the JSON escape, the approval
-  prompt and the webhook text carry U+FFFD, and the call keeps one outcome record.
-* `NaN`, `Infinity` and numbers that overflow a double (`1e400`) in the request body are refused
-  with a parse error instead of being forwarded, written to `audit.jsonl` as non-JSON and dropped
-  by the Postgres sink. A body nested deeper than 64 levels is refused with `-32600`; one too deep
-  to parse at all is a parse error. Both used to be an unaudited bare 500.
-* The upstream's answer is read with the same strictness: a reply or an SSE frame holding `NaN`
-  (what Python's `json.dumps` emits for a NaN float), `Infinity` or `1e400`, or nested too deep to
-  parse, is `upstream.bad_reply`. It used to be an HTTP 500 after the call ran, with a second
-  outcome record `internal.error` next to the `allow`.
-* `io.mcp-airlock/*` keys that the upstream puts into a result's `_meta`, into a content block's,
-  into the dry-run preview or into a `tools/list` answer and each tool in it are removed before
-  the proxy adds its own. An upstream could otherwise show the client `status: approved`, an
-  empty `suspicious` list or another principal.
+* **Audit.** With `AIRLOCK_AUDIT_DSN` set, a failed write to `audit.jsonl` (a full disk, EIO) was
+  logged and the call forwarded with no intent record in the file. The intent write now fails
+  closed, as it does without the DSN: the table still gets the record and the `internal.error`
+  outcome, and the caller gets an error (#79, #80).
+* A torn last line in `audit.jsonl` no longer makes every later `airlock-audit verify` fail: at
+  startup the proxy moves the fragment to `audit.jsonl.torn` and cuts the file back to the last
+  newline. A torn line an older version kept still fails `verify`; delete it by hand.
+* `airlock-audit query` no longer dies on a record containing U+2028, U+2029 or U+0085, or on a
+  torn line (it is skipped with a note on stderr), and `--limit` rejects a negative value.
+* A lone surrogate or NUL in client text, a `NaN` and an infinity no longer break the audit write
+  or turn a response into a bare HTTP 500 after the upstream acted; they are stored as U+FFFD or as
+  a string, the same in both sinks.
+* **Redaction.** Credentials inside longer argument strings and in argument keys are redacted in
+  the audit `args` and in the arguments shown to approvers, matched only at the start of a word so
+  `disk-cleanup-prod` is kept. The `principal`, `method` and `tool` fields, the keys in `detail` and
+  span attributes with client text are scrubbed too.
 * A request refused before it has a principal is audited without its arguments, and its `method`
-  and `tool` are cut at 128 characters. Two records of up to the request limit each let an
-  unauthenticated client fill the disk or, with rotation on, push the whole real history out of
-  the kept files; a 900 KB tool name did the same through the two name fields.
-* The `airlock.*` span attributes follow the outcome record. A blocked replay, a decline, a
-  `catalog.unavailable` denial or an upstream failure used to leave the span saying what the first
-  decision was (or nothing at all); a span whose verdict is `error` now also has status `ERROR`.
-* A `traceparent`, `tracestate` or `baggage` in `_meta` that is not a string is ignored and a new
-  trace is started, instead of an unaudited bare 500 for any caller. `traceparent` and
-  `tracestate` are rebuilt from the span's context before the call is forwarded; a string
-  `baggage` is passed on as the client sent it.
-* A store that does not answer (a pool timeout, a cut connection, a closed store) now denies the
-  gated call with rule `store.unavailable`, as the README said it would: a tool error, an intent
-  and an outcome record saying `deny` with the store's error in `detail`, and one warning line in
-  the log. It used to be an HTTP 500 `internal error` with a traceback and no intent record. A
-  store that answers with a complaint (a bad value, a missing table) is still an internal error,
-  since retrying does not cure it.
-* Span attributes and the span name that carry client-chosen text (`gen_ai.tool.name`,
-  `gen_ai.tool.call.id`, `rpc.method`, `enduser.id`) go through the same credential scrub as the
-  audit `detail`, so a key-shaped tool name or principal no longer reaches the trace backend, and
-  they are cut at 128 characters. Patterns added to the scrub later apply to spans as well.
-* `OTEL_SERVICE_NAME` and `service.name` in `OTEL_RESOURCE_ATTRIBUTES` are honoured; the
-  default stays `mcp-airlock`.
-* The approver of an out-of-band confirmation is recorded as `verified` only when the identity
-  came out of a bearer token the proxy checked. A `Basic` header, a bare value or a bearer with no
-  JWT configured used to label the header-supplied name `verified`.
-* A JWT whose `sub` is empty or blank is refused with 401 `principal.missing` instead of being
-  accepted as principal `""`; a blank `X-Airlock-Principal` is refused the same way. So is a name
-  with surrounding whitespace, from either source: trimmed, `alice ` would be `alice`.
-* The Slack approval message escapes `&`, `<` and `>` in the arguments and the dry-run preview, so
-  an agent cannot plant a `<url|label>` link or an `<!channel>` mention in it.
-* The text of the approval message is cut at 3500 characters, with a note, before the proxy's
-  `Approve:` line is added, so the line is always delivered and always last: Telegram refuses a
-  longer message, and Slack truncates one, which an oversized argument could use to cut the real
-  line off behind a planted one. The approve page's cut note now points at the audit record.
-* A failure while working out who clicked the approve button (after the approval was recorded)
-  records the click as unverified instead of answering a bare 500 that the audit never sees.
-* A principal named `group:<g>` no longer gets the tier override of group `<g>`: `group:` keys in
-  `principals` match group membership only.
-* The approve page responses carry `Cache-Control: no-store`, `Referrer-Policy: no-referrer`,
-  `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and a Content-Security-Policy with
-  `frame-ancestors 'none'`.
-* A `tools/call` retried with a `requestState` whose confirmation was already executed or declined,
-  and no answer, is refused with `mrtr.replay` instead of staying `pending` until the token
-  expires. In `inband` mode without a webhook such a retry gets the question again with a fresh
-  `requestState`, since there is nothing to wait for.
-* The `pending` result carries `verdict: confirm` and `rule_id: mrtr.pending` in `_meta`, like
-  every other `tools/call` result, and its message says when an in-band accept was ignored.
-* `POST` on an approve link whose confirmation was already executed or declined answers 409 and
-  records nothing; it used to say "Approved" and write `mrtr.approved_oob`. A second `POST` on an
-  approved confirmation changes nothing and is not recorded again, and the page shows the state.
-  A store that does not answer during the `POST` gives 503 with the page's headers, not a bare 500.
-* A startup warning (an error under `--strict`) for an `AIRLOCK_APPROVAL_WEBHOOK` that is not an
-  `http(s)` URL with a host, for a Telegram URL without `AIRLOCK_TELEGRAM_CHAT`, and for a chat id
-  without a webhook. Such a proxy used to start in `oob` mode with nothing able to approve.
+  and `tool` are cut at 128 characters; an unauthenticated client could fill the disk or push the
+  real history out of the rotated files.
+* `io.mcp-airlock/*` keys that the upstream puts into `_meta` (results, content blocks, previews,
+  `tools/list`) are removed before the proxy adds its own, so an upstream cannot fake `status:
+  approved` or an empty `suspicious` list.
+* **Approvals.** The approver is recorded as `verified` only when the identity came from a bearer
+  token the proxy checked. A JWT with an empty or blank `sub`, a blank `X-Airlock-Principal`, or a
+  name with surrounding whitespace, is refused with 401 `principal.missing`. A principal named `group:<g>` no longer gets
+  the tier override of group `<g>`.
+* The Slack message escapes `&`, `<` and `>` in the arguments and the preview, and cuts its text at
+  3500 characters so the proxy's `Approve:` line is always delivered and always last. The approve
+  page is sent with `Cache-Control: no-store`, `Referrer-Policy`, `X-Frame-Options`,
+  `X-Content-Type-Options` and a Content-Security-Policy that forbids framing. A failure while
+  working out who clicked is recorded as unverified instead of a bare 500.
+* A `tools/call` retried with the `requestState` of a confirmation already executed or declined is
+  refused with `mrtr.replay` instead of staying `pending`. A `POST` on such an approve link answers
+  409 and records nothing; a second `POST` on an approved one changes nothing. A pending result
+  carries `verdict: confirm` and `rule_id: mrtr.pending` in `_meta`.
+* An `L2` call whose dry-run preview was longer than `output.max_chars` and had `structuredContent`
+  came back as a truncated error instead of a confirmation prompt. The prompt is now issued from
+  the trimmed preview; only the upstream's own `isError` skips it.
+* A `traceparent`, `tracestate` or `baggage` in `_meta` that is not a string is ignored instead of
+  causing an unaudited 500. The `airlock.*` span attributes follow the outcome record, and a span
+  with verdict `error` has status `ERROR`.
+* An OTLP timeout that is not a number, or a compression other than `none`, `gzip` or `deflate`,
+  stops the start with one error line again (OpenTelemetry 1.45 only logs it).
+* `airlock-policy lint` accepts a policy without `environment` when `--env` or `AIRLOCK_ENV` names
+  one, and `diff` and `pin` report an invalid policy or a bad `tools/list` answer as `ERROR`
+  lines instead of a traceback.
+* Helm: a whole number from a values file rendered as `1.048576e+08` and crash-looped the pod.
+* The release workflow file was invalid YAML, so a `v*` tag would not have released; it is fixed
+  and tested. The release also fails when the `docker run` image tag in the READMEs is not the
+  tag's major.minor. The nightly Postgres e2e stack works again with the image `HEALTHCHECK`.
+* The container images compile bytecode at build time (the filesystem is read-only at run time, so
+  every start paid the import cost).
+* The README `docker run` example adds `--add-host=host.docker.internal:host-gateway` (Docker
+  Engine on Linux cannot resolve the upstream host without it), `docs/clients.md` uses `claude mcp
+  add --scope user`, and `policy.example.yaml` no longer says `restart_service` is refused at L2.
 
 ## 0.3.0 - 2026-10-02
 
@@ -298,7 +164,8 @@
   holds the text when `AIRLOCK_STORE_DSN` is set; it is created on first use.
 * `where` conditions in the policy: allow or refuse by argument values.
 * Tool pins (`airlock-policy pin`, `--pins`, `AIRLOCK_PINS`): a tool whose description or schema
-  changed is flagged and refused.
+  changed is dropped from `tools/list` and audited as `catalog.pin_mismatch`. A call to it is
+  still decided by the policy.
 * `/healthz` and `/readyz`.
 * `AIRLOCK_MAX_REQUEST_BYTES` (413) and `AIRLOCK_MAX_UPSTREAM_BYTES`.
 * Startup warnings for configurations that are weaker than they look, and `--strict` to exit with

@@ -1,6 +1,6 @@
 # mcp-airlock
 
-[Русская версия](README.ru.md)
+[Краткий обзор по-русски](README.ru.md)
 
 [![M8ven Score](https://m8ven.ai/badge/mcp/shalimov04/mcp-airlock)](https://m8ven.ai/mcp/shalimov04/mcp-airlock)
 
@@ -167,15 +167,16 @@ without a description (`no_description`), a `count_arg` that relies on the globa
 (`blast_radius_default`), a `where` rule for an environment no tier mentions (`where_env_unknown`)
 and an environment no tool covers (`env_unused`); `--env` adds environments that must be covered.
 A policy without `environment` lints with the first `--env` (or `AIRLOCK_ENV`) as its environment,
-the way the proxy would run it; without either it is an error. `diff` and `pin` take `--env`, then `AIRLOCK_ENV`, then
-the policy's own `environment`. A policy that cannot be read or does not validate is `ERROR invalid`
-in all three commands, and an upstream that does not answer `tools/list` like an MCP server is
-`ERROR upstream`. `diff` asks the server itself (not the proxy, which hides unlisted tools) for
-`tools/list` and tells you which allowlisted tools the server no longer has (`missing_upstream`, an
-error), which L1/L2 tools have no `dry_run` argument (`no_dry_run`), which `where` rules name an
-argument that is not in the schema (`where_unknown_arg`) and which server tools the policy does not
-mention (`not_allowlisted`). With `--pins` it also checks the [pins](#pinning-tool-descriptions).
-Both exit 1 when any finding is an error.
+the way the proxy would run it; without either it is an error. `diff` and `pin` take `--env`, then
+`AIRLOCK_ENV`, then the policy's own `environment`. A policy that cannot be read or does not
+validate is `ERROR invalid` in all three commands, and an upstream that does not answer
+`tools/list` like an MCP server is `ERROR upstream`. `diff` asks the server itself (not the proxy,
+which hides unlisted tools) for `tools/list` and tells you which allowlisted tools the server no
+longer has (`missing_upstream`, an error), which L1/L2 tools have no `dry_run` argument
+(`no_dry_run`), which `where` rules name an argument that is not in the schema
+(`where_unknown_arg`) and which server tools the policy does not mention (`not_allowlisted`). With
+`--pins` it also checks the [pins](#pinning-tool-descriptions). Both exit 1 when any finding is an
+error.
 
 ### In Kubernetes
 
@@ -391,22 +392,18 @@ parses as JSON `null`, a list or an object is denied by any rule, because the up
 it before it validates it. For the same reason `not_in` also denies a value whose type is not among
 the listed values (`3` against `[kube-system]`).
 
-A regex is matched with [RE2](https://github.com/google/re2/wiki/Syntax) (the `regex` extra),
-in time linear in the value length, so no pattern backtracks. Linear is not cheap for every
-pattern: a counted repeat around an unbounded one (`(.*a){1000}`) costs about 30 us per
-character, so a regex is tried only on strings up to 4096 characters (about 130 ms for that
-worst case), and a longer value fails the rule with a message saying so.
+A regex is matched with [RE2](https://github.com/google/re2/wiki/Syntax) (the `regex` extra), in
+time linear in the value length, so no pattern backtracks. It is still not free for every pattern
+(`(.*a){1000}` costs about 30 us per character), so a regex is tried only on strings up to 4096
+characters; a longer value fails the rule.
 
-RE2 has no lookahead or lookbehind, backreferences (`\1`, `(?P=name)`), possessive or atomic
-groups, and a policy using them does not load (nor does `lint` accept it); neither do the Python
-spellings `\Z` (RE2 writes `\z`), `\uXXXX` (`\x{41}`), `\N{...}`, `(?x)`, `(?#...)`, `(?a)`,
-`(?u)` and a counted repeat above 1000, where nested counts multiply (`(a{100}){11}` is refused).
-`a{,3}` loads but means the literal text `a{,3}` in RE2, not 0 to 3 `a`s; write `a{0,3}`. `\w`,
-`\d`, `\s` and `\b` are ASCII-only, so `\w+` does not match `привет` (use `\pL` or
-`\p{Cyrillic}`), and their negations `\W`, `\D`, `\S` and `\B` match the non-ASCII characters
-Python's `re` would not: `\W+` matches `привет`, `\S+` a value with a no-break space. `(?i)`
-folds Unicode case. A value with a lone surrogate (a JSON `"\ud800"`) cannot be matched and
-fails the rule.
+A pattern RE2 cannot express does not load, and `lint` reports it: lookahead and lookbehind,
+backreferences, possessive and atomic groups, the Python spellings `\Z` (write `\z`), `\uXXXX`
+(write `\x{41}`), `\N{...}`, `(?x)`, `(?#...)`, `(?a)` and `(?u)`, and a counted repeat above
+1000. `a{,3}` loads but is the literal text; write `a{0,3}`. `\w`, `\d`, `\s` and `\b` are
+ASCII-only, so `\w+` does not match `привет` (use `\pL`), and `\W`, `\D`, `\S` and `\B` match the
+non-ASCII characters Python's `re` would not: `\W+` matches `привет`. A value with a lone
+surrogate fails the rule.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,
@@ -519,14 +516,12 @@ empty audit file) and `hash` is the sha256 of the record's canonical JSON withou
 (keys sorted, no spaces, UTF-8, non-ASCII not escaped). The Postgres sink stores the same two
 values in `rec`.
 
-A crash or a full disk can leave the last line torn: part of a record, with no newline. Such
-a fragment can never be chained. The proxy cuts it off rather than keep it: at startup it
-appends the fragment to `audit.jsonl.torn`, cuts `audit.jsonl` back to the last newline and
-logs a warning naming both; a short write it notices itself is cut back at once. The chain
-goes on from the last whole record, so `verify` still passes. A fragment that cannot be cut
-(an append-only file, say) stays where it is, and `verify` reports that line as `not JSON`.
-A last line edited into non-JSON with no newline is moved the same way at the next start, so
-keep `audit.jsonl.torn`: it is the evidence.
+A crash or a full disk can leave the last line torn: part of a record, with no newline. At
+startup the proxy appends the fragment to `audit.jsonl.torn` and cuts `audit.jsonl` back to the
+last newline (a short write it notices itself is cut back at once), so the chain goes on from the
+last whole record and `verify` still passes. A fragment that cannot be cut (an append-only file)
+stays, and `verify` reports it as `not JSON`. A last line edited into non-JSON is moved the same
+way, so keep `audit.jsonl.torn`: it is the evidence.
 
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
@@ -540,11 +535,8 @@ client-chosen `principal`, `method` and `tool` fields, are scrubbed the same way
 scrub to the same text stay apart (`[REDACTED]`, `[REDACTED]#2`). A secret that matches none
 of these patterns (a password in a URL, `access_token=...`) is stored as sent.
 
-A lone surrogate (JSON allows `"\ud800"`) or a NUL character in client text is stored as
-U+FFFD and shown as U+FFFD to approvers; in a response it travels as the JSON escape. A `NaN`
-or an infinity never comes from a client (the request parser refuses them), but one that
-reaches the audit is stored as the string `"NaN"`, `"Infinity"` or `"-Infinity"`, so both
-sinks hold the same valid JSON.
+A lone surrogate (JSON allows `"\ud800"`) or a NUL character in client text is stored as U+FFFD,
+and a `NaN` or an infinity as a string, so both sinks hold the same valid JSON.
 
 To read the log:
 
@@ -561,14 +553,10 @@ as JSONL, newest last. `--jsonl` names another file. The filters are `--principa
 ISO 8601 time); `--limit` keeps the newest N (0: all); `--stats` prints counts by
 verdict and rule instead. The same filters work against Postgres with `--dsn` or
 `AIRLOCK_AUDIT_DSN`, with the same connect timeout as the proxy. A line that is not a record
-(a torn line left by an older version, say) is skipped with `airlock-audit: skipped
-audit.jsonl:57: not JSON` (or `not a record`, for JSON that is not an object) on stderr and
-the rest of the log is still printed. A missing file, a DSN that does not parse, a Postgres
-that does not answer or a missing `postgres` extra is one `airlock-audit: ...` line and exit
-code 1, never a traceback. A Postgres error keeps libpq's words (refused, timed out, no such
-table), but every value from the DSN other than a number or a setting such as `sslmode` (the
-host, socket path, user, database or password) is blanked to `"..."`, quoted by libpq or not,
-so none of them reaches the terminal or a log.
+(a torn line left by an older version, say) is skipped with a note on stderr and the rest of the
+log is still printed. A missing file, a bad DSN, a Postgres that does not answer or a missing
+`postgres` extra is one `airlock-audit: ...` line and exit code 1. In a Postgres error the host,
+user, database and password from the DSN are blanked to `"..."`.
 
 The file grows without bound unless you set `--audit-max-bytes N`. When a record would take
 it past `N` bytes, `audit.jsonl` is renamed to `audit.jsonl.1`, `.1` to `.2` and so on, and
@@ -577,12 +565,11 @@ hash chain continues into the new file. A record bigger than `N` is still writte
 is off by default. Lowering `--audit-keep` deletes the existing `.N` files above the new
 limit at the next rotation.
 
-A request refused before it is attributed to a principal (a malformed or oversized body, no
-credentials) is audited without its arguments, and its `method` and `tool` are cut at 128
-characters, so an unauthenticated client cannot write payloads into the log; the same cut
-applies to every protocol denial. Its two records still count toward the rotation budget: anyone
-who can reach `/mcp` can push older files out with enough requests. When the trail matters, keep
-the Postgres sink (`AIRLOCK_AUDIT_DSN`) or ship the files off the host.
+A request refused before it has a principal (a malformed or oversized body, no credentials) is
+audited without its arguments, and its `method` and `tool` are cut at 128 characters, so an
+unauthenticated client cannot write payloads into the log. Its records still count toward the
+rotation budget: anyone who can reach `/mcp` can push older files out with enough requests. When
+the trail matters, keep the Postgres sink (`AIRLOCK_AUDIT_DSN`) or ship the files off the host.
 
 To check the chain:
 
@@ -664,24 +651,19 @@ reconnects once when it drops; point `AIRLOCK_AUDIT_DSN` at Postgres directly, o
 in session mode.
 
 The audit sink writes from a thread of its own through a queue of at most 1000 records and about
-32 MiB of serialized rows, so a slow, locked or frozen audit database never holds up a call,
-`/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's rows land
-a moment later, so an `intent` row can reach the table after the upstream call has run. The table
-is a mirror of the file: a row carries the `prev` and `hash` the file gave it. The connection gets
-a `statement_timeout` and a `lock_timeout` of the connect timeout, so a locked or slow table ends
-each wait. A server that stops answering altogether (a paused container, a stuck proxy) leaves the
-worker waiting until it answers again; the queue fills and new records are dropped, and nothing is
-logged until it holds 1000 records. A record that fails or finds the queue full is dropped from
-the table with a warning in the log; the JSONL file still holds it, so the table's hash chain can
-have gaps after a drop (the `prev` of a row names a row that is not there), or hold a row the file
-failed to write; the file is the one to verify. At shutdown the queue is drained for up to the
-connect timeout, then the socket is cut, the worker gets 2 s more to stop, and what is left is
-dropped, with the count in the log; with a frozen database that is about the timeout plus 2 s (7 s
-at a timeout of 3 s, 12 s at the default 10 s), and the wait runs off the event loop, capped at
-15 s. A crash loses the queue too. Where the file is an emptyDir, as in the chart's multi-replica
-setup, those records live only as long as the pod. The table is created on first use under the
-same advisory lock as the store's tables, so replicas starting together on an empty database do
-not lose their first records.
+32 MiB of serialized rows, so a slow or frozen audit database never holds up a call, `/healthz` or
+shutdown. The JSONL file is written before the proxy goes on; the table is a mirror of it (a row
+carries the `prev` and `hash` the file gave it) and its rows land a moment later, so an `intent`
+row can reach the table after the upstream call has run. The connection gets a `statement_timeout`
+and a `lock_timeout` of the connect timeout. A record that fails or finds the queue full is
+dropped from the table with a warning; the file still holds it, so the table's chain can have gaps
+or hold a row the file failed to write, and the file is the one to verify. A server that stops
+answering altogether leaves the worker waiting; the queue fills and new records are dropped, with
+nothing logged until it holds 1000. At shutdown the queue is drained for up to the connect
+timeout, then the socket is cut, the worker gets 2 s more to stop, and what is left is dropped,
+with the count in the log; that is about the timeout plus 2 s, off the event loop, capped at 15 s.
+A crash loses the queue too. Where the file is an emptyDir, as in the chart's multi-replica setup,
+those records live only as long as the pod.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),
@@ -784,13 +766,11 @@ answer over `AIRLOCK_MAX_UPSTREAM_BYTES` is reported the same way for a tool cal
 as an error that says the call ran (or that only its dry run did), with rule `upstream.too_large`.
 
 An upstream that cannot be reached (`upstream.unreachable`), answers with compressed content
-(`upstream.encoded`) or sends something that is not a JSON-RPC response (`upstream.bad_reply`:
-not JSON, not an object, `NaN` or a number that does not fit a double, nesting too deep to parse,
-an SSE stream without the call's response) is reported the same way: a tool error carrying the
-rule and verdict `error` in `_meta`, audited as verdict `error` with the reason in `detail`. When
-the connection itself failed, nothing reached the upstream: the error says so and the
-blast-radius charge is given back. After anything else (a timeout, a torn read, a bad answer)
-the call may have run; the error says that too, and the charge stays. For `tools/list` and
+(`upstream.encoded`) or sends something that is not a JSON-RPC response (`upstream.bad_reply`) is
+reported the same way: a tool error carrying the rule and verdict `error` in `_meta`, audited as
+`error` with the reason in `detail`. When the connection itself failed, nothing reached the
+upstream: the error says so and the blast-radius charge is given back. After anything else the
+call may have run; the error says that too, and the charge stays. For `tools/list` and
 `server/discover` these failures are an HTTP 502.
 
 The upstream call has a 60 second timeout. Upstream responses arriving as SSE are reduced to the
@@ -801,7 +781,8 @@ read in at most 10 pages. Legacy HTTP+SSE, Roots, Sampling and Logging are not s
 The request body must be strict JSON: `NaN`, `Infinity` and a number that does not fit a double
 (`1e400`) are refused with a parse error (`-32700`), since they are not JSON and the Postgres sink
 would drop the record. A body nested deeper than 64 levels is refused with `-32600`. Both are
-audited as `protocol.<code>` denials.
+audited as `protocol.<code>` denials. The upstream's answer is read with the same strictness; a
+violation is `upstream.bad_reply`.
 
 There is no rate limit on prompting. An agent that keeps re-sending an `L2` call gets a new
 prompt, and a new webhook message, each time.
@@ -824,7 +805,7 @@ The postgres and grafana stacks also run nightly and on demand in the `e2e` work
 src/mcp_airlock/app.py         the proxy itself, the probes and the /approve pages
 src/mcp_airlock/policy.py      policy model, tier resolution, where rules, decisions
 src/mcp_airlock/store.py       memory and Postgres stores for keys, approvals, prompts, counters
-src/mcp_airlock/pg.py          optional psycopg import, DSN timeouts and keepalives
+src/mcp_airlock/pg.py          optional psycopg import, DSN timeouts and keepalives, shared DDL lock
 src/mcp_airlock/identity.py    JWT / JWKS / header principal resolution
 src/mcp_airlock/guard.py       injection marking
 src/mcp_airlock/approvals.py   Slack / Telegram notifications
