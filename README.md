@@ -394,8 +394,9 @@ the listed values (`3` against `[kube-system]`).
 
 A regex is matched with [RE2](https://github.com/google/re2/wiki/Syntax) (the `regex` extra), in
 time linear in the value length, so no pattern backtracks. It is still not free for every pattern
-(`(.*a){1000}` costs about 30 us per character), so a regex is tried only on strings up to 4096
-characters; a longer value fails the rule.
+(`(.*a){1000}` costs about 30 us per ASCII character), so a regex is tried only on strings up to 4096
+characters; a longer value fails the rule. The worst case at the cap is about 0.13 s per value for
+ASCII and up to about 0.3 s for 4-byte characters, since RE2 works per byte.
 
 A pattern RE2 cannot express does not load, and `lint` reports it: lookahead and lookbehind,
 backreferences, possessive and atomic groups, the Python spellings `\Z` (write `\z`), `\uXXXX`
@@ -638,32 +639,25 @@ The store keeps a small connection pool (`AIRLOCK_STORE_POOL_SIZE`, default 4) t
 first use and closes at shutdown. Replicas times the pool size must fit the server's
 `max_connections`, and a replica is meant to hold no more: each pooled connection gets a
 `statement_timeout` and a `lock_timeout` just under the connect timeout in force when it is
-opened, so the server gives a slow statement up before the client does, and a connection the
-client cuts anyway also gets a cancel request (only with libpq 17 or newer; the early
-`psycopg[binary]` 3.2 wheels bundle an older one, and then the two timeouts are the only
-backstop), so a backend waiting on a lock is not left behind. Pooled connections never
+opened, so the server gives a slow statement up before the client does. Pooled connections never
 auto-prepare statements, so PgBouncer in transaction mode works for `AIRLOCK_STORE_DSN`. The
 two timeouts are session settings, though: in transaction mode they stay with whichever server
 connection ran them, and any client of that PgBouncer pool (same database and user) can inherit
 a timeout of about 10 s, other applications included. Give the store a role of its own there.
-The audit sink uses one connection of its own, with psycopg's default auto-prepare, and
-reconnects once when it drops; point `AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer
-in session mode.
+The audit sink uses one connection of its own and reconnects once when it drops; point
+`AIRLOCK_AUDIT_DSN` at Postgres directly, or at a PgBouncer in session mode.
 
-The audit sink writes from a thread of its own through a queue of at most 1000 records and about
-32 MiB of serialized rows, so a slow or frozen audit database never holds up a call, `/healthz` or
-shutdown. The JSONL file is written before the proxy goes on; the table is a mirror of it (a row
-carries the `prev` and `hash` the file gave it) and its rows land a moment later, so an `intent`
-row can reach the table after the upstream call has run. The connection gets a `statement_timeout`
-and a `lock_timeout` of the connect timeout. A record that fails or finds the queue full is
-dropped from the table with a warning; the file still holds it, so the table's chain can have gaps
-or hold a row the file failed to write, and the file is the one to verify. A server that stops
-answering altogether leaves the worker waiting; the queue fills and new records are dropped, with
-nothing logged until it holds 1000. At shutdown the queue is drained for up to the connect
-timeout, then the socket is cut, the worker gets 2 s more to stop, and what is left is dropped,
-with the count in the log; that is about the timeout plus 2 s, off the event loop, capped at 15 s.
-A crash loses the queue too. Where the file is an emptyDir, as in the chart's multi-replica setup,
-those records live only as long as the pod.
+The audit sink is a mirror: the JSONL file is written first and is the source of truth, and
+the hash chain lives there (a table row carries the `prev` and `hash` the file gave it). A
+Postgres failure is only logged; a file failure still fails the call closed. Rows reach the table
+through a queue of at most 1000 records or about 32 MiB, so a slow or frozen audit database never
+holds up a call, `/healthz` or shutdown, and an `intent` row can land after the upstream call
+has run. A record that fails or finds the queue full is dropped from the table with a warning (a
+frozen server logs nothing until the queue is full). The table's chain can therefore have gaps
+or hold a row the file failed to write: verify the file. At shutdown the queue gets up
+to the connect timeout to drain and the worker 2 s more to stop (never past 15 s); what is left is dropped, with the count in
+the log. A crash loses the queue too, and where the file is an emptyDir, as in the chart's
+multi-replica setup, those records live only as long as the pod.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),

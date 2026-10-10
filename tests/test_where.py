@@ -304,7 +304,7 @@ M = REGEX_MAX_CHARS
     (".*-.*-.*-prod", "-" * (M - 4) + "prod", "-" * (M - 1) + "!"),  # #74: a second per call on the stdlib re at 1024
     (r"\w+\d+\d+$", "1" * M, "1" * (M - 1) + "!"),
     (r"\w+\w+\w+$", "a" * M, "a" * (M - 1) + "!"),
-    ("(.*a){1000}", "a" * M, "a" * (M - 1) + "!"),  # RE2's worst: about 30 us per character, so the cap stays
+    ("(.*a){1000}", "a" * M, "a" * (M - 1) + "!"),  # RE2's worst: about 30 us per byte, so the cap stays
 ], ids=lambda x: x if len(x) < 40 else f"{len(x)} chars")
 def test_the_shapes_that_froze_the_proxy_load_and_run_quickly_at_the_cap(pattern, good, bad):
     pol = policy([{"arg": "a", "regex": pattern}])

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII
+  and about 0.3 s for 4-byte characters (RE2 costs per byte); the cap itself is unchanged.
+
 ## 0.4.0 - 2026-10-10
 
 ### Breaking
