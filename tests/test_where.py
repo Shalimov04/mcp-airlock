@@ -6,6 +6,7 @@ import copy
 import json
 import sys
 import time
+import types
 
 import pytest
 import yaml
@@ -13,8 +14,7 @@ from pydantic import ValidationError
 
 from mcp_airlock import Policy
 from mcp_airlock.app import CONFIRM_KEY, META
-from mcp_airlock import policy as policy_mod
-from mcp_airlock.policy import Engine, WhereRule
+from mcp_airlock.policy import REGEX_MAX_CHARS, Engine, WhereRule
 
 from .conftest import ENVELOPE, ROOT, V, audit_rows, call
 
@@ -155,7 +155,8 @@ async def test_a_string_that_decodes_to_a_number_bool_or_string_is_left_alone(va
     # refuses here is a string upstream as well, whether its decode fails there too or yields an int
     assert not await violates([{"arg": "a", "not_in": ["prod-db"]}], {"a": value})
     assert not await violates([{"arg": "a", "equals": value}], {"a": value})
-    assert not await violates([{"arg": "a", "regex": ".+"}], {"a": value})
+    # a regex is tried only on values up to REGEX_MAX_CHARS; the long one fails the rule for its length, not its content
+    assert await violates([{"arg": "a", "regex": ".+"}], {"a": value}) == (len(value) > REGEX_MAX_CHARS)
 
 
 async def test_a_string_nested_too_deep_to_decode_here_fails_closed():
@@ -268,10 +269,12 @@ def test_a_null_element_stays_allowed():
 
 
 def test_a_copied_policy_evaluates_like_the_original():
-    pol = policy([{"arg": "a", "in": ["x"]}, {"arg": "b", "equals": None}])
-    for c in (copy.deepcopy(pol), pol.model_copy(deep=True)):
-        assert c.args_violation("t", {"a": "x", "b": None}) is None
-        assert c.args_violation("t", {"a": "y", "b": None}) == pol.args_violation("t", {"a": "y", "b": None})
+    pol = policy([{"arg": "a", "in": ["x"]}, {"arg": "b", "equals": None}, {"arg": "c", "regex": "tmp-.*"}])
+    ok = {"a": "x", "b": None, "c": "tmp-1"}
+    for c in (copy.deepcopy(pol), pol.model_copy(deep=True)):  # the compiled regex comes along
+        assert c.args_violation("t", ok) is None
+        assert c.args_violation("t", {**ok, "a": "y"}) == pol.args_violation("t", {**ok, "a": "y"})
+        assert c.args_violation("t", {**ok, "c": "x"}) == pol.args_violation("t", {**ok, "c": "x"})
 
 
 # ---------------------------------------------------------------- RE2 (the match runs on the event loop)
@@ -281,6 +284,7 @@ def test_a_copied_policy_evaluates_like_the_original():
     r"(a)\1", r"(?P<n>[a-z]+)-(?P=n)", "(a)(?(1)b|c)",  # backreferences
     "a*+", "(?>a+)",  # possessive and atomic
     r"a\Z", r"\u0041", r"\N{DIGIT ONE}", "(?x) a", "a{1001}",  # Python spellings RE2 has no equivalent for
+    "(?#note)a", "(?a)a", "(?u)a", "(a{100}){11}",  # the last: nested counts multiply past 1000
     "(",
 ])
 def test_a_pattern_re2_cannot_run_is_a_load_error(pattern):
@@ -290,35 +294,44 @@ def test_a_pattern_re2_cannot_run_is_a_load_error(pattern):
         policy([{"arg": "a", "regex": pattern}])
 
 
-N = 2**20
+M = REGEX_MAX_CHARS
 
 
 @pytest.mark.parametrize("pattern, good, bad", [
-    ("(a+)+$", "a" * N, "a" * N + "!"),  # froze the stdlib re for good
-    ("(a|aa)+", "a" * N, "a" * N + "!"),
-    ("(.*a){12}", "a" * N, "a" * N + "!"),
-    (".*-.*-.*-prod", "-" * N + "prod", "-" * N + "!"),  # #74: a second per call on the stdlib re at 1024 characters
-    (r"\w+\d+\d+$", "1" * N, "1" * N + "!"),
-    (r"\w+\w+\w+$", "a" * N, "a" * N + "!"),
-])
-def test_the_shapes_that_froze_the_proxy_load_and_run_in_milliseconds_on_a_mebibyte(pattern, good, bad):
+    ("(a+)+$", "a" * M, "a" * (M - 1) + "!"),  # froze the stdlib re for good
+    ("(a|aa)+", "a" * M, "a" * (M - 1) + "!"),
+    ("(.*a){12}", "a" * M, "a" * (M - 1) + "!"),
+    (".*-.*-.*-prod", "-" * (M - 4) + "prod", "-" * (M - 1) + "!"),  # #74: a second per call on the stdlib re at 1024
+    (r"\w+\d+\d+$", "1" * M, "1" * (M - 1) + "!"),
+    (r"\w+\w+\w+$", "a" * M, "a" * (M - 1) + "!"),
+    ("(.*a){1000}", "a" * M, "a" * (M - 1) + "!"),  # RE2's worst: about 30 us per character, so the cap stays
+], ids=lambda x: x if len(x) < 40 else f"{len(x)} chars")
+def test_the_shapes_that_froze_the_proxy_load_and_run_quickly_at_the_cap(pattern, good, bad):
     pol = policy([{"arg": "a", "regex": pattern}])
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     assert pol.args_violation("t", {"a": good}) is None
     assert pol.args_violation("t", {"a": bad}) == "argument 'a' does not match the required pattern"
-    assert time.perf_counter() - t0 < 0.5  # RE2 is linear: about 2 ms each here; the stdlib re never finishes
+    assert time.process_time() - t0 < 2.0  # about 0.3 s for the worst one; the stdlib re never finishes the others
 
 
-async def test_there_is_no_length_cap_any_more():
-    pol = policy([{"arg": "a", "regex": "tmp-.*"}])
-    assert pol.args_violation("t", {"a": "tmp-" + "x" * 2**20}) is None
-    assert not await violates([{"arg": "a", "regex": "[a-z-]+"}], {"a": ["tmp-" + "x" * 5000]})
+async def test_a_value_longer_than_the_cap_fails_a_regex_rule_without_trying_the_pattern():
+    pol = policy([{"arg": "a", "regex": ".*"}])  # would match anything
+    assert REGEX_MAX_CHARS == 4096
+    assert pol.args_violation("t", {"a": "x" * REGEX_MAX_CHARS}) is None
+    msg = pol.args_violation("t", {"a": "x" * (REGEX_MAX_CHARS + 1)})
+    assert msg == f"argument 'a' is longer than {REGEX_MAX_CHARS} characters, more than a pattern is tried on"
+    assert "pattern" in pol.args_violation("t", {"a": ["ok", "x" * (REGEX_MAX_CHARS + 1)]})  # one element is enough
+    assert not WhereRule.model_validate({"arg": "a", "regex": ".*"}).holds("x" * (REGEX_MAX_CHARS + 1))
+    assert (await decide(pol, {"a": "x" * 2**20})).rule_id == "args.violation"
+    # the other matchers have no such cap: an exact comparison is cheap
+    assert policy([{"arg": "a", "equals": "x" * 5000}]).args_violation("t", {"a": "x" * 5000}) is None
 
 
 @pytest.mark.parametrize("pattern, value, holds", [
     (r"\w+", "привет", False), (r"\d+", "\u0663", False), (r"\s", "\u00a0", False),  # ASCII only: denies more
     (r"\W+", "привет", True), (r"\D+", "\u0663", True), (r"\S", "\u00a0", True),  # the negations: admits more
     (r"\pL+", "привет", True), (r"\p{Cyrillic}+", "привет", True), ("(?i)страна", "СТРАНА", True),
+    ("a{,3}", "aa", False), ("a{,3}", "a{,3}", True),  # Python: 0 to 3 a's; RE2: literal text
 ])
 def test_perl_classes_are_ascii_in_re2(pattern, value, holds):
     assert WhereRule.model_validate({"arg": "a", "regex": pattern}).holds(value) is holds
@@ -331,15 +344,12 @@ async def test_a_lone_surrogate_fails_a_regex_rule(value):
     assert not await violates([{"arg": "a", "not_in": ["x"]}], {"a": value})  # the other matchers do not encode
 
 
-def test_a_regex_without_the_extra_refuses_to_load(monkeypatch):
-    policy_mod._regex.cache_clear()
-    monkeypatch.setitem(sys.modules, "re2", None)  # import re2 raises ImportError
-    try:
-        with pytest.raises(ValidationError, match=r"install mcp-airlock\[regex\]"):
-            policy([{"arg": "a", "regex": "tmp-.*"}])
-        assert policy([{"arg": "a", "in": ["x"]}]).args_violation("t", {"a": "x"}) is None  # the rest needs no extra
-    finally:
-        policy_mod._regex.cache_clear()
+@pytest.mark.parametrize("module", [None, types.ModuleType("re2")], ids=["missing", "another package's re2"])
+def test_a_regex_without_the_extra_refuses_to_load(monkeypatch, module):
+    monkeypatch.setitem(sys.modules, "re2", module)  # None: import re2 raises ImportError; pyre2 has no Options
+    with pytest.raises(ValidationError, match=r"install mcp-airlock\[regex\]"):
+        policy([{"arg": "a", "regex": "tmp-.*"}])
+    assert policy([{"arg": "a", "in": ["x"]}]).args_violation("t", {"a": "x"}) is None  # the rest needs no extra
 
 
 # ---------------------------------------------------------------- through the proxy

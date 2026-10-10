@@ -65,7 +65,7 @@ uvx mcp-airlock --help
 pip install mcp-airlock
 ```
 
-Three features are extras, so the base install stays small and pure Python:
+Three features are extras, so the base install stays small:
 
 | Extra | Brings | Needed for |
 |---|---|---|
@@ -392,15 +392,21 @@ it before it validates it. For the same reason `not_in` also denies a value whos
 the listed values (`3` against `[kube-system]`).
 
 A regex is matched with [RE2](https://github.com/google/re2/wiki/Syntax) (the `regex` extra),
-so its time is linear in the value length: no pattern can make one request stall the proxy, and
-there is no length cap. RE2 has no lookahead or lookbehind, backreferences, possessive or atomic
+in time linear in the value length, so no pattern backtracks. Linear is not cheap for every
+pattern: a counted repeat around an unbounded one (`(.*a){1000}`) costs about 30 us per
+character, so a regex is tried only on strings up to 4096 characters (about 130 ms for that
+worst case), and a longer value fails the rule with a message saying so.
+
+RE2 has no lookahead or lookbehind, backreferences (`\1`, `(?P=name)`), possessive or atomic
 groups, and a policy using them does not load (nor does `lint` accept it); neither do the Python
-spellings `\Z` (RE2 writes `\z`), `\uXXXX` (`\x{41}`), `\N{...}`, `(?x)` and a counted repeat
-above 1000. `\w`, `\d`, `\s` and `\b` are ASCII-only, so `\w+` does not match `привет` (use `\pL`
-or `\p{Cyrillic}`), and their negations `\W`, `\D`, `\S` and `\B` match the non-ASCII characters
-Python's `re` would not: `\W+` matches `привет`, `\S+` a value with a no-break space.
-`(?i)` folds Unicode case. A value with a lone surrogate (a JSON `"\ud800"`) cannot be matched
-and fails the rule.
+spellings `\Z` (RE2 writes `\z`), `\uXXXX` (`\x{41}`), `\N{...}`, `(?x)`, `(?#...)`, `(?a)`,
+`(?u)` and a counted repeat above 1000, where nested counts multiply (`(a{100}){11}` is refused).
+`a{,3}` loads but means the literal text `a{,3}` in RE2, not 0 to 3 `a`s; write `a{0,3}`. `\w`,
+`\d`, `\s` and `\b` are ASCII-only, so `\w+` does not match `привет` (use `\pL` or
+`\p{Cyrillic}`), and their negations `\W`, `\D`, `\S` and `\B` match the non-ASCII characters
+Python's `re` would not: `\W+` matches `привет`, `\S+` a value with a no-break space. `(?i)`
+folds Unicode case. A value with a lone surrogate (a JSON `"\ud800"`) cannot be matched and
+fails the rule.
 
 Rule ids you will see in `_meta` and the audit log: `allowlist.deny`, `tier.unassigned`,
 `args.violation`, `tier.L0.read`, `tier.L1.dry_run`, `tier.L2.confirm`, `tier.L2.confirmed`,

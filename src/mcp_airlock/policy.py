@@ -3,7 +3,6 @@ output cap, blast radius, flat `where` conditions on argument values. No DSL."""
 
 from __future__ import annotations
 
-import functools
 import json
 import time
 from dataclasses import dataclass, replace
@@ -11,19 +10,24 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from .store import USAGE_RETENTION_S, MemoryStore
 
 
-# A where regex runs on the event loop, so it is matched with RE2, whose time is linear in the value length: no
-# pattern can make one request stall the proxy. RE2 is a C extension without a musl wheel, hence an extra.
-@functools.lru_cache(maxsize=256)
+# A where regex runs on the event loop, so it is matched with RE2, whose time is linear in the value length. Linear
+# is not cheap for every pattern: (.*a){1000} keeps about a thousand NFA threads alive, some 30 us per character. The
+# value cap bounds that at about 130 ms; a longer value fails the rule. RE2 has no musl wheel, hence an extra.
+REGEX_MAX_CHARS = 4096
+
+
 def _regex(pattern: str) -> Any:
     try:
         import re2
     except ImportError:
-        raise ValueError("a where regex needs google-re2: install mcp-airlock[regex]") from None
+        re2 = None
+    if getattr(re2, "Options", None) is None:  # not installed, or another package's re2 (pyre2)
+        raise ValueError("a where regex needs google-re2: install mcp-airlock[regex]")
     opts = re2.Options()
     opts.log_errors = False  # otherwise RE2 writes a C++ log line to stderr for every bad pattern
     try:
@@ -65,6 +69,7 @@ class WhereRule(BaseModel):
     regex: str | None = None  # full match, strings only
     env: list[str] | None = None  # None = every environment
     optional: bool = False  # an absent argument passes
+    _pattern: Any = PrivateAttr(None)  # the compiled regex
 
     @model_validator(mode="after")
     def _one_matcher(self) -> WhereRule:
@@ -78,7 +83,7 @@ class WhereRule(BaseModel):
         if listed is not None and not all(x is None or isinstance(x, (str, int, float, bool)) for x in listed):
             raise ValueError("equals/in/not_in values must be scalars")  # a list or dict element can never match
         if self.regex is not None:
-            _regex(self.regex)  # an unusable pattern, or no RE2, is a load error, not a runtime one
+            self._pattern = _regex(self.regex)  # an unusable pattern, or no RE2, is a load error, not a runtime one
         return self
 
     def kind(self) -> str:
@@ -101,7 +106,7 @@ class WhereRule(BaseModel):
             return False
         if self.regex is not None:
             try:
-                return isinstance(v, str) and _regex(self.regex).fullmatch(v) is not None
+                return isinstance(v, str) and len(v) <= REGEX_MAX_CHARS and self._pattern.fullmatch(v) is not None
             except UnicodeEncodeError:  # a lone surrogate (JSON "\ud800") has no UTF-8 for RE2: fails closed
                 return False
         if self.kind() == "equals":
@@ -136,6 +141,10 @@ def _json(s: str) -> Any:
         # a bare number stays a string upstream whether its decode fails there too or yields an int the SDK keeps
         return _UNDECODABLE if s.lstrip().startswith(("[", "{")) else s
     return s if isinstance(d, (str, int, float)) else d  # the SDK keeps a decoded str, int or float (a bool is an int)
+
+
+def _over_regex_cap(v: Any) -> bool:
+    return any(isinstance(x, str) and len(x) > REGEX_MAX_CHARS for x in (v if isinstance(v, (list, tuple)) else [v]))
 
 
 _WHY = {"equals": "does not equal the required value", "in": "is not in the allowed values",
@@ -200,6 +209,8 @@ class Policy(BaseModel):
                 if w.optional:
                     continue
                 return f"argument {w.arg!r} is missing, required by the {w.kind()} condition"
+            if w.regex is not None and _over_regex_cap(args[w.arg]):  # the pattern is never tried on it: fails closed
+                return f"argument {w.arg!r} is longer than {REGEX_MAX_CHARS} characters, more than a pattern is tried on"
             if not w.holds(args[w.arg]):
                 return f"argument {w.arg!r} {_WHY[w.kind()]}"
         return None

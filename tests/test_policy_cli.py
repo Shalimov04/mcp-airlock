@@ -10,7 +10,6 @@ import httpx
 import pytest
 
 from mcp_airlock import pins, policy_cli
-from mcp_airlock import policy as policy_mod
 
 from . import fake_upstream
 
@@ -222,13 +221,9 @@ def test_lint_has_no_regex_cost_warning_any_more(tmp_path):
 
 
 def test_lint_rejects_a_regex_without_the_extra(tmp_path, monkeypatch):
-    policy_mod._regex.cache_clear()
     monkeypatch.setitem(sys.modules, "re2", None)  # import re2 raises ImportError
-    try:
-        f = policy_cli.lint(write(tmp_path, "  x:\n    description: d\n    tiers: {prod: L0}\n"
-                                            "    where: [{arg: a, regex: 'tmp-.*'}]\n"))
-    finally:
-        policy_mod._regex.cache_clear()
+    f = policy_cli.lint(write(tmp_path, "  x:\n    description: d\n    tiers: {prod: L0}\n"
+                                        "    where: [{arg: a, regex: 'tmp-.*'}]\n"))
     assert codes(f) == ["invalid"] and f[0][0] == "ERROR" and "install mcp-airlock[regex]" in f[0][2]
 
 
