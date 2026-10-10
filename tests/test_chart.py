@@ -36,6 +36,12 @@ def refusal(tmp_path: Path, values: str = "", *sets: str) -> str:
     return str(e.value)
 
 
+def schema_refusal(tmp_path: Path, values: str, *sets: str, key: str, want: str = "") -> None:
+    # Helm 3.18+ and 3.17 word schema errors differently; both name the key and what it wants
+    msg = refusal(tmp_path, values, *sets)
+    assert key in msg and want in msg, msg
+
+
 def container(docs: list[dict]) -> dict:
     (dep,) = [d for d in docs if d["kind"] == "Deployment"]
     return dep["spec"]["template"]["spec"]["containers"][0]
@@ -76,8 +82,8 @@ def test_set_values_still_render(tmp_path):
 
 def test_a_map_in_env_is_refused(tmp_path):
     # an entry with valueFrom goes in extraEnv; env values are scalars
-    msg = refusal(tmp_path, "env:\n  X: {valueFrom: {secretKeyRef: {name: a, key: b}}}\n")
-    assert "at '/env/X': got object" in msg
+    schema_refusal(tmp_path, "env:\n  X: {valueFrom: {secretKeyRef: {name: a, key: b}}}\n",
+                   key="X", want="string")
 
 
 def test_otlp_headers_are_a_credential(tmp_path):
@@ -117,7 +123,7 @@ def test_an_extra_env_name_that_is_also_set_elsewhere_is_refused(tmp_path):
     assert "AIRLOCK_SECRET comes from existingSecret when sharedStore=true" in msg
     msg = refusal(tmp_path, 'extraEnv: [{name: A, value: "1"}, {name: A, value: "2"}]\n')
     assert "A is listed twice in extraEnv" in msg
-    assert "missing property 'name'" in refusal(tmp_path, 'extraEnv: [{value: "1"}]\n')
+    schema_refusal(tmp_path, 'extraEnv: [{value: "1"}]\n', key="extraEnv", want="name")
     # without sharedStore the key is not rendered by the chart, so an own source is fine
     e = env(render(tmp_path, "extraEnv:\n  - name: AIRLOCK_SECRET\n"
                              "    valueFrom: {secretKeyRef: {name: a, key: b}}\n"))
@@ -127,8 +133,7 @@ def test_an_extra_env_name_that_is_also_set_elsewhere_is_refused(tmp_path):
 def test_an_extra_env_value_must_be_a_string(tmp_path):
     # extraEnv is rendered as given, so an unquoted number reaches the API as a number, which
     # it rejects; env goes through the scalar helper and may stay unquoted
-    msg = refusal(tmp_path, "extraEnv: [{name: NUM, value: 5}]\n")
-    assert "at '/extraEnv/0/value': got number, want string" in msg
+    schema_refusal(tmp_path, "extraEnv: [{name: NUM, value: 5}]\n", key="value", want="string")
     assert env(render(tmp_path, 'extraEnv: [{name: NUM, value: "5"}]\n'))["NUM"]["value"] == "5"
 
 
@@ -142,8 +147,8 @@ def test_pre_stop_sleep_and_grace_period(tmp_path):
     assert "terminationGracePeriodSeconds must exceed preStopSeconds" in refusal(
         tmp_path, "preStopSeconds: 10\nterminationGracePeriodSeconds: 10\n")
     # a negative sleep passed the grace-period check and was left for the API server to reject
-    assert "at '/preStopSeconds': minimum: got -1, want 0" in refusal(tmp_path, "preStopSeconds: -1\n")
-    assert "at '/replicaCount': minimum: got 0, want 1" in refusal(tmp_path, "", "replicaCount=0")
+    schema_refusal(tmp_path, "preStopSeconds: -1\n", key="preStopSeconds", want="0")
+    schema_refusal(tmp_path, "", "replicaCount=0", key="replicaCount", want="1")
 
 
 def test_pre_stop_sleep_is_refused_on_a_cluster_older_than_1_30(tmp_path):
@@ -156,16 +161,22 @@ def test_pre_stop_sleep_is_refused_on_a_cluster_older_than_1_30(tmp_path):
 
 def test_seconds_and_replicas_must_be_whole_numbers(tmp_path):
     # values.schema.json; a whole float from a values file is an integer there and renders as one
-    assert "at '/preStopSeconds': got number, want integer" in refusal(tmp_path, "preStopSeconds: 2.5\n")
-    assert "at '/preStopSeconds': got string, want integer" in refusal(tmp_path, "", "preStopSeconds=five")
-    assert "at '/replicaCount': got string, want integer" in refusal(tmp_path, "", "replicaCount=1.5")
-    msg = refusal(tmp_path, "terminationGracePeriodSeconds: 30.5\n")
-    assert "at '/terminationGracePeriodSeconds': got number, want integer" in msg
-    msg = refusal(tmp_path, "terminationGracePeriodSeconds: null\n")
-    assert "missing property 'terminationGracePeriodSeconds'" in msg
+    schema_refusal(tmp_path, "preStopSeconds: 2.5\n", key="preStopSeconds", want="integer")
+    schema_refusal(tmp_path, "", "preStopSeconds=five", key="preStopSeconds", want="integer")
+    schema_refusal(tmp_path, "", "replicaCount=1.5", key="replicaCount", want="integer")
+    schema_refusal(tmp_path, "terminationGracePeriodSeconds: 30.5\n",
+                   key="terminationGracePeriodSeconds", want="integer")
+    schema_refusal(tmp_path, "terminationGracePeriodSeconds: null\n",
+                   key="terminationGracePeriodSeconds")
     docs = render(tmp_path, "preStopSeconds: 2.0\nterminationGracePeriodSeconds: 40.0\n")
     assert container(docs)["lifecycle"] == {"preStop": {"sleep": {"seconds": 2}}}
     assert pod(docs)["terminationGracePeriodSeconds"] == 40
+
+
+def test_null_env_values_and_extra_args_are_refused(tmp_path):
+    # both used to render silently: an empty variable and a null argument
+    msg = refusal(tmp_path, "env: {FOO: null}\nextraArgs: [--strict, null]\n")
+    assert all(w in msg for w in ("FOO", "extraArgs", "null")), msg
 
 
 def test_no_prestop_comment_when_disabled(tmp_path):

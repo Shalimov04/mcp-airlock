@@ -30,7 +30,7 @@ sharedStore: false
 # AIRLOCK_STORE_CONNECT_TIMEOUT, OTEL_EXPORTER_OTLP_ENDPOINT. The chart refuses the credential
 # variables here (AIRLOCK_SECRET, AIRLOCK_JWT_SECRET, the DSNs, the webhook,
 # AIRLOCK_UPSTREAM_AUTH, OTEL_EXPORTER_OTLP_HEADERS): they go in existingSecret, or in extraEnv
-# with a valueFrom. Whole numbers may be unquoted.
+# with a valueFrom. Scalars only; a valueFrom entry goes in extraEnv. Whole numbers may be unquoted.
 env: {}
 # More env entries as Kubernetes writes them, for a value from another Secret or a ConfigMap, e.g.
 # [{name: OTEL_EXPORTER_OTLP_HEADERS, valueFrom: {secretKeyRef: {name: otel, key: headers}}}].

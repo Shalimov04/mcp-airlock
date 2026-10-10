@@ -63,7 +63,9 @@
   every policy change, no longer refuses connections; `terminationGracePeriodSeconds` (30) is set
   for the sleep, the open calls and the OTLP flush. The sleep on a cluster older than 1.30 (set
   `preStopSeconds=0` there) is refused with a chart message. A new `values.schema.json` refuses a
-  wrong type, a fraction or a negative number in these and `replicaCount`, `env` or `extraEnv`.
+  fraction, a negative number or a non-number in these and `replicaCount`, a map, list or `null`
+  in `env` and `extraArgs` (a `null` rendered as an empty value before), and a non-string
+  `extraEnv` value.
 
 ### Fixed
 
