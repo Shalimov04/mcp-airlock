@@ -1,4 +1,7 @@
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS build
+FROM python:3.12-slim-bookworm AS build
+# uv in the project's uv_build range (pyproject.toml), so the build uses its built-in backend
+# instead of fetching uv_build from PyPI
+COPY --from=ghcr.io/astral-sh/uv:0.12.24@sha256:3af4716e991d6956a41e573eab705d0ee08500cd829ed30293eb8472f372c65a /uv /uvx /bin/
 WORKDIR /app
 # .pyc at build time: the venv is root-owned and the root filesystem may be read-only, so the
 # process (uid 65532) could never write them, and every start would pay the import cost

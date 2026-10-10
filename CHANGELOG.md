@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+* The Docker images are built with a pinned uv 0.12.24, so the build no longer downloads an
+  unlocked `uv_build` from PyPI.
+
 ## 0.4.0 - 2026-10-10
 
 ### Breaking
