@@ -4,7 +4,7 @@ description: Governance proxy for MCP servers
 type: application
 version: 0.1.0
 # keep in step with pyproject.toml at each release
-appVersion: "0.3.0"
+appVersion: "0.4.0"
 home: https://github.com/Shalimov04/mcp-airlock
 sources:
   - https://github.com/Shalimov04/mcp-airlock

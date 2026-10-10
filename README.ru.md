@@ -55,7 +55,7 @@ uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env 
 ```
 docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
   --add-host=host.docker.internal:host-gateway \
-  ghcr.io/shalimov04/mcp-airlock:0.3 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
+  ghcr.io/shalimov04/mcp-airlock:0.4 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
 Минимальная политика:
