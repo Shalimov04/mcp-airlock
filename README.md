@@ -665,22 +665,23 @@ in session mode.
 
 The audit sink writes from a thread of its own through a queue of at most 1000 records and about
 32 MiB of serialized rows, so a slow, locked or frozen audit database never holds up a call,
-`/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's rows
-land a moment later, so an `intent` row can reach the table after the upstream call has run.
-The table is a mirror of the file: a row carries the `prev` and `hash` the file gave it. The
-connection gets a `statement_timeout` and a `lock_timeout` of the connect timeout, so a locked
-or slow table ends each wait. A server that stops answering altogether (a paused container, a
-stuck proxy) leaves the worker waiting until it answers again; meanwhile the queue fills and new
-records are dropped. A record that fails or finds the queue full is dropped from the table with
-a warning in the log; the JSONL file still holds it, so the table's hash chain can have gaps
-after a drop (the `prev` of a row names a row that is not there) and the file is the one to
-verify. At shutdown the queue is drained for up to the connect timeout, then the socket is cut,
-the worker gets 2 s more to stop, and what is left is dropped, with the count in the log; with
-a frozen database that is about the timeout plus 2 s (7 s at a timeout of 3 s, 12 s at the
-default 10 s), and the wait runs off the event loop, capped at 15 s. A crash loses the queue too. Where the file is an
-emptyDir, as in the chart's multi-replica setup, those records live only as long as the pod. The
-table is created on first use under the same advisory lock as the store's tables, so replicas
-starting together on an empty database do not lose their first records.
+`/healthz` or shutdown. The JSONL file is written before the proxy goes on; the table's rows land
+a moment later, so an `intent` row can reach the table after the upstream call has run. The table
+is a mirror of the file: a row carries the `prev` and `hash` the file gave it. The connection gets
+a `statement_timeout` and a `lock_timeout` of the connect timeout, so a locked or slow table ends
+each wait. A server that stops answering altogether (a paused container, a stuck proxy) leaves the
+worker waiting until it answers again; the queue fills and new records are dropped, and nothing is
+logged until it holds 1000 records. A record that fails or finds the queue full is dropped from
+the table with a warning in the log; the JSONL file still holds it, so the table's hash chain can
+have gaps after a drop (the `prev` of a row names a row that is not there), or hold a row the file
+failed to write; the file is the one to verify. At shutdown the queue is drained for up to the
+connect timeout, then the socket is cut, the worker gets 2 s more to stop, and what is left is
+dropped, with the count in the log; with a frozen database that is about the timeout plus 2 s (7 s
+at a timeout of 3 s, 12 s at the default 10 s), and the wait runs off the event loop, capped at
+15 s. A crash loses the queue too. Where the file is an emptyDir, as in the chart's multi-replica
+setup, those records live only as long as the pod. The table is created on first use under the
+same advisory lock as the store's tables, so replicas starting together on an empty database do
+not lose their first records.
 
 Unless the DSN sets them itself, both DSNs get `connect_timeout`
 (`AIRLOCK_STORE_CONNECT_TIMEOUT`, default 10 s; not added when `PGCONNECT_TIMEOUT` is set),

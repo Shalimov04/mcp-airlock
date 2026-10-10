@@ -171,8 +171,6 @@ class Airlock:
         *,
         secret: bytes | None = None,
         identity: IdentityConfig | None = None,
-        trust_principal_header: bool = False,  # legacy shortcuts, used when `identity` is None
-        jwt_secret: str | None = None,
         store: Any = None,
         upstream_headers: dict[str, str] | None = None,
         confirm_ttl_s: int = 600,
@@ -194,7 +192,7 @@ class Airlock:
         self.audit = audit
         self.secret = secret or secrets.token_bytes(32)  # random per process: restart voids pending confirmations
         self.approve_secret = hmac.new(self.secret, b"approve", hashlib.sha256).digest()
-        self.identity = identity or IdentityConfig(jwt_secret=jwt_secret, trust_header=trust_principal_header)
+        self.identity = identity or IdentityConfig()
         self.upstream_headers = upstream_headers or {}
         self.confirm_ttl_s = confirm_ttl_s
         self.http = http or httpx.AsyncClient(timeout=60.0)
@@ -333,8 +331,8 @@ class Airlock:
         answer = responses.get(CONFIRM_KEY) if isinstance(responses, dict) else responses
         content = answer.get("content") if isinstance(answer, dict) else None
         in_band = isinstance(answer, dict) and answer.get("action") == "accept" and isinstance(content, dict) and content.get("confirm") is True
-        # The stricter mode wins; a token without m (issued before the upgrade) falls back to this replica's mode.
-        strict = self.approval_mode == "oob" or ("m" in claims and claims["m"] != "inband")
+        # The stricter mode wins; a token without m (from before 0.3.0) counts as oob.
+        strict = self.approval_mode == "oob" or claims.get("m") != "inband"
         if answer is None or (in_band and strict):
             # No answer for our question (or, in oob mode, one that does not count): approved out-of-band, or still waiting (nothing burned)
             if await self.engine.store.is_consumed(claims["k"]):

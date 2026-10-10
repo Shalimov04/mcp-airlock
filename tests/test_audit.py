@@ -22,6 +22,7 @@ from mcp_airlock import audit
 from mcp_airlock.app import CONFIRM_KEY, build
 from mcp_airlock.audit import GENESIS, REDACTED, AuditLog, PostgresAuditLog, audit_from_env, redact, row_hash, scrub
 from mcp_airlock.audit_cli import default_files, main, query_jsonl, verify
+from mcp_airlock.identity import IdentityConfig
 
 from .conftest import ROOT, audit_rows, call
 
@@ -85,7 +86,7 @@ def test_jsonl_fields_and_redaction(tmp_path):
     sink.write(phase="intent", **BASE)
     sink.close()
     (row,) = jsonl_rows(tmp_path / "a.jsonl")
-    assert list(row) == ["ts", *AuditLog.FIELDS]
+    assert list(row) == ["ts", *audit.FIELDS]
     assert row["args"] == {"name": "svc", "password": REDACTED, "headers": {"Authorization": REDACTED}, "note": REDACTED}
 
 
@@ -186,7 +187,7 @@ def proxy_with(upstream, sink):
     """An Airlock on the fake upstream with the given audit sink (make_airlock always builds a plain file sink)."""
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
     al = Airlock(Policy.load(ROOT / "policy.example.yaml", "prod"), "http://localhost:9001/mcp", sink, http=http,
-                 trust_principal_header=True)
+                 identity=IdentityConfig(trust_header=True))
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=al.app), base_url="http://localhost:9000")
 
 
@@ -243,7 +244,7 @@ async def test_a_locked_audit_table_does_not_hold_up_calls_or_healthz(upstream, 
             assert pg.flush(15)  # statement_timeout or lock_timeout ends each wait, about one deadline per record
         lock.rollback()
     assert caplog.text.count("dropped") == 2 and "due to statement timeout" in caplog.text and "Traceback" not in caplog.text
-    assert pg._conn is conn and not conn.closed  # the server ended the wait before the cut: the connection is kept
+    assert pg._conn is conn and not conn.closed  # the server ended the wait itself: the connection is kept
     assert table_count(pg_dsn, principal="alice") == 0 and len(jsonl_rows(tmp_path / "a.jsonl")) == 2  # the file has them
     pg.write(phase="outcome", **dict(BASE, call_id="after"))  # the sink is usable again once the lock is gone
     pg.close()
@@ -544,7 +545,7 @@ def ids(rows):
 def test_cli_query_all_newest_last(source, capsys):
     rows = run_cli(capsys, "query", *source)
     assert ids(rows) == ["old", "mid", "new"]
-    assert rows[0]["args"]["password"] == REDACTED and set(rows[0]) == {"ts", *AuditLog.FIELDS}
+    assert rows[0]["args"]["password"] == REDACTED and set(rows[0]) == {"ts", *audit.FIELDS}
 
 
 def test_cli_filters(source, capsys):

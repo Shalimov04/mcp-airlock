@@ -15,6 +15,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from mcp_airlock import Airlock, Policy
 from mcp_airlock.audit import AuditLog
+from mcp_airlock.identity import IdentityConfig
 
 from . import fake_upstream
 
@@ -61,7 +62,7 @@ def audit_path(tmp_path):
 
 def make_airlock(upstream, audit_path, env="prod", **kw) -> Airlock:
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app), base_url="http://localhost:9001")
-    kw.setdefault("trust_principal_header", True)  # tests authenticate with X-Airlock-Principal
+    kw.setdefault("identity", IdentityConfig(trust_header=True))  # tests authenticate with X-Airlock-Principal
     return Airlock(Policy.load(ROOT / "policy.example.yaml", env), "http://localhost:9001/mcp",
                    AuditLog(audit_path), http=http, **kw)
 

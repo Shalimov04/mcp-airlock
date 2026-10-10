@@ -34,7 +34,7 @@ def fake_airlock(audit_path, upstream, env="prod", **kw) -> Airlock:
     request the proxy sends upstream."""
     transport = upstream if isinstance(upstream, httpx.AsyncBaseTransport) else httpx.MockTransport(upstream)
     return Airlock(Policy.load(ROOT / "policy.example.yaml", env), "http://upstream/mcp", AuditLog(audit_path),
-                   http=httpx.AsyncClient(transport=transport), trust_principal_header=True, **kw)
+                   http=httpx.AsyncClient(transport=transport), identity=IdentityConfig(trust_header=True), **kw)
 
 
 def sized(size: int, rid, *, sse: bool = False) -> bytes:

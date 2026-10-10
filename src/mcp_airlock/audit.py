@@ -109,9 +109,6 @@ def wellformed(value: Any) -> Any:
     return value
 
 
-_wellformed = wellformed  # the old private name
-
-
 def _row(rec: dict[str, Any]) -> dict[str, Any]:
     row = {"ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
     row.update({k: rec.get(k) for k in FIELDS})
@@ -193,9 +190,8 @@ def _ends_with_newline(path: Path) -> bool:
 
 
 class AuditLog:
-    FIELDS = FIELDS
-
-    def __init__(self, path: str | Path, max_bytes: int | None = None, keep: int = 5, mirror: PostgresAuditLog | None = None):
+    def __init__(self, path: str | Path, max_bytes: int | None = None, keep: int = 5,
+                 mirror: PostgresAuditLog | None = None):
         if keep < 1 or (max_bytes or 0) < 0:
             raise ValueError("audit keep must be at least 1 and max_bytes must not be negative")
         self.path = Path(path)
@@ -313,7 +309,7 @@ QUEUE_MAX_BYTES = 32 * 1024 * 1024
 
 
 class _Queued(NamedTuple):
-    """One record as the worker writes it: the indexed columns, the JSONB text and the hash, no row dict."""
+    """One record as the worker writes it: the indexed columns and the JSONB text, no row dict."""
     ts: str
     cols: tuple
     text: str
@@ -369,10 +365,11 @@ class PostgresAuditLog:
 
     def _connect(self):
         conn = psycopg_module().connect(self.dsn, autocommit=True)  # bounded by connect_timeout
+        self._conn = conn  # close() can cut it while the DDL below waits on a server that went silent
         try:
             self._prepare(conn)
         except BaseException:
-            conn.close()
+            self._drop_conn(conn)
             raise
         return conn
 

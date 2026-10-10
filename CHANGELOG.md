@@ -4,9 +4,9 @@
 
 ### Changed
 
-* The Postgres audit sink is now a mirror of the JSONL file: it stores the `prev` and `hash` the file
-  gave each row and keeps no chain of its own, and a write is no longer cut off by a timer (the
-  cut at shutdown stays).
+* A confirmation token from before 0.3.0 (no approval mode in it) counts as `oob`: an inband
+  replica no longer accepts it in-band, so it stays pending until approved by link or it expires
+  (10 minutes).
 * **Breaking: `where` regexes use RE2.** A `where` regex could freeze the proxy: one
   `get_service` call with a 32-character name blocked the event loop, `/healthz` and `SIGTERM`
   for over a minute. A `regex` rule is now matched with google-re2, in time linear in the value
