@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from mcp_airlock import Airlock, Policy
-from mcp_airlock.app import CONFIRM_KEY, META, build
+from mcp_airlock.app import CONFIRM_KEY, META, UpstreamFailed, build
 from mcp_airlock.audit import AuditLog, PostgresAuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
 
@@ -52,6 +52,27 @@ def answer(size: int, *, status: int = 200, sse: bool = False):
         rid = json.loads(request.content)["id"]
         ctype = "text/event-stream" if sse else "application/json"
         return httpx.Response(status, content=sized(size, rid, sse=sse), headers={"content-type": ctype})
+    return handler
+
+
+def deeply_nested_answer(depth: int, *, status: int = 200, sse: bool = False):
+    def handler(request: httpx.Request) -> httpx.Response:
+        rid = json.loads(request.content)["id"]
+        cur = "leaf"
+        for _ in range(depth - 4):
+            cur = [cur]
+        reply = {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "hello", "nested": cur}],
+            },
+        }
+        raw = json.dumps(reply)
+        ctype = "text/event-stream" if sse else "application/json"
+        body = f"event: message\ndata: {raw}\n\n".encode() if sse else raw.encode()
+        return httpx.Response(status, content=body, headers={"content-type": ctype})
     return handler
 
 
@@ -168,6 +189,38 @@ async def test_answer_exactly_at_the_limit_passes_and_one_byte_over_fails(audit_
         res = await call(c, "get_service", {"name": "api"})
     assert not ok.get("isError") and ok["content"][0]["text"].startswith("xxx")
     assert res["isError"] and res["_meta"][META + "rule_id"] == "upstream.too_large"
+
+
+@pytest.mark.parametrize("sse", [False, True])
+async def test_upstream_reply_nested_at_depth_limit_passes(audit_path, sse):
+    al = fake_airlock(audit_path, deeply_nested_answer(64, sse=sse))
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_service", "arguments": {"name": "api"}}}
+    status, reply = await al.forward(body, {}, Principal("alice"))
+    assert status == 200 and reply["result"]["content"][0]["text"] == "hello"
+
+    async with serving(al) as c:
+        ok = await call(c, "get_service", {"name": "api"})
+    assert not ok.get("isError") and ok["content"][0]["text"] == "hello"
+
+
+@pytest.mark.parametrize("sse", [False, True])
+async def test_upstream_reply_nested_deeper_than_limit_fails_and_audits(audit_path, sse):
+    al = fake_airlock(audit_path, deeply_nested_answer(100, sse=sse))
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_service", "arguments": {"name": "api"}}}
+    with pytest.raises(UpstreamFailed) as exc:
+        await al.forward(body, {}, Principal("alice"))
+    assert exc.value.rule == "upstream.bad_reply"
+    assert "nested deeper than 64 levels" in exc.value.detail
+    assert exc.value.sent is True and exc.value.status == 200
+
+    async with serving(al) as c:
+        res = await call(c, "get_service", {"name": "api"})
+    assert res["isError"] is True and res["_meta"][META + "rule_id"] == "upstream.bad_reply"
+    assert "nested deeper than 64 levels" in res["content"][0]["text"]
+
+    outcome = audit_rows(audit_path)[-1]
+    assert (outcome["phase"], outcome["verdict"], outcome["rule_id"], outcome["upstream_status"]) == ("outcome", "error", "upstream.bad_reply", 200)
+    assert "nested deeper than 64 levels" in outcome["detail"]
 
 
 async def test_oversize_tools_list_is_a_502(audit_path):

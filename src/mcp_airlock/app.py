@@ -145,7 +145,7 @@ class UpstreamFailed(Exception):
     """The upstream gave no usable answer. `sent` says whether the request reached it: after a connect failure there
     is nothing to charge, anything later may have run. `status` is what the upstream sent, None when it sent nothing."""
 
-    def __init__(self, rule: str, detail: str, *, sent: bool, status: int | None = None):
+    def __init__(self, rule: str, detail: str, *, sent: bool = True, status: int | None = None):
         super().__init__(detail)
         self.rule, self.detail, self.sent, self.status = rule, detail, sent, status
 
@@ -706,6 +706,8 @@ class Airlock:
             reply = _last_sse_message(raw.decode("utf-8", errors="replace"), body["id"])
             if reply is None:
                 raise UpstreamFailed("upstream.bad_reply", "upstream SSE stream ended without a response", sent=True, status=r.status_code)
+            if _depth(reply) > MAX_DEPTH:
+                raise UpstreamFailed("upstream.bad_reply", f"upstream reply nested deeper than {MAX_DEPTH} levels", sent=True, status=r.status_code)
             return r.status_code, reply
         try:
             # The same strictness as for the request: NaN (what Python's json.dumps emits for float('nan')) or a reply
@@ -716,6 +718,8 @@ class Airlock:
                                  sent=True, status=r.status_code) from None
         if not isinstance(reply, dict):
             raise UpstreamFailed("upstream.bad_reply", "upstream returned a non-object", sent=True, status=r.status_code)
+        if _depth(reply) > MAX_DEPTH:
+            raise UpstreamFailed("upstream.bad_reply", f"upstream reply nested deeper than {MAX_DEPTH} levels", sent=True, status=r.status_code)
         return r.status_code, reply
 
     def _filter_tools(self, result: dict[str, Any], who: Principal, policy: Policy) -> None:
