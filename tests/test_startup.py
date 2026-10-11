@@ -82,6 +82,13 @@ def test_header_trust_alone_is_fine():
     assert warn(IdentityConfig(trust_header=True)) == []
 
 
+@pytest.mark.parametrize("val", ["true", "yes", "True", "2"])
+def test_rejected_trust_header_values_are_named_in_warning(val):
+    cfg = IdentityConfig(trust_header_rejected=val)
+    ws = warn(cfg)
+    assert any(f"AIRLOCK_TRUST_PRINCIPAL_HEADER={val!r} is not accepted" in w for w in ws)
+
+
 def test_store_dsn_without_secret_warns():
     only(warn(store_dsn="postgresql://x", secret=None), "AIRLOCK_STORE_DSN")
     only(warn(store_dsn="postgresql://x", secret=""), "AIRLOCK_STORE_DSN")

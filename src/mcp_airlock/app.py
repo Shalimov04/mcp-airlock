@@ -829,7 +829,10 @@ class Airlock:
         if not self.webhook:
             return
         message = result["inputRequests"][CONFIRM_KEY]["params"]["message"]
-        stored = message.replace("\x00", "")  # Postgres text cannot hold NUL
+        oob_note = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
+                    "and declining cancels the request.")
+        human_text = message.replace(oob_note + " ", "").replace(oob_note + "\n", "").replace(oob_note, "")
+        stored = human_text.replace("\x00", "")  # Postgres text cannot hold NUL
         if len(stored) > PROMPT_TEXT_MAX:  # say so on the page: the cut can hide the target argument and the preview
             stored = stored[:PROMPT_TEXT_MAX - len(PROMPT_CUT_NOTE)] + PROMPT_CUT_NOTE
         try:  # the approve page shows this text; a failed save only leaves the page without it
@@ -837,7 +840,7 @@ class Airlock:
             await self.engine.store.save_prompt(claims["k"], stored, claims["exp"])
         except Exception as e:
             log.warning("saving the approval prompt text failed: %s", type(e).__name__)
-        text = wellformed(f"mcp-airlock approval request from {principal}\n") + message
+        text = wellformed(f"mcp-airlock approval request from {principal}\n") + human_text
         await approvals.notify(text, self.approve_link(result["requestState"]), webhook=self.webhook,
                                http=self.notify_http, telegram_chat=self.telegram_chat)
 

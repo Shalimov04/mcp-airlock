@@ -809,9 +809,12 @@ def real_deletes(upstream) -> list:
 async def test_oob_ignores_in_band_accept_until_the_link_is_posted(upstream, audit_path):
     posted: list[str] = []
     al = webhook_airlock(upstream, audit_path, posted)  # webhook set, no mode given: defaults to oob
-    assert al.approval_mode == "oob"
     async with proxy_client(al) as c:
-        token = (await call(c, "delete_service", {"name": "api"}))["requestState"]
+        call_res = await call(c, "delete_service", {"name": "api"})
+        token = call_res["requestState"]
+        assert "confirming in the client does not approve" in call_res["inputRequests"][CONFIRM_KEY]["params"]["message"]
+        assert len(posted) == 1 and "confirming in the client does not approve" not in posted[0]
+        assert "Idempotency key:" in posted[0]
         n = len(upstream.CALLS)  # the dry run; an ignored retry forwards nothing, not even another dry run
         res = await call(c, "delete_service", {"name": "api"}, extra=accept(token))
         assert res["resultType"] == "input_required" and res["requestState"] == token

@@ -176,7 +176,8 @@ def verify(files: list[str]) -> tuple[bool, str]:
                 elif prev != last:
                     return False, at + "prev mismatch"
                 last, records = h, records + 1
-    msg = f"OK: {records} records in {len(files)} files"
+    file_word = "file" if len(files) == 1 else "files"
+    msg = f"OK: {records} records in {len(files)} {file_word}"
     if records:
         msg += f", chain from {first_prev} to {last}"
     if skipped:

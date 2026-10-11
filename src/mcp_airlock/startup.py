@@ -26,6 +26,9 @@ def startup_warnings(identity: IdentityConfig, *, secret: str | None, store_dsn:
     if not has_jwt and not identity.trust_header:
         out.append("no identity is configured (AIRLOCK_JWT_SECRET, AIRLOCK_JWKS_URL, AIRLOCK_TRUST_PRINCIPAL_HEADER): "
                    "every call is refused with 401.")
+    if identity.trust_header_rejected:
+        out.append(f"AIRLOCK_TRUST_PRINCIPAL_HEADER={identity.trust_header_rejected!r} is not accepted (only '1' is): "
+                   "the header is ignored.")
     if identity.jwks_url and not identity.audience:
         out.append("AIRLOCK_JWKS_URL is set without AIRLOCK_JWT_AUDIENCE: any token the provider issues is accepted, "
                    "also one meant for another service.")
