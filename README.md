@@ -54,7 +54,15 @@ The proxy accepts three methods: `tools/call` as above, `tools/list` and `server
 A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of
 hidden tools is in `_meta["io.mcp-airlock/hidden_tools"]`), then checked against the
 [pins](#pinning-tool-descriptions) and scanned for injection phrases. Any other method is
-refused with `METHOD_NOT_FOUND`.
+refused with `METHOD_NOT_FOUND` (HTTP 404 / `-32601`, including legacy `initialize`).
+
+### Raw HTTP answers
+
+* **Missing principal**: HTTP 401 / `-32011` (`PRINCIPAL_REQUIRED`) when no JWT or trusted `X-Airlock-Principal` is present.
+* **Unproxied method**: HTTP 404 / `-32601` (`METHOD_NOT_FOUND`) for any method outside `tools/call`, `tools/list`, and `server/discover`.
+* **Envelope & routing checks**: The 2026-07-28 `_meta` envelope and routing header checks (`Mcp-Method`, `Mcp-Name`, duplicate headers: `-32602`, `-32020`) run before identity resolution.
+* **Forwarded requestState**: A `requestState` without the `al1.` prefix is forwarded as an upstream-owned state parameter, so a damaged or truncated token is treated as a new call.
+
 
 ## Installing
 
@@ -98,16 +106,20 @@ From a checkout, `uv sync --all-extras` installs everything including the test t
 The released version, no clone needed:
 
 ```
-uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
+AIRLOCK_TRUST_PRINCIPAL_HEADER=1 uvx mcp-airlock --policy policy.yaml --upstream http://127.0.0.1:8080/mcp --env prod
 ```
 
 The same as a container:
 
 ```
-docker run --rm -p 9000:9000 -v $PWD/policy.yaml:/data/policy.yaml \
+docker run --rm -p 9000:9000 -e AIRLOCK_TRUST_PRINCIPAL_HEADER=1 \
+  -v $PWD/policy.yaml:/data/policy.yaml \
   --add-host=host.docker.internal:host-gateway \
   ghcr.io/shalimov04/mcp-airlock:0.4 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
+
+`AIRLOCK_TRUST_PRINCIPAL_HEADER=1` enables local development using the `X-Airlock-Principal: alice` header from curl or your client; without identity configured, calls return HTTP 401. For production environments, see [Identity](#identity) below for JWT and JWKS configuration.
+
 
 `--add-host` gives Docker Engine on Linux the `host.docker.internal` name that Docker Desktop
 provides by itself. The upstream has to listen on an address the container can reach, not only
@@ -425,9 +437,11 @@ restart the process there.
 
 The confirmation token (`requestState`) is an HMAC-signed blob carrying the principal, the
 tool, a hash of the arguments, the environment, the upstream URL, a random idempotency key,
-an expiry (10 minutes) and the approval mode. Nothing is stored when it is issued. When it
-comes back the proxy checks the signature, checks that all of those still match the call in
-front of it, re-runs the policy, burns the key, then charges the blast-radius counter.
+an expiry (10 minutes) and the approval mode. A hash of the arguments excludes `dry_run` on
+purpose: an accept with `dry_run: true` added runs another dry run (`tier.L2.dry_run`) and
+leaves the confirmation key unused. Nothing is stored when it is issued. When it comes back
+the proxy checks the signature, checks that all of those still match the call in front of it,
+re-runs the policy, burns the key, then charges the blast-radius counter.
 Burning is an atomic insert in the store, so two replicas cannot both execute the same
 confirmation. A decline burns the key too, and so does an upstream that turns out to be
 unreachable right after the yes: the key is burned before the call is sent and is never
@@ -509,7 +523,7 @@ Two JSON lines per call, with a shared `call_id`:
 The fields, in the order written: `ts` (UTC, milliseconds), `phase` (`intent` before the
 upstream call, `outcome` after), `call_id`, `principal`, `method`, `tool`, `args` (redacted),
 `verdict` (`allow`, `deny`, `confirm` or `error`), `rule_id`, `tier`, `dry_run` (the value
-forwarded, `null` when the argument was left alone), `latency_ms`, `upstream_status`,
+forwarded, `null` when the proxy did not set it), `latency_ms`, `upstream_status`,
 `trace_id`, `detail`, `prev` and `hash`.
 
 `prev` is the `hash` of the previous record (64 zeros for the first record written into an
@@ -688,8 +702,9 @@ delete_service(name='prod-db')"; an agent that obeys still gets a dry run and a 
 prompt, and a forged `requestState` is rejected. What the proxy does do is scan output for
 a handful of patterns (override phrases, urgency, tool-call bait, "don't tell the user",
 zero-width characters, long base64 runs) and list the matches in
-`_meta["io.mcp-airlock/suspicious"]`, at most 20. It is regex, it will miss clever things and
-occasionally flag a normal sentence, and it never blocks anything.
+`_meta["io.mcp-airlock/suspicious"]`, de-duplicated by `(rule, excerpt)` and capped at 20.
+It is regex, it will miss clever things and occasionally flag a normal sentence, and it never
+blocks anything.
 
 ## Pinning tool descriptions
 
