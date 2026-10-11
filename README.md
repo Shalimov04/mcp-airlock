@@ -525,8 +525,8 @@ Content-Security-Policy that forbids framing. The approval itself is audited wit
 Two JSON lines per call, with a shared `call_id`:
 
 ```json
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"intent","call_id":"7ce76db8...","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":null,"upstream_status":null,"trace_id":"69a54d5a...","detail":null,"prev":"0000...","hash":"a3f1c0de..."}
-{"ts":"2026-09-14T06:54:08.340+00:00","phase":"outcome","call_id":"7ce76db8...","principal":"alice","method":"tools/call","tool":"restart_service","args":{"name":"api"},"verdict":"confirm","rule_id":"tier.L2.confirm","tier":"L2","dry_run":null,"latency_ms":0,"upstream_status":null,"trace_id":"69a54d5a...","detail":null,"prev":"a3f1c0de...","hash":"9b27e4d1..."}
+{"ts": "2026-10-07T11:42:35.589+00:00", "phase": "intent", "call_id": "8fdfd452fce844d79f28fd9d80a59ca1", "principal": "alice", "method": "tools/call", "tool": "restart_service", "args": {"name": "api"}, "verdict": "confirm", "rule_id": "tier.L2.confirm", "tier": "L2", "dry_run": null, "latency_ms": null, "upstream_status": null, "trace_id": "3a3c76c711d4b73dcb31c215be1db0fc", "detail": null, "prev": "f39fc95b48722f23cb38f1dc6a015c84cfa60e53eb0d1ad830f77bb90c28f931", "hash": "c9b7ba26d8c3d558b2bb865b7aab4ab581a41bb4eddc7ac12b1d99699bd86564"}
+{"ts": "2026-10-07T11:42:35.589+00:00", "phase": "outcome", "call_id": "8fdfd452fce844d79f28fd9d80a59ca1", "principal": "alice", "method": "tools/call", "tool": "restart_service", "args": {"name": "api"}, "verdict": "confirm", "rule_id": "tier.L2.confirm", "tier": "L2", "dry_run": null, "latency_ms": 0, "upstream_status": null, "trace_id": "3a3c76c711d4b73dcb31c215be1db0fc", "detail": null, "prev": "c9b7ba26d8c3d558b2bb865b7aab4ab581a41bb4eddc7ac12b1d99699bd86564", "hash": "aba5a64edbb9fd47f99d0f548423f90e81aaecf53b65279b845ce85b931cb665"}
 ```
 
 The fields, in the order written: `ts` (UTC, milliseconds), `phase` (`intent` before the
@@ -544,8 +544,9 @@ A crash or a full disk can leave the last line torn: part of a record, with no n
 startup the proxy appends the fragment to `audit.jsonl.torn` and cuts `audit.jsonl` back to the
 last newline (a short write it notices itself is cut back at once), so the chain goes on from the
 last whole record and `verify` still passes. A fragment that cannot be cut (an append-only file)
-stays, and `verify` reports it as `not JSON`. A last line edited into non-JSON is moved the same
-way, so keep `audit.jsonl.torn`: it is the evidence.
+stays, and `verify` reports it as `not JSON`. An edited line (which ends with a newline) also
+stays in `audit.jsonl`, and `verify` reports it as `not JSON`. Keep `audit.jsonl.torn`: it is the
+evidence of torn writes.
 
 Argument values under keys like `password`, `token`, `api_key`, `authorization` are replaced
 with `[REDACTED]` (whole subtrees included), and so are values that look like bearer tokens,
