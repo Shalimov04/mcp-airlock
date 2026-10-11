@@ -1054,7 +1054,7 @@ def test_a_legacy_record_without_its_newline_is_a_record_not_a_torn_line(tmp_pat
     ls = lines_of(path)
     assert len(ls) == 3 and json.loads(ls[1]) == {"ts": "old", "phase": "outcome"}  # it has no hash, but it is whole
     assert not path.with_name("a.jsonl.torn").exists()
-    assert verify_cli(capsys, path)[:2] == (0, f"OK: 1 records in 1 file, chain from {GENESIS} to {json.loads(ls[2])['hash']}, "
+    assert verify_cli(capsys, path)[:2] == (0, f"OK: 1 record in 1 file, chain from {GENESIS} to {json.loads(ls[2])['hash']}, "
                                               "2 unchained records skipped")
 
 
@@ -1271,7 +1271,7 @@ def test_verify_reports_unchained_legacy_lines(tmp_path, capsys):
     assert verify_cli(capsys, legacy) == (0, f"OK: 2 records in 1 file, chain from {GENESIS} to {rows[-1]['hash']}, "
                                              "2 unchained records skipped", "")
     legacy.write_text('{"ts":"old"}\n')
-    assert verify_cli(capsys, legacy)[:2] == (0, "OK: 0 records in 1 file, 1 unchained records skipped")
+    assert verify_cli(capsys, legacy)[:2] == (0, "OK: 0 records in 1 file, 1 unchained record skipped")
 
 
 def test_verify_several_files_in_order_and_in_the_wrong_order(tmp_path, capsys):

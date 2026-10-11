@@ -57,6 +57,8 @@ CONFIRM_KEY = "airlock-confirm"
 ERROR_TEXT_MAX = 300  # chars of upstream or exception text kept in a caller message or audit detail
 NAME_MAX = 128  # chars of a client-chosen method or tool name kept in a pre-auth audit record
 AUDIT_CLOSE_S = 15.0  # the audit sink needs about the connect timeout plus 2 s to give up on a frozen database
+OOB_NOTE = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
+            "and declining cancels the request.")
 PROMPT_TEXT_MAX = 8000  # chars of the prompt kept for the approve page
 # The message is cut shorter still (approvals.TEXT_MAX), so the rest is not there:
 # the audit intent record has it.
@@ -805,8 +807,7 @@ class Airlock:
                               for b in (raw if isinstance(raw, list) else [])]
             text = " ".join(b["text"] for b in preview_blocks if isinstance(b, dict) and isinstance(b.get("text"), str))[:2000]
             preview_line = f"Dry-run preview: {text or '(empty)'}"
-        ask = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
-               "and declining cancels the request." if self.approval_mode == "oob" else "Confirm to execute for real.")
+        ask = OOB_NOTE if self.approval_mode == "oob" else "Confirm to execute for real."
         # U+FFFD for a lone surrogate, as the audit does: this text is posted as UTF-8 to the webhook and saved for the page
         message = wellformed(f"[{env}] {tool}: {rule.description or 'write operation'} (tier L2).\n"
                              f"Arguments: {json.dumps(shown, ensure_ascii=False, default=str)}\n{preview_line}\n"
@@ -829,9 +830,7 @@ class Airlock:
         if not self.webhook:
             return
         message = result["inputRequests"][CONFIRM_KEY]["params"]["message"]
-        oob_note = ("Approval happens through the link sent to the approval channel; confirming in the client does not approve, "
-                    "and declining cancels the request.")
-        human_text = message.replace(oob_note + " ", "").replace(oob_note + "\n", "").replace(oob_note, "")
+        human_text = message.replace(OOB_NOTE + " ", "", 1)
         stored = human_text.replace("\x00", "")  # Postgres text cannot hold NUL
         if len(stored) > PROMPT_TEXT_MAX:  # say so on the page: the cut can hide the target argument and the preview
             stored = stored[:PROMPT_TEXT_MAX - len(PROMPT_CUT_NOTE)] + PROMPT_CUT_NOTE

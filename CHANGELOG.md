@@ -13,6 +13,11 @@
   prefixed line from a single stderr handler, and other `mcp_airlock` warnings gain the prefix.
 * The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII
   and about 0.3 s for 4-byte characters (RE2 costs per byte); the cap itself is unchanged.
+* The approval post and the approve page no longer carry the client-facing "confirming in the
+  client does not approve" sentence; the elicitation text keeps it.
+* `AIRLOCK_TRUST_PRINCIPAL_HEADER` set to anything but `0` or `1` (`true`, `yes`) now prints a
+  startup warning naming the value; only `1` enables the header, and `--strict` stops the start.
+* `airlock-audit verify` says `1 file` and `1 record`, not `1 files`.
 
 ## 0.4.0 - 2026-10-10
 

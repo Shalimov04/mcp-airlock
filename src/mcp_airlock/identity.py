@@ -34,7 +34,7 @@ class IdentityConfig:
     def from_env(cls) -> IdentityConfig:
         env = os.environ.get
         raw_trust = env("AIRLOCK_TRUST_PRINCIPAL_HEADER")
-        rejected = raw_trust if raw_trust is not None and raw_trust not in ("0", "1") else None
+        rejected = raw_trust if raw_trust not in (None, "", "0", "1") else None
         return cls(
             jwt_secret=env("AIRLOCK_JWT_SECRET") or None,
             jwks_url=env("AIRLOCK_JWKS_URL") or None,
