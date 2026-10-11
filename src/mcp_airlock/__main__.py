@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -93,6 +94,25 @@ def _port(text: str) -> int:
     return n
 
 
+class _AirlockLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return f"mcp-airlock: {record.getMessage()}"
+
+
+def configure_logging(stream=None) -> None:
+    """One stderr line per log record for the mcp_airlock logger (reload, warnings from deps)."""
+    stream = stream if stream is not None else sys.stderr
+    logger = logging.getLogger("mcp_airlock")
+    if not any(isinstance(h, logging.StreamHandler) and h.stream is stream for h in logger.handlers):
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(_AirlockLogFormatter())
+        handler.setLevel(logging.INFO)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+    logging.getLogger("psycopg.pool").setLevel(logging.ERROR)
+
+
 def _fail(e: BaseException, message: str | None = None) -> SystemExit:
     """Bad input is one line on stderr and exit 1; AIRLOCK_DEBUG=1 keeps the traceback to see where it came from."""
     if os.environ.get("AIRLOCK_DEBUG") == "1":  # exactly 1, as documented: "0" or "false" must not mean debug
@@ -101,6 +121,7 @@ def _fail(e: BaseException, message: str | None = None) -> SystemExit:
 
 
 def main() -> None:
+    configure_logging()
     ap = argparse.ArgumentParser(prog="mcp-airlock")
     ap.add_argument("--policy", required=True)
     ap.add_argument("--upstream", required=True, help="upstream MCP endpoint, e.g. http://127.0.0.1:9001/mcp")

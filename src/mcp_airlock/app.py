@@ -267,12 +267,10 @@ class Airlock:
             pins = tool_pins.load(src.pins_path) if src.pins_path else self.pins
         except Exception as e:  # a bad file must never take the process down
             error = " ".join(str(e).split())
-            print(f"mcp-airlock: policy reload failed, keeping the current policy: {error}", file=sys.stderr)
             log.error("policy reload failed, keeping the current policy: %s", error)
             return ReloadResult(False, before, before, error)
         self.engine, self.pins = Engine(policy, self.engine.store), pins  # no await in between: one swap
         after = len(policy.tools)
-        print(f"mcp-airlock: policy reloaded: {after} tools (was {before})", file=sys.stderr)
         log.info("policy reloaded: %d tools (was %d)", after, before)
         return ReloadResult(True, before, after)
 

@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
+import socket
 import subprocess
 import sys
+import time
+import urllib.request
 
 import pytest
 
@@ -133,6 +137,48 @@ def test_a_policy_without_environment_is_a_validation_message_not_a_traceback(tm
     (tmp_path / "noenv.yaml").write_text("version: 1\ntools: {get_service: {tiers: {prod: L0}}}\n")
     r = run_airlock("--policy", str(tmp_path / "noenv.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit", str(tmp_path / "a.jsonl"))
     assert r.returncode == 1 and "Traceback" not in r.stderr and "environment" in error_text(r.stderr), r.stderr
+
+
+needs_sighup = pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="no SIGHUP on this platform")
+
+
+@needs_sighup
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals")
+def test_sighup_reload_failure_is_one_line_on_stderr(tmp_path):
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(EXAMPLE.read_text())
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    clean = {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "AIRLOCK_"))}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "mcp_airlock", "--policy", str(policy), "--upstream", "http://127.0.0.1:9/mcp",
+         "--audit", str(tmp_path / "audit.jsonl"), "--port", str(port)],
+        env=clean, stderr=subprocess.PIPE, text=True)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 15
+        while True:
+            try:
+                if urllib.request.urlopen(base + "/healthz", timeout=1).status == 200:
+                    break
+            except OSError:
+                if time.time() > deadline or proc.poll() is not None:
+                    raise AssertionError("proxy did not start") from None
+                time.sleep(0.1)
+        policy.write_text("tools: [unclosed")
+        os.kill(proc.pid, signal.SIGHUP)
+        time.sleep(1.0)
+        proc.terminate()
+        stderr = proc.stderr.read()
+        proc.wait(timeout=10)
+        needle = "mcp-airlock: policy reload failed, keeping the current policy:"
+        assert stderr.count(needle) == 1, stderr
+    finally:
+        proc.kill()
+        proc.wait()
+        if proc.stderr:
+            proc.stderr.close()
 
 
 def test_only_the_policy_raises_yaml_and_validation_errors_inside_build():
