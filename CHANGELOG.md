@@ -4,11 +4,16 @@
 
 ### Changed
 
+* `docs/clients.md` shows how the Python SDK passes identity and records the TypeScript SDK
+  client 2.3.1 (pinned to 2026-07-28) (#103).
 * The Docker images are built with a pinned uv 0.12.24, so the build no longer downloads an
   unlocked `uv_build` from PyPI.
 
 ### Fixed
 
+* The quick-start examples set `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` (without identity every call was
+  401); the README states the raw HTTP/JSON-RPC answers and that the confirmation hash leaves out
+  `dry_run` (#101).
 * A failed `SIGHUP` policy reload was reported twice on stderr. It is now one `mcp-airlock: `
   prefixed line from a single stderr handler, and other `mcp_airlock` warnings gain the prefix.
 * The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII
