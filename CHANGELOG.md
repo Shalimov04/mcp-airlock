@@ -4,11 +4,16 @@
 
 ### Changed
 
+* `docs/clients.md` shows how the Python SDK passes identity and records the TypeScript SDK
+  client 2.3.1 (pinned to 2026-07-28) (#103).
 * The Docker images are built with a pinned uv 0.12.24, so the build no longer downloads an
   unlocked `uv_build` from PyPI.
 
 ### Fixed
 
+* The quick-start examples set `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` (without identity every call was
+  401); the README states the raw HTTP/JSON-RPC answers and that the confirmation hash leaves out
+  `dry_run` (#101).
 * An upstream reply nested deeper than 64 levels was forwarded and audited as `allow`, although the
   README promised `upstream.bad_reply`. It is now refused as `upstream.bad_reply` on both the JSON
   and the SSE path, before anything recurses over it.
