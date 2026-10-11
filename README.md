@@ -61,7 +61,8 @@ refused with `METHOD_NOT_FOUND`.
 * **Missing principal**: HTTP 401 / `-32011` (`PRINCIPAL_REQUIRED`) when there is no JWT and no
   trusted `X-Airlock-Principal` header.
 * **Unproxied method**: HTTP 404 / `-32601` (`METHOD_NOT_FOUND`) for anything but `tools/call`,
-  `tools/list` and `server/discover`, including legacy `initialize`.
+  `tools/list` and `server/discover`. A legacy `initialize` has no `_meta` envelope and gets
+  HTTP 400 / `-32602` instead.
 * **Order**: protocol rejections (`-32700`, `-32600`, `-32602`, `-32020`, all HTTP 400, and
   `-32601`/404) are answered before the missing-principal 401, so an unauthenticated client can
   tell a malformed request from a refused one. These cover the 2026-07-28 `_meta` envelope and
@@ -443,7 +444,7 @@ restart the process there.
 
 The confirmation token (`requestState`) is an HMAC-signed blob carrying the principal, the
 tool, a hash of the arguments, the environment, the upstream URL, a random idempotency key,
-an expiry (10 minutes) and the approval mode. A hash of the arguments excludes `dry_run` on
+an expiry (10 minutes) and the approval mode. The hash excludes `dry_run` on
 purpose: an accept with `dry_run: true` added runs another dry run (`tier.L2.dry_run`) and
 leaves the confirmation key unused. Nothing is stored when it is issued. When it comes back
 the proxy checks the signature, checks that all of those still match the call in front of it,
