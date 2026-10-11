@@ -394,6 +394,13 @@ class PostgresAuditLog:
                 raise  # lock_timeout, or the cut that close() makes to end the wait
             self._conn = None  # a dropped connection: reconnect once, then let it raise
             self._insert(item)
+        except psycopg_module().errors.UndefinedTable:
+            log.warning("airlock_audit table is missing: creating the table again")
+            if self._conn is not None and not self._conn.closed:
+                self._prepare(self._conn)
+            else:
+                self._conn = None
+            self._insert(item)
 
     def _run(self) -> None:
         try:
@@ -412,8 +419,8 @@ class PostgresAuditLog:
                         log.warning("Postgres audit write dropped at shutdown (the file has it)")
                     else:  # a connect failure or lock_timeout, once per record during an outage: one line, not a traceback
                         log.warning("Postgres audit write dropped (the file has it): %s", " ".join(str(e).split()))
-                except Exception:
-                    log.exception("Postgres audit write failed; the record is dropped (the file has it)")
+                except Exception as e:
+                    log.warning("Postgres audit write dropped (the file has it): %s", " ".join(str(e).split()))
                 finally:
                     with self._idle:
                         self._pending -= 1
