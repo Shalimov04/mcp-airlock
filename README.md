@@ -333,6 +333,8 @@ At startup the proxy prints a warning to stderr for each of these:
 - `AIRLOCK_JWT_SECRET` shorter than 32 bytes
 - `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` together with JWT settings: a request without
   `Authorization` is trusted on the header alone
+- `AIRLOCK_TRUST_PRINCIPAL_HEADER` set to anything but `0` or `1` (`true`, `yes`): the header is
+  ignored, only `1` turns it on
 - `AIRLOCK_STORE_DSN` without `AIRLOCK_SECRET`: replicas sign with different keys
 - `AIRLOCK_SECRET` without `AIRLOCK_STORE_DSN`: used confirmations are remembered only in this
   process, so a confirmed call can run again on another replica or after a restart

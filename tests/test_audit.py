@@ -808,7 +808,7 @@ def test_reopening_a_file_continues_the_chain(tmp_path, capsys):
     sink.close()
     rows = jsonl_rows(path)
     assert rows[2]["prev"] == rows[1]["hash"]
-    assert verify_cli(capsys, path)[:2] == (0, f"OK: 3 records in 1 files, chain from {GENESIS} to {rows[2]['hash']}")
+    assert verify_cli(capsys, path)[:2] == (0, f"OK: 3 records in 1 file, chain from {GENESIS} to {rows[2]['hash']}")
 
 
 def test_reopening_after_a_rotation_continues_from_the_live_file(tmp_path):
@@ -1021,7 +1021,7 @@ def test_reopening_after_a_torn_tail_cuts_it_off_and_continues_from_the_record_b
     assert [json.loads(ln)["call_id"] for ln in ls] == ["c000", "c001", "c002"]  # three clean lines, nothing else
     assert json.loads(ls[2])["prev"] == rows[1]["hash"]  # not GENESIS, not the .1 file: the last whole record
     assert path.with_name("a.jsonl.torn").read_bytes() == fragment + b"\n"  # kept aside, not lost
-    assert verify_cli(capsys, path)[:2] == (0, f"OK: 3 records in 1 files, chain from {GENESIS} to {json.loads(ls[2])['hash']}")
+    assert verify_cli(capsys, path)[:2] == (0, f"OK: 3 records in 1 file, chain from {GENESIS} to {json.loads(ls[2])['hash']}")
     assert f"ended in a torn line of {len(fragment)} bytes" in caplog.text and str(path.with_name("a.jsonl.torn")) in caplog.text
 
 
@@ -1054,7 +1054,7 @@ def test_a_legacy_record_without_its_newline_is_a_record_not_a_torn_line(tmp_pat
     ls = lines_of(path)
     assert len(ls) == 3 and json.loads(ls[1]) == {"ts": "old", "phase": "outcome"}  # it has no hash, but it is whole
     assert not path.with_name("a.jsonl.torn").exists()
-    assert verify_cli(capsys, path)[:2] == (0, f"OK: 1 records in 1 files, chain from {GENESIS} to {json.loads(ls[2])['hash']}, "
+    assert verify_cli(capsys, path)[:2] == (0, f"OK: 1 record in 1 file, chain from {GENESIS} to {json.loads(ls[2])['hash']}, "
                                               "2 unchained records skipped")
 
 
@@ -1123,7 +1123,7 @@ def test_concurrent_writers_keep_one_chain_through_rotations(tmp_path, capsys):
 def test_verify_ok_output(tmp_path, capsys):
     path = chained(tmp_path / "a.jsonl")
     rows = jsonl_rows(path)
-    assert verify_cli(capsys, path) == (0, f"OK: 5 records in 1 files, chain from {GENESIS} to {rows[-1]['hash']}", "")
+    assert verify_cli(capsys, path) == (0, f"OK: 5 records in 1 file, chain from {GENESIS} to {rows[-1]['hash']}", "")
 
 
 def _tamper_edit_tool(ls):
@@ -1234,7 +1234,7 @@ def test_verify_accepts_a_legacy_prefix_followed_by_a_genesis_record(tmp_path, c
     sink.close()
     rows = jsonl_rows(path)
     assert rows[2]["prev"] == GENESIS
-    assert verify_cli(capsys, path) == (0, f"OK: 2 records in 1 files, chain from {GENESIS} to {rows[-1]['hash']}, "
+    assert verify_cli(capsys, path) == (0, f"OK: 2 records in 1 file, chain from {GENESIS} to {rows[-1]['hash']}, "
                                            "2 unchained records skipped", "")
 
 
@@ -1258,7 +1258,7 @@ def test_verify_checks_the_first_record_only_for_its_own_hash(tmp_path, capsys):
     path = chained(tmp_path / "a.jsonl")
     rows = jsonl_rows(path)
     path.write_text("\n".join(lines_of(path)[1:]) + "\n")  # the oldest record was cut off
-    assert verify_cli(capsys, path) == (0, f"OK: 4 records in 1 files, chain from {rows[0]['hash']} to {rows[-1]['hash']}", "")
+    assert verify_cli(capsys, path) == (0, f"OK: 4 records in 1 file, chain from {rows[0]['hash']} to {rows[-1]['hash']}", "")
     path.write_text("\n".join(lines_of(path)[:-1]) + "\n")  # and a truncated tail goes unnoticed too
     assert verify_cli(capsys, path)[0] == 0
 
@@ -1268,10 +1268,10 @@ def test_verify_reports_unchained_legacy_lines(tmp_path, capsys):
     legacy = tmp_path / "a.jsonl"
     legacy.write_text('{"ts":"old","phase":"intent"}\n\n{"ts":"old","phase":"outcome"}\n' + path.read_text())
     rows = jsonl_rows(path)
-    assert verify_cli(capsys, legacy) == (0, f"OK: 2 records in 1 files, chain from {GENESIS} to {rows[-1]['hash']}, "
+    assert verify_cli(capsys, legacy) == (0, f"OK: 2 records in 1 file, chain from {GENESIS} to {rows[-1]['hash']}, "
                                              "2 unchained records skipped", "")
     legacy.write_text('{"ts":"old"}\n')
-    assert verify_cli(capsys, legacy)[:2] == (0, "OK: 0 records in 1 files, 1 unchained records skipped")
+    assert verify_cli(capsys, legacy)[:2] == (0, "OK: 0 records in 1 file, 1 unchained record skipped")
 
 
 def test_verify_several_files_in_order_and_in_the_wrong_order(tmp_path, capsys):

@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from mcp_airlock import Airlock, Policy
-from mcp_airlock.app import CONFIRM_KEY, META, TOKEN_PREFIX, UpstreamFailed, _b64, _unb64
+from mcp_airlock.app import CONFIRM_KEY, META, OOB_NOTE, TOKEN_PREFIX, UpstreamFailed, _b64, _unb64
 from mcp_airlock.audit import AuditLog
 from mcp_airlock.identity import IdentityConfig, Principal
 from mcp_airlock.store import MemoryStore
@@ -879,6 +879,17 @@ async def test_oob_prompt_says_the_client_cannot_approve(upstream, audit_path):
     msg = res["inputRequests"][CONFIRM_KEY]["params"]["message"]
     assert "confirming in the client does not approve" in msg and "Confirm to execute" not in msg
     assert res["requestState"] and CONFIRM_KEY in res["inputRequests"]  # shape unchanged
+    assert len(posted) == 1 and "does not approve" not in posted[0] and "Idempotency key:" in posted[0]
+
+
+async def test_oob_post_keeps_a_note_look_alike_in_the_arguments(upstream, audit_path):
+    posted: list[str] = []
+    al = webhook_airlock(upstream, audit_path, posted)
+    name = f"x{OOB_NOTE} y"
+    async with proxy_client(al) as c:
+        await call(c, "delete_service", {"name": name})
+    assert len(posted) == 1 and json.dumps({"name": name}) in posted[0]
+    assert "\nIdempotency key:" in posted[0]  # no note left before the key
 
 
 def replicas(upstream, tmp_path, posted: list, *modes: str) -> list[Airlock]:

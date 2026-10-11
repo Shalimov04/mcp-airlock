@@ -131,6 +131,10 @@ def _object(pairs: list[tuple[str, object]]) -> dict:
     return rec
 
 
+def _n(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
 def _record(line: bytes) -> dict:
     rec = json.loads(line, object_pairs_hook=_object)
     if not isinstance(rec, dict):
@@ -176,11 +180,11 @@ def verify(files: list[str]) -> tuple[bool, str]:
                 elif prev != last:
                     return False, at + "prev mismatch"
                 last, records = h, records + 1
-    msg = f"OK: {records} records in {len(files)} files"
+    msg = f"OK: {_n(records, 'record')} in {_n(len(files), 'file')}"
     if records:
         msg += f", chain from {first_prev} to {last}"
     if skipped:
-        msg += f", {skipped} unchained records skipped"
+        msg += f", {_n(skipped, 'unchained record')} skipped"
     return True, msg
 
 

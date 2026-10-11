@@ -117,6 +117,10 @@ def test_from_env(monkeypatch):
     monkeypatch.setenv("AIRLOCK_GROUPS_CLAIM", "roles")
     monkeypatch.setenv("AIRLOCK_TRUST_PRINCIPAL_HEADER", "0")
     assert IdentityConfig.from_env() == IdentityConfig(jwks_url="https://x/jwks", issuer="https://x", audience="a", groups_claim="roles")
+    monkeypatch.setenv("AIRLOCK_TRUST_PRINCIPAL_HEADER", "true")
+    cfg = IdentityConfig.from_env()
+    assert cfg.trust_header is False
+    assert cfg.trust_header_rejected == "true"
 
 
 @pytest.mark.parametrize("sub", ["", "   ", "\t\n"])

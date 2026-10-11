@@ -82,6 +82,10 @@ def test_header_trust_alone_is_fine():
     assert warn(IdentityConfig(trust_header=True)) == []
 
 
+def test_a_rejected_trust_header_value_is_named():
+    only(warn(IdentityConfig(jwt_secret=KEY32, trust_header_rejected="true")), "AIRLOCK_TRUST_PRINCIPAL_HEADER='true' is not accepted")
+
+
 def test_store_dsn_without_secret_warns():
     only(warn(store_dsn="postgresql://x", secret=None), "AIRLOCK_STORE_DSN")
     only(warn(store_dsn="postgresql://x", secret=""), "AIRLOCK_STORE_DSN")
@@ -262,6 +266,7 @@ def test_a_good_configuration_prints_nothing(monkeypatch, capsys):
     ({**GOOD_ENV, "AIRLOCK_JWKS_URL": "https://idp/jwks"}, "AIRLOCK_JWT_AUDIENCE"),
     ({**GOOD_ENV, "AIRLOCK_JWT_SECRET": "k" * 31}, "AIRLOCK_JWT_SECRET"),
     ({**GOOD_ENV, "AIRLOCK_TRUST_PRINCIPAL_HEADER": "1"}, "AIRLOCK_TRUST_PRINCIPAL_HEADER"),
+    ({**GOOD_ENV, "AIRLOCK_TRUST_PRINCIPAL_HEADER": "true"}, "AIRLOCK_TRUST_PRINCIPAL_HEADER='true'"),
     ({"AIRLOCK_JWT_SECRET": KEY32, "AIRLOCK_STORE_DSN": "postgresql://x"}, "AIRLOCK_STORE_DSN"),
     ({**GOOD_ENV, "AIRLOCK_SECRET": "", "AIRLOCK_STORE_DSN": "postgresql://x"}, "AIRLOCK_STORE_DSN"),
     ({**GOOD_ENV, "AIRLOCK_SECRET": "s"}, "AIRLOCK_SECRET is set without AIRLOCK_STORE_DSN"),

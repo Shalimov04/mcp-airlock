@@ -28,17 +28,21 @@ class IdentityConfig:
     audience: str | None = None
     groups_claim: str = "groups"
     trust_header: bool = False
+    trust_header_rejected: str | None = None
 
     @classmethod
     def from_env(cls) -> IdentityConfig:
         env = os.environ.get
+        raw_trust = env("AIRLOCK_TRUST_PRINCIPAL_HEADER")
+        rejected = raw_trust if raw_trust not in (None, "", "0", "1") else None
         return cls(
             jwt_secret=env("AIRLOCK_JWT_SECRET") or None,
             jwks_url=env("AIRLOCK_JWKS_URL") or None,
             issuer=env("AIRLOCK_JWT_ISSUER") or None,
             audience=env("AIRLOCK_JWT_AUDIENCE") or None,
             groups_claim=env("AIRLOCK_GROUPS_CLAIM") or "groups",
-            trust_header=env("AIRLOCK_TRUST_PRINCIPAL_HEADER", "0") == "1",  # opt-in: the header also carries groups
+            trust_header=raw_trust == "1",  # opt-in: the header also carries groups
+            trust_header_rejected=rejected,
         )
 
 
