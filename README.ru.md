@@ -53,14 +53,15 @@ AIRLOCK_TRUST_PRINCIPAL_HEADER=1 uvx mcp-airlock --policy policy.yaml --upstream
 То же в контейнере:
 
 ```
-docker run --rm -p 9000:9000 -e AIRLOCK_TRUST_PRINCIPAL_HEADER=1 \
+docker run --rm -p 127.0.0.1:9000:9000 -e AIRLOCK_TRUST_PRINCIPAL_HEADER=1 \
   -v $PWD/policy.yaml:/data/policy.yaml \
   --add-host=host.docker.internal:host-gateway \
   ghcr.io/shalimov04/mcp-airlock:0.4 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
-`AIRLOCK_TRUST_PRINCIPAL_HEADER=1` позволяет передавать `X-Airlock-Principal: alice` при локальной разработке; без настройки принципала запросы возвращают HTTP 401. Для продакшена настройте JWT или JWKS (см. [README.md](README.md#identity)).
-
+`AIRLOCK_TRUST_PRINCIPAL_HEADER=1` берёт вызывающего из заголовка `X-Airlock-Principal: alice`;
+это годится для ноутбука, а в общей среде нужен JWT (см.
+[README.md](README.md#environment-variables)). Без настроенной личности любой вызов вернёт 401.
 
 Минимальная политика:
 

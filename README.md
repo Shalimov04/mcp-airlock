@@ -54,15 +54,20 @@ The proxy accepts three methods: `tools/call` as above, `tools/list` and `server
 A `tools/list` answer is cut down to the tools the policy lists for the caller (the number of
 hidden tools is in `_meta["io.mcp-airlock/hidden_tools"]`), then checked against the
 [pins](#pinning-tool-descriptions) and scanned for injection phrases. Any other method is
-refused with `METHOD_NOT_FOUND` (HTTP 404 / `-32601`, including legacy `initialize`).
+refused with `METHOD_NOT_FOUND`.
 
-### Raw HTTP answers
+### Protocol-level answers
 
-* **Missing principal**: HTTP 401 / `-32011` (`PRINCIPAL_REQUIRED`) when no JWT or trusted `X-Airlock-Principal` is present.
-* **Unproxied method**: HTTP 404 / `-32601` (`METHOD_NOT_FOUND`) for any method outside `tools/call`, `tools/list`, and `server/discover`.
-* **Envelope & routing checks**: The 2026-07-28 `_meta` envelope and routing header checks (`Mcp-Method`, `Mcp-Name`, duplicate headers: `-32602`, `-32020`) run before identity resolution.
-* **Forwarded requestState**: A `requestState` without the `al1.` prefix is forwarded as an upstream-owned state parameter, so a damaged or truncated token is treated as a new call.
-
+* **Missing principal**: HTTP 401 / `-32011` (`PRINCIPAL_REQUIRED`) when there is no JWT and no
+  trusted `X-Airlock-Principal` header.
+* **Unproxied method**: HTTP 404 / `-32601` (`METHOD_NOT_FOUND`) for anything but `tools/call`,
+  `tools/list` and `server/discover`, including legacy `initialize`.
+* **Order**: protocol rejections (`-32700`, `-32600`, `-32602`, `-32020`, all HTTP 400, and
+  `-32601`/404) are answered before the missing-principal 401, so an unauthenticated client can
+  tell a malformed request from a refused one. These cover the 2026-07-28 `_meta` envelope and
+  the `Mcp-Method`/`Mcp-Name` header checks.
+* **Forwarded `requestState`**: one without the `al1.` prefix is forwarded as upstream state, so
+  a token that lost its `al1.` prefix is treated as a new call.
 
 ## Installing
 
@@ -112,14 +117,15 @@ AIRLOCK_TRUST_PRINCIPAL_HEADER=1 uvx mcp-airlock --policy policy.yaml --upstream
 The same as a container:
 
 ```
-docker run --rm -p 9000:9000 -e AIRLOCK_TRUST_PRINCIPAL_HEADER=1 \
+docker run --rm -p 127.0.0.1:9000:9000 -e AIRLOCK_TRUST_PRINCIPAL_HEADER=1 \
   -v $PWD/policy.yaml:/data/policy.yaml \
   --add-host=host.docker.internal:host-gateway \
   ghcr.io/shalimov04/mcp-airlock:0.4 --policy policy.yaml --upstream http://host.docker.internal:8080/mcp --env prod
 ```
 
-`AIRLOCK_TRUST_PRINCIPAL_HEADER=1` enables local development using the `X-Airlock-Principal: alice` header from curl or your client; without identity configured, calls return HTTP 401. For production environments, see [Identity](#identity) below for JWT and JWKS configuration.
-
+`AIRLOCK_TRUST_PRINCIPAL_HEADER=1` takes the caller from an `X-Airlock-Principal: alice`
+header, which is fine on a laptop; anywhere shared use a JWT instead (see
+[Environment variables](#environment-variables)). With no identity set, every call is 401.
 
 `--add-host` gives Docker Engine on Linux the `host.docker.internal` name that Docker Desktop
 provides by itself. The upstream has to listen on an address the container can reach, not only

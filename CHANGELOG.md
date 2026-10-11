@@ -9,6 +9,9 @@
 
 ### Fixed
 
+* The quick-start examples set `AIRLOCK_TRUST_PRINCIPAL_HEADER=1` (without identity every call was
+  401); the README states the raw HTTP/JSON-RPC answers and that the confirmation hash leaves out
+  `dry_run` (#101).
 * A failed `SIGHUP` policy reload was reported twice on stderr. It is now one `mcp-airlock: `
   prefixed line from a single stderr handler, and other `mcp_airlock` warnings gain the prefix.
 * The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII
