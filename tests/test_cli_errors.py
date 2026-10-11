@@ -4,6 +4,8 @@ The proxy is run as a process, as the bugs were found."""
 from __future__ import annotations
 
 import argparse
+import io
+import logging
 import os
 import signal
 import socket
@@ -17,14 +19,18 @@ import pytest
 from mcp_airlock import __main__ as cli
 
 from .conftest import ROOT
+from .test_reload import needs_sighup
 
 EXAMPLE = ROOT / "policy.example.yaml"
 EXPORTER = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
 
 
+def clean_env() -> dict:
+    return {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "AIRLOCK_"))}
+
+
 def run_airlock(*argv, env=None):
-    clean = {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "AIRLOCK_"))}
-    return subprocess.run([sys.executable, "-m", "mcp_airlock", *argv], env={**clean, **(env or {})},
+    return subprocess.run([sys.executable, "-m", "mcp_airlock", *argv], env={**clean_env(), **(env or {})},
                           capture_output=True, text=True, timeout=120)
 
 
@@ -139,22 +145,17 @@ def test_a_policy_without_environment_is_a_validation_message_not_a_traceback(tm
     assert r.returncode == 1 and "Traceback" not in r.stderr and "environment" in error_text(r.stderr), r.stderr
 
 
-needs_sighup = pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="no SIGHUP on this platform")
-
-
 @needs_sighup
-@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals")
 def test_sighup_reload_failure_is_one_line_on_stderr(tmp_path):
     policy = tmp_path / "policy.yaml"
     policy.write_text(EXAMPLE.read_text())
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    clean = {k: v for k, v in os.environ.items() if not k.startswith(("OTEL_", "AIRLOCK_"))}
     proc = subprocess.Popen(
         [sys.executable, "-m", "mcp_airlock", "--policy", str(policy), "--upstream", "http://127.0.0.1:9/mcp",
          "--audit", str(tmp_path / "audit.jsonl"), "--port", str(port)],
-        env=clean, stderr=subprocess.PIPE, text=True)
+        env=clean_env(), stderr=subprocess.PIPE, text=True)
     try:
         base = f"http://127.0.0.1:{port}"
         deadline = time.time() + 15
@@ -170,10 +171,10 @@ def test_sighup_reload_failure_is_one_line_on_stderr(tmp_path):
         os.kill(proc.pid, signal.SIGHUP)
         time.sleep(1.0)
         proc.terminate()
-        stderr = proc.stderr.read()
-        proc.wait(timeout=10)
-        needle = "mcp-airlock: policy reload failed, keeping the current policy:"
-        assert stderr.count(needle) == 1, stderr
+        _, stderr = proc.communicate(timeout=30)
+        lines = [ln for ln in stderr.splitlines() if "policy reload failed, keeping the current policy:" in ln]
+        assert len(lines) == 1 and lines[0].startswith("mcp-airlock: "), stderr
+        assert "Traceback" not in stderr, stderr
     finally:
         proc.kill()
         proc.wait()
@@ -186,3 +187,14 @@ def test_only_the_policy_raises_yaml_and_validation_errors_inside_build():
     src = ROOT / "src" / "mcp_airlock"
     users = {p.name for p in src.glob("*.py") if "BaseModel" in p.read_text()}
     assert users <= {"policy.py"}, users
+
+
+def test_configure_logging_keeps_tracebacks_behind_the_prefix():
+    buf = io.StringIO()
+    cli.configure_logging(buf)
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        logging.getLogger("mcp_airlock").exception("airlock internal error")
+    out = buf.getvalue()
+    assert out.startswith("mcp-airlock: airlock internal error\n") and "Traceback" in out and "ValueError: boom" in out, out

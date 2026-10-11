@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,12 @@ _provider.add_span_processor(SimpleSpanProcessor(SPANS))
 trace.set_tracer_provider(_provider)
 V = "2026-07-28"
 ENVELOPE = {"io.modelcontextprotocol/protocolVersion": V, "io.modelcontextprotocol/clientCapabilities": {}}
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_log_handlers():
+    yield
+    logging.getLogger("mcp_airlock").handlers.clear()  # a handler on a closed capture stream prints "Logging error"
 
 
 @pytest.fixture

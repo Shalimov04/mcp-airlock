@@ -26,17 +26,11 @@ FAILURE = "mcp-airlock: policy reload failed, keeping the current policy: "
 
 @pytest.fixture
 def stderr_logging():
-    """Match the CLI log format without fighting pytest's stderr capture."""
+    """The CLI log handler writing to a buffer, so a test sees exactly what the CLI would print."""
     buf = io.StringIO()
-    logger = logging.getLogger("mcp_airlock")
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-    logger.propagate = True
     cli.configure_logging(buf)
     yield buf
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-    logger.propagate = True
+    logging.getLogger("mcp_airlock").handlers.clear()
 
 
 def policy_data() -> dict:
@@ -139,7 +133,7 @@ async def test_an_old_format_pins_file_keeps_the_old_pins(upstream, audit_path, 
     assert al.pins is pins
 
 
-async def test_reload_is_reported_on_stderr_once_and_never_audited(upstream, audit_path, tmp_path, stderr_logging):
+async def test_reload_is_reported_on_stderr_once_and_never_audited(upstream, audit_path, tmp_path, stderr_logging, capsys):
     al = reloadable(upstream, audit_path, tmp_path)
     data = policy_data()
     del data["tools"]["get_service"]
@@ -151,6 +145,7 @@ async def test_reload_is_reported_on_stderr_once_and_never_audited(upstream, aud
     err = stderr_logging.getvalue().split(SUCCESS.format(5, 6), 1)[1]
     assert err.startswith(FAILURE) and err.count("\n") == 1  # one line via the configured handler
     assert err.count("policy reload failed, keeping the current policy: ") == 1
+    assert capsys.readouterr().err == ""  # nothing bypasses the logger
     assert audit_rows(audit_path) == []
 
 
@@ -169,7 +164,7 @@ def broken_where(data: dict, rule: dict | None = None) -> str:
     ("regex RE2 cannot run", broken_where(policy_data(), {"arg": "name", "regex": "(?=a)a"}), "RE2 syntax"),
     ("tools is a string", yaml.safe_dump({**policy_data(), "tools": "all"}), "tools"),
 ])
-async def test_a_file_that_does_not_load_keeps_the_old_policy(upstream, audit_path, tmp_path, stderr_logging, name, body, expect):
+async def test_a_file_that_does_not_load_keeps_the_old_policy(upstream, audit_path, tmp_path, stderr_logging, capsys, name, body, expect):
     al = reloadable(upstream, audit_path, tmp_path)
     engine, pins = al.engine, al.pins
     write_policy(tmp_path / "policy.yaml", body)
@@ -179,6 +174,7 @@ async def test_a_file_that_does_not_load_keeps_the_old_policy(upstream, audit_pa
         assert expect in r.error
     assert al.engine is engine and al.pins is pins
     assert stderr_logging.getvalue() == FAILURE + r.error + "\n"
+    assert capsys.readouterr().err == ""
     async with proxy(al) as c:
         assert (await call(c, "get_service", {"name": "api"}))["_meta"][META + "rule_id"] == "tier.L0.read"
 

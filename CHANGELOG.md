@@ -9,6 +9,8 @@
 
 ### Fixed
 
+* A failed `SIGHUP` policy reload was reported twice on stderr. It is now one `mcp-airlock: `
+  prefixed line from a single stderr handler, and other `mcp_airlock` warnings gain the prefix.
 * The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII
   and about 0.3 s for 4-byte characters (RE2 costs per byte); the cap itself is unchanged.
 
