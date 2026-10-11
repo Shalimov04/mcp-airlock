@@ -830,7 +830,8 @@ class Airlock:
         if not self.webhook:
             return
         message = result["inputRequests"][CONFIRM_KEY]["params"]["message"]
-        human_text = message.replace(OOB_NOTE + " ", "", 1)
+        head, sep, tail = message.rpartition(OOB_NOTE + " ")  # the last one: the note sits just before the key, arguments may hold it
+        human_text = head + tail if sep else message
         stored = human_text.replace("\x00", "")  # Postgres text cannot hold NUL
         if len(stored) > PROMPT_TEXT_MAX:  # say so on the page: the cut can hide the target argument and the preview
             stored = stored[:PROMPT_TEXT_MAX - len(PROMPT_CUT_NOTE)] + PROMPT_CUT_NOTE
