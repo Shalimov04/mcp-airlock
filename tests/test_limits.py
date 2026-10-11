@@ -181,6 +181,38 @@ async def test_oversize_tools_list_is_a_502(audit_path):
     assert (outcome["phase"], outcome["rule_id"], outcome["upstream_status"]) == ("outcome", "upstream.too_large", 200)
 
 
+# ---------------------------------------------------------------- reply nesting limit
+def nested_answer(depth: int, *, sse: bool = False):
+    """A tools/call answer whose result is nested `depth` levels deep (dicts count too)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        rid = json.loads(request.content)["id"]
+        nested = 1
+        for _ in range(depth - 3):  # envelope: reply/result/structuredContent dicts
+            nested = [nested]
+        msg = json.dumps({"jsonrpc": "2.0", "id": rid, "result": {
+            "resultType": "complete", "content": [{"type": "text", "text": "ok"}],
+            "structuredContent": {"v": nested}}})
+        ctype = "text/event-stream" if sse else "application/json"
+        body = f"event: message\ndata: {msg}\n\n".encode() if sse else msg.encode()
+        return httpx.Response(200, content=body, headers={"content-type": ctype})
+    return handler
+
+
+@pytest.mark.parametrize("sse", [False, True])
+async def test_reply_nested_at_64_levels_passes_and_past_it_is_bad_reply(audit_path, sse):
+    ok = fake_airlock(audit_path, nested_answer(64, sse=sse))
+    bad = fake_airlock(audit_path, nested_answer(100, sse=sse))
+    async with serving(ok) as c:
+        good = await call(c, "get_service", {"name": "api"})
+    async with serving(bad) as c:
+        res = await call(c, "get_service", {"name": "api"})
+    assert not good.get("isError"), good
+    assert res["isError"] is True and res["_meta"][META + "rule_id"] == "upstream.bad_reply", res
+    assert "nested deeper than 64 levels" in res["content"][0]["text"] and "the call itself may have run" in res["content"][0]["text"]
+    outcomes = [x for x in audit_rows(audit_path) if x["phase"] == "outcome" and x["rule_id"] == "upstream.bad_reply"]
+    assert len(outcomes) == 1 and outcomes[0]["verdict"] == "error" and outcomes[0]["upstream_status"] == 200, outcomes
+
+
 async def test_oversize_catalog_fetch_fails_closed_as_catalog_unavailable(audit_path):
     seen: list[str] = []
 

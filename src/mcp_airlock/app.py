@@ -706,6 +706,7 @@ class Airlock:
             reply = _last_sse_message(raw.decode("utf-8", errors="replace"), body["id"])
             if reply is None:
                 raise UpstreamFailed("upstream.bad_reply", "upstream SSE stream ended without a response", sent=True, status=r.status_code)
+            _refuse_deep_reply(reply, r.status_code)
             return r.status_code, reply
         try:
             # The same strictness as for the request: NaN (what Python's json.dumps emits for float('nan')) or a reply
@@ -716,6 +717,7 @@ class Airlock:
                                  sent=True, status=r.status_code) from None
         if not isinstance(reply, dict):
             raise UpstreamFailed("upstream.bad_reply", "upstream returned a non-object", sent=True, status=r.status_code)
+        _refuse_deep_reply(reply, r.status_code)
         return r.status_code, reply
 
     def _filter_tools(self, result: dict[str, Any], who: Principal, policy: Policy) -> None:
@@ -981,6 +983,13 @@ def _last_sse_message(text: str, rid: Any) -> dict[str, Any] | None:
         if isinstance(msg, dict) and "method" not in msg and ("result" in msg or "error" in msg) and msg.get("id") == rid:
             found = msg
     return found
+
+
+def _refuse_deep_reply(reply: dict[str, Any], status: int | None) -> None:
+    """Replies get the same 64-level nesting limit as requests (README, 0.4.0 CHANGELOG)."""
+    if _depth(reply) > MAX_DEPTH:
+        raise UpstreamFailed("upstream.bad_reply", f"upstream reply nested deeper than {MAX_DEPTH} levels",
+                             sent=True, status=status)
 
 
 def _upstream_meta(result: dict[str, Any]) -> dict[str, Any]:
