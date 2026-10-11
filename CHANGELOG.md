@@ -17,6 +17,9 @@
 * An upstream reply nested deeper than 64 levels was forwarded and audited as `allow`, although the
   README promised `upstream.bad_reply`. It is now refused as `upstream.bad_reply` on both the JSON
   and the SSE path, before anything recurses over it.
+* `--upstream` is validated at startup: a value that is not an `http://` or `https://` URL with a
+  host exits with status 2 and an argparse error instead of starting normally and failing every
+  call as `upstream.unreachable` (#105).
 * A failed `SIGHUP` policy reload was reported twice on stderr. It is now one `mcp-airlock: `
   prefixed line from a single stderr handler, and other `mcp_airlock` warnings gain the prefix.
 * The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII

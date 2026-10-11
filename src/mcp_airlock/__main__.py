@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Callable
 from typing import TextIO
+from urllib.parse import urlsplit
 
 import uvicorn
 import yaml
@@ -95,6 +96,18 @@ def _port(text: str) -> int:
     return n
 
 
+def _upstream(text: str) -> str:
+    # only the form; an unreachable host stays a runtime upstream.unreachable
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        parts = None
+    if parts is None or parts.scheme not in ("http", "https") or not parts.hostname:
+        raise argparse.ArgumentTypeError(
+            f"expected an http:// or https:// URL, got {text!r}")
+    return text
+
+
 def configure_logging(stream: TextIO | None = None) -> None:
     """Every mcp_airlock log record is one prefixed stderr line (a traceback follows its record)."""
     handler = logging.StreamHandler(stream or sys.stderr)
@@ -115,7 +128,7 @@ def main() -> None:
     configure_logging()
     ap = argparse.ArgumentParser(prog="mcp-airlock")
     ap.add_argument("--policy", required=True)
-    ap.add_argument("--upstream", required=True, help="upstream MCP endpoint, e.g. http://127.0.0.1:9001/mcp")
+    ap.add_argument("--upstream", required=True, type=_upstream, help="upstream MCP endpoint, e.g. http://127.0.0.1:9001/mcp")
     ap.add_argument("--env", default=None, help="environment name; overrides policy.environment / AIRLOCK_ENV")
     ap.add_argument("--audit", default="audit.jsonl")
     ap.add_argument("--audit-max-bytes", type=_int_min(0), default=None, help="rotate the audit file before a write would pass this size; 0 or unset: never")
