@@ -93,6 +93,23 @@ def test_port_type_rejects_out_of_range_and_non_integers(text):
     assert cli._port("0") == 0 and cli._port("65535") == 65535
 
 
+@pytest.mark.parametrize("bad_url", ["not-a-url", "ftp://x/mcp", "http://", "https:///path"])
+def test_upstream_not_http_or_https_url_is_refused_by_the_parser(tmp_path, bad_url):
+    r = run_airlock("--policy", str(EXAMPLE), "--upstream", bad_url, "--audit", str(tmp_path / "a.jsonl"),
+                    "--port", "0")
+    assert r.returncode == 2 and "Traceback" not in r.stderr, r.stderr
+    assert f"--upstream: expected an http:// or https:// URL, got {bad_url!r}" in r.stderr
+
+
+@pytest.mark.parametrize("text", ["not-a-url", "ftp://x/mcp", "http://", "https:///path"])
+def test_upstream_type_rejects_invalid_urls(text):
+    with pytest.raises(argparse.ArgumentTypeError) as e:
+        cli._upstream_url(text)
+    assert f"expected an http:// or https:// URL, got {text!r}" in str(e.value)
+    assert cli._upstream_url("http://127.0.0.1:9001/mcp") == "http://127.0.0.1:9001/mcp"
+    assert cli._upstream_url("https://example.com/mcp") == "https://example.com/mcp"
+
+
 def test_airlock_debug_keeps_the_traceback(tmp_path):
     r = run_airlock("--policy", str(tmp_path / "nope.yaml"), "--upstream", "http://127.0.0.1:1/mcp", "--audit",
                     str(tmp_path / "a.jsonl"), env={"AIRLOCK_DEBUG": "1"})

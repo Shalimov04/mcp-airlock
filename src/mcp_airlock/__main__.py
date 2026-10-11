@@ -6,6 +6,7 @@ import argparse
 import logging
 import os
 import sys
+import urllib.parse
 from collections.abc import Callable
 from typing import TextIO
 
@@ -95,6 +96,13 @@ def _port(text: str) -> int:
     return n
 
 
+def _upstream_url(text: str) -> str:
+    parts = urllib.parse.urlsplit(text)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise argparse.ArgumentTypeError(f"expected an http:// or https:// URL, got {text!r}")
+    return text
+
+
 def configure_logging(stream: TextIO | None = None) -> None:
     """Every mcp_airlock log record is one prefixed stderr line (a traceback follows its record)."""
     handler = logging.StreamHandler(stream or sys.stderr)
@@ -115,7 +123,7 @@ def main() -> None:
     configure_logging()
     ap = argparse.ArgumentParser(prog="mcp-airlock")
     ap.add_argument("--policy", required=True)
-    ap.add_argument("--upstream", required=True, help="upstream MCP endpoint, e.g. http://127.0.0.1:9001/mcp")
+    ap.add_argument("--upstream", type=_upstream_url, required=True, help="upstream MCP endpoint, e.g. http://127.0.0.1:9001/mcp")
     ap.add_argument("--env", default=None, help="environment name; overrides policy.environment / AIRLOCK_ENV")
     ap.add_argument("--audit", default="audit.jsonl")
     ap.add_argument("--audit-max-bytes", type=_int_min(0), default=None, help="rotate the audit file before a write would pass this size; 0 or unset: never")
