@@ -9,6 +9,9 @@
 
 ### Fixed
 
+* An upstream reply nested deeper than 64 levels was forwarded and audited as `allow`, although the
+  README promised `upstream.bad_reply`. It is now refused as `upstream.bad_reply` on both the JSON
+  and the SSE path, before anything recurses over it.
 * A failed `SIGHUP` policy reload was reported twice on stderr. It is now one `mcp-airlock: `
   prefixed line from a single stderr handler, and other `mcp_airlock` warnings gain the prefix.
 * The documented worst case of a `where` regex at the 4096-character cap is about 0.13 s for ASCII

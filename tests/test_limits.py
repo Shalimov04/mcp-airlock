@@ -199,9 +199,10 @@ def nested_answer(depth: int, *, sse: bool = False):
 
 
 @pytest.mark.parametrize("sse", [False, True])
-async def test_reply_nested_at_64_levels_passes_and_past_it_is_bad_reply(audit_path, sse):
+@pytest.mark.parametrize("too_deep", [65, 100])
+async def test_reply_nested_at_64_levels_passes_and_past_it_is_bad_reply(audit_path, sse, too_deep):
     ok = fake_airlock(audit_path, nested_answer(64, sse=sse))
-    bad = fake_airlock(audit_path, nested_answer(100, sse=sse))
+    bad = fake_airlock(audit_path, nested_answer(too_deep, sse=sse))
     async with serving(ok) as c:
         good = await call(c, "get_service", {"name": "api"})
     async with serving(bad) as c:

@@ -1055,12 +1055,20 @@ def _finite_float(text: str) -> float:
 
 def _depth(value: Any) -> int:
     """Nesting depth of a decoded body, without recursion (the body may be deeper than the Python stack allows)."""
-    deepest, stack = 0, [(value, 0)]
-    while stack:
-        v, d = stack.pop()
-        if isinstance(v, (dict, list)):
-            deepest = max(deepest, d + 1)
-            stack.extend((c, d + 1) for c in (v.values() if isinstance(v, dict) else v))
+    deepest, level = 0, [value]
+    while level:
+        nxt: list[Any] = []
+        seen = False  # any container on this level
+        for v in level:
+            if type(v) is dict:
+                seen = True
+                nxt.extend(v.values())
+            elif type(v) is list:
+                seen = True
+                nxt.extend(v)
+        if not seen:
+            break
+        deepest, level = deepest + 1, nxt
     return deepest
 
 
