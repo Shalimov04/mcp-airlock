@@ -4,6 +4,8 @@
 
 ### Changed
 
+* `docs/clients.md` shows how the Python SDK passes identity and records the TypeScript SDK
+  client 2.3.1 (pinned to 2026-07-28) (#103).
 * The Docker images are built with a pinned uv 0.12.24, so the build no longer downloads an
   unlocked `uv_build` from PyPI.
 
