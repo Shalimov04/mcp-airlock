@@ -92,7 +92,8 @@ async with http, Client(
     result = await client.call_tool("delete_service", {"name": "api"})
 ```
 
-See [`examples/sdk_client_confirm.py`](../examples/sdk_client_confirm.py) for the complete runnable example.
+See [`examples/sdk_client_confirm.py`](../examples/sdk_client_confirm.py) for the complete
+runnable example.
 
 ### TypeScript
 
@@ -100,6 +101,8 @@ The client takes the header through the transport, declares `elicitation` and pi
 protocol version (see footnote 5 below):
 
 ```js
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+
 const client = new Client({ name: 'my-client', version: '1.0.0' },
   { capabilities: { elicitation: {} }, versionNegotiation: { mode: { pin: '2026-07-28' } } });
 client.setRequestHandler('elicitation/create', async (req) => ({ action: 'accept', content: { confirm: true } }));
@@ -108,7 +111,8 @@ const transport = new StreamableHTTPClientTransport(new URL('http://127.0.0.1:90
 await client.connect(transport);
 ```
 
-(The handler above accepts without asking anyone; show `req.params.message` to a person in a real client.)
+(The handler above accepts without asking anyone; show `req.params.message` to a person in a
+real client.)
 
 ## What the agent sees
 
@@ -143,7 +147,7 @@ inferred from vendor documentation.
 | MCP Python SDK (`mcp.client.Client`) | 2.3.0 (pinned in `uv.lock`), 2.2.0 | Only through the application's `elicitation_callback` [1] | Yes: `{"airlock-confirm": {"action": "accept", "content": {"confirm": true}}}` with the same `requestState`; the call ran once as `tier.L2.confirmed` | Yes: `mrtr.declined` comes back as a tool error; only the dry run reached the upstream | 2026-10-10 | [`examples/sdk_client_confirm.py`](../examples/sdk_client_confirm.py), [`tests/test_sdk_client.py`](../tests/test_sdk_client.py), `e2e/postgres/run.sh` scenarios 04 (accept) and 15 (`oob`) |
 | Claude Code | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
 | Cursor | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
-| MCP TypeScript SDK client | 2.3.1 | Only through the application's `elicitation/create` request handler (the client must declare `capabilities.elicitation`) [5] | Yes: L2 prompt shown, accept executes once as `tier.L2.confirmed` | Yes: `mrtr.declined` comes back as a tool error; only dry run reached upstream | 2026-10-10 | transcript below |
+| MCP TypeScript SDK client | 2.3.1 | Only through the application's `elicitation/create` request handler (the client must declare `capabilities.elicitation`) [5] | Yes: L2 prompt shown, accept executes once as `tier.L2.confirmed` | Yes: `mrtr.declined` comes back as a tool error; only the dry run reached the upstream | 2026-10-10 | transcript below |
 
 1. The SDK has no UI, so what the person sees is whatever the application's callback shows.
    Without a callback the call raises `MCPError` ("Elicitation not supported"), no retry is
@@ -157,10 +161,11 @@ inferred from vendor documentation.
 4. A client that answers accept automatically (an auto-approve setting, or a callback with no
    person behind it) defeats `L2` in `inband` mode. If you cannot be sure a person sees the
    prompt, use `oob` mode with a webhook.
-5. The client's default `versionNegotiation` is `legacy`, i.e. an `initialize` handshake, which
-   the proxy refuses (HTTP 404 / `-32601`). Pass `versionNegotiation: { mode: { pin:
-   '2026-07-28' } }` (observed); `mode: 'auto'` probes with `server/discover`, which the proxy
-   forwards, so it should work too but was not tested.
+5. The client's default `versionNegotiation` is `legacy`, i.e. an `initialize` handshake
+   without the `_meta` envelope, which the proxy refuses (HTTP 400 / `-32602`, "params._meta
+   must be an object carrying the required ... envelope keys"). Pass `versionNegotiation:
+   { mode: { pin: '2026-07-28' } }`; `mode: 'auto'` (probes with `server/discover`) also
+   worked.
 
 The Python SDK run in full (`uv run python examples/sdk_client_confirm.py`, stdout):
 
@@ -203,16 +208,22 @@ all expectations held
 ```
 
 The TypeScript SDK client 2.3.1 against the proxy (`--env prod`, a TypeScript SDK upstream with
-`pods_delete` at L2; stdout of a small script around the snippet above, the prompt line cut
-at 200 characters by the script, then the upstream's effects log):
+`pods_delete` at L2; stdout of a small script around the snippet above, then the upstream's
+effects log):
 
 ```text
 == accept
-  prompt: [prod] pods_delete: delete a pod (tier L2). | Arguments: {"namespace": "staging", "name": "tmp-ts-accept"} | Dry-run preview: would delete staging/tmp-ts-accept | Confirm to execute for real. Idempote
-  result: undefined deleted staging/tmp-ts-accept tier.L2.confirmed prompts=1
+  prompt: [prod] pods_delete: delete a pod (tier L2).
+          Arguments: {"namespace": "staging", "name": "tmp-ts-accept"}
+          Dry-run preview: would delete staging/tmp-ts-accept
+          Confirm to execute for real. Idempotency key: 0a4650ab2c3f49118f697733c41b4ef3
+  result: isError=false rule_id=tier.L2.confirmed text="deleted staging/tmp-ts-accept" prompts=1
 == decline
-  prompt: [prod] pods_delete: delete a pod (tier L2). | Arguments: {"namespace": "staging", "name": "tmp-ts-decline"} | Dry-run preview: would delete staging/tmp-ts-decline | Confirm to execute for real. Idempo
-  result: true airlock: denied (mrtr.declined) mrtr.declined prompts=1
+  prompt: [prod] pods_delete: delete a pod (tier L2).
+          Arguments: {"namespace": "staging", "name": "tmp-ts-decline"}
+          Dry-run preview: would delete staging/tmp-ts-decline
+          Confirm to execute for real. Idempotency key: 48850aaac6214eb9ad9e016083c49be2
+  result: isError=true rule_id=mrtr.declined text="airlock: denied (mrtr.declined)" prompts=1
 == effects
 {"tool":"pods_delete","namespace":"staging","name":"tmp-ts-accept","dry_run":true}
 {"tool":"pods_delete","namespace":"staging","name":"tmp-ts-accept","dry_run":false}
