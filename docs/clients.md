@@ -67,6 +67,30 @@ tools were hidden (`io.mcp-airlock/hidden_tools`) and how many failed their pin
 Cursor picks the file up on save; the server appears under MCP in settings with its tool
 list.
 
+## Python SDK
+
+`mcp.client.Client(url)` takes no headers; to pass identity, wrap the URL in
+`streamable_http_client` with an `httpx.AsyncClient` that sets the header or bearer token:
+
+```python
+import httpx
+from mcp.client import Client
+from mcp.client.streamable_http import streamable_http_client
+
+# Laptop / dev with AIRLOCK_TRUST_PRINCIPAL_HEADER=1:
+http = httpx.AsyncClient(headers={"x-airlock-principal": "alice"})
+# Or production JWT:
+# http = httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"})
+
+async with http, Client(
+    streamable_http_client("http://127.0.0.1:9000/mcp", http_client=http),
+    elicitation_callback=elicit,
+) as client:
+    result = await client.call_tool("delete_service", {"name": "api"})
+```
+
+See [`examples/sdk_client_confirm.py`](../examples/sdk_client_confirm.py) for the complete runnable example.
+
 ## What the agent sees
 
 * A tool outside the policy, or over its blast radius, comes back as a tool result with
@@ -100,7 +124,7 @@ inferred from vendor documentation.
 | MCP Python SDK (`mcp.client.Client`) | 2.3.0 (pinned in `uv.lock`), 2.2.0 | Only through the application's `elicitation_callback` [1] | Yes: `{"airlock-confirm": {"action": "accept", "content": {"confirm": true}}}` with the same `requestState`; the call ran once as `tier.L2.confirmed` | Yes: `mrtr.declined` comes back as a tool error; only the dry run reached the upstream | 2026-10-10 | [`examples/sdk_client_confirm.py`](../examples/sdk_client_confirm.py), [`tests/test_sdk_client.py`](../tests/test_sdk_client.py), `e2e/postgres/run.sh` scenarios 04 (accept) and 15 (`oob`) |
 | Claude Code | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
 | Cursor | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
-| MCP TypeScript SDK client | - | not tested yet | not tested yet | not tested yet | - | contributions welcome |
+| MCP TypeScript SDK client | 2.3.1 | Only with `versionNegotiation: {mode: {pin: '2026-07-28'}}` [5] | Yes: L2 prompt shown, accept executes once as `tier.L2.confirmed` | Yes: `mrtr.declined` comes back as a tool error; only dry run reached upstream | 2026-10-10 | transcript below |
 
 1. The SDK has no UI, so what the person sees is whatever the application's callback shows.
    Without a callback the call raises `MCPError` ("Elicitation not supported"), no retry is
@@ -114,8 +138,10 @@ inferred from vendor documentation.
 4. A client that answers accept automatically (an auto-approve setting, or a callback with no
    person behind it) defeats `L2` in `inband` mode. If you cannot be sure a person sees the
    prompt, use `oob` mode with a webhook.
+5. Default legacy `initialize` is refused with HTTP 404 / `-32601` (`METHOD_NOT_FOUND`).
+   Client 2.3.1 works with `versionNegotiation: {mode: {pin: '2026-07-28'}}`.
 
-The SDK run in full (`uv run python examples/sdk_client_confirm.py`, stdout):
+The Python SDK run in full (`uv run python examples/sdk_client_confirm.py`, stdout):
 
 ```text
 == accept (mcp 2.3.0)
@@ -154,6 +180,23 @@ The SDK run in full (`uv run python examples/sdk_client_confirm.py`, stdout):
 
 all expectations held
 ```
+
+The TypeScript SDK run (Client 2.3.1):
+
+```text
+== TypeScript SDK client (2.3.1, pin 2026-07-28)
+  initialize: bypassed via pin 2026-07-28 (legacy initialize refused with -32601)
+  tools/call: delete_service {"name": "api"}
+  prompt: [prod] delete_service: permanently delete a service (irreversible) (tier L2).
+          Arguments: {"name": "api"}
+          Dry-run preview: would delete api
+          Confirm to execute for real.
+  accept retry: tools/call delete_service {"name": "api"} with requestState and inputResponses
+  result: isError=false text='DELETED api' (tier.L2.confirmed)
+  decline retry: inputResponses {"airlock-confirm": {"action": "decline"}}
+  result: isError=true text='airlock: denied (mrtr.declined)'
+```
+
 
 ### Adding a row
 
