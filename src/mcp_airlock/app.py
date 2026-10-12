@@ -455,13 +455,14 @@ class Airlock:
         result = reply.get("result")
         if isinstance(result, dict):
             _strip_meta(result)
+        detail = _upstream_reply_audit_detail(reply)
         if method == "tools/list" and isinstance(result, dict):
             for t in result.get("tools") if isinstance(result.get("tools"), list) else ():
                 if isinstance(t, dict):
                     _strip_meta(t)  # each tool has its own _meta; the pins leave it out, so this changes no hash
             self._filter_tools(result, who, policy)
             self._vet_tools(result, base, pins)
-        self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
+        self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
 
     async def _call(self, rid, body, params, headers, who: Principal, tool, args, base, span, engine: Engine) -> Response:
@@ -558,7 +559,7 @@ class Airlock:
             self._outcome(verdict="deny", rule_id=rule, tier=d.tier, dry_run=d.dry_run, upstream_status=status,
                           latency_ms=_ms(t0), detail=msg, **base)
             return _tool_error(rid, f"airlock: denied ({rule}): {msg}", rule)
-        detail: dict[str, Any] = {}
+        detail = _upstream_reply_audit_detail(reply)
         upstream_error = isinstance(result, dict) and bool(result.get("isError"))  # the cap sets isError too; gate on this
         if isinstance(result, dict):
             result["_meta"] = {**_upstream_meta(result), META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run}
@@ -580,6 +581,8 @@ class Airlock:
                 await self._notify(reply["result"], who.sub)
             elif d.verdict == "confirm" and upstream_error:  # preview failed: no gate, just the error
                 detail["no_prompt"] = "the dry run failed"
+        elif d.verdict == "confirm" and detail.get("upstream_error"):
+            detail["no_prompt"] = "the dry run failed"
         self._outcome(verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
                       upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
@@ -940,6 +943,21 @@ idempotency key <code>{html.escape(claims['k'])}</code></p>
         self.audit.write(phase="intent", verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
         self._outcome(verdict="allow", rule_id="mrtr.approved_oob", detail=detail, **base)
         return self._approve_html(f"Approved {tool} for {principal}. The agent can retry now.")
+
+
+def _upstream_reply_audit_detail(reply: dict[str, Any]) -> dict[str, Any]:
+    """Audit detail for an upstream JSON-RPC body that is not a normal tool result object."""
+    err = reply.get("error")
+    if isinstance(err, dict):
+        out: dict[str, Any] = {}
+        if "code" in err:
+            out["code"] = err["code"]
+        if "message" in err:
+            out["message"] = err["message"]
+        return {"upstream_error": out}
+    if "result" in reply and not isinstance(reply.get("result"), dict):
+        return {"upstream_result_type": type(reply["result"]).__name__}
+    return {}
 
 
 def _ms(t0: float) -> int:
