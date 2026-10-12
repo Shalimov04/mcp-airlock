@@ -251,6 +251,43 @@ async def test_a_locked_audit_table_does_not_hold_up_calls_or_healthz(upstream, 
     assert table_count(pg_dsn, call_id="after") == 1
 
 
+def test_postgres_sink_recreates_table_after_it_is_dropped(pg_dsn, caplog):
+    import psycopg
+    sink = PostgresAuditLog(pg_dsn)
+    sink.write(**dict(BASE, call_id="before_drop"))
+    assert sink.flush(10)
+    assert table_count(pg_dsn, call_id="before_drop") == 1
+
+    with psycopg.connect(pg_dsn, autocommit=True) as c:
+        c.execute("DROP TABLE airlock_audit")
+
+    with caplog.at_level(logging.WARNING, logger="mcp_airlock.audit"):
+        sink.write(**dict(BASE, call_id="after_drop"))
+        assert sink.flush(10)
+    sink.close()
+
+    assert "airlock_audit table is missing: creating the table again" in caplog.text
+    assert table_count(pg_dsn, call_id="after_drop") == 1
+
+
+def test_postgres_sink_logs_non_operational_error_as_one_warning_line(pg_dsn, caplog):
+    sink = PostgresAuditLog(pg_dsn)
+    sink.write(**dict(BASE, call_id="c1"))
+    assert sink.flush(10)
+
+    def bad_execute(*args, **kwargs):
+        raise ValueError("simulated non-operational error")
+
+    sink._conn.execute = bad_execute
+    with caplog.at_level(logging.WARNING, logger="mcp_airlock.audit"):
+        sink.write(**dict(BASE, call_id="c2"))
+        assert sink.flush(10)
+    sink.close()
+
+    assert "Postgres audit write dropped (the file has it): simulated non-operational error" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
 def test_close_gives_up_on_a_stuck_sink_within_the_deadline(pg_dsn, locked_table, monkeypatch, caplog):
     monkeypatch.setenv("AIRLOCK_STORE_CONNECT_TIMEOUT", "2")
     sink = PostgresAuditLog(pg_dsn)
