@@ -653,8 +653,9 @@ approve-page text and blast-radius counters have to live somewhere shared if you
 one replica; that is what `AIRLOCK_STORE_DSN` is for. `AIRLOCK_AUDIT_DSN` adds a Postgres sink
 for the audit log next to the file. Both need the `postgres` extra and may point at the same
 database. The tables (`airlock_keys`, `airlock_prompts`, `airlock_usage`, `airlock_audit`) are
-created on first use, and created again when a store call or `/readyz` finds them gone (a
-database recreated empty); until that works, `/readyz` says 503. The used confirmation keys
+created on first use, and created again when they are found gone (a database recreated empty):
+the store's three by a store call or `/readyz`, which says 503 until that works, and
+`airlock_audit` by the audit sink's next write. The used confirmation keys
 went with the database, so a confirmation used shortly before it was lost can be used once
 more within its TTL; the restart that used to be needed forgot them the same way.
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* The Postgres audit sink never created `airlock_audit` again once the table was gone (a database
+  recreated empty), so every record was dropped from the table with a traceback. A write that finds
+  the table missing now creates it and retries once, and a failed write is one warning line (#96).
+
 ## 0.4.1 - 2026-10-12
 
 ### Changed
