@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+* The README no longer says a last audit line edited into non-JSON is moved to `audit.jsonl.torn`:
+  only a fragment without its newline is moved, an edited line stays and `verify` reports it as
+  `not JSON`. The example records are real lines from `examples/audit.jsonl` (#99).
+
 ## 0.4.1 - 2026-10-12
 
 ### Changed
