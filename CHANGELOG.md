@@ -7,6 +7,9 @@
 * The Postgres audit sink never created `airlock_audit` again once the table was gone (a database
   recreated empty), so every record was dropped from the table with a traceback. A write that finds
   the table missing now creates it and retries once, and a failed write is one warning line (#96).
+* The README no longer says a last audit line edited into non-JSON is moved to `audit.jsonl.torn`:
+  only a fragment without its newline is moved, an edited line stays and `verify` reports it as
+  `not JSON`. The example records are real lines from `examples/audit.jsonl` (#99).
 
 ## 0.4.1 - 2026-10-12
 
