@@ -452,7 +452,16 @@ class Airlock:
         except UpstreamFailed as e:
             self._outcome(verdict="error", rule_id=e.rule, upstream_status=e.status, latency_ms=_ms(t0), detail=e.detail, **base)
             return _rpc_error(body["id"], INTERNAL_ERROR, f"airlock: {e.detail}", status=502)
-        result = reply.get("result")
+        detail: dict[str, Any] = {}
+        err = reply.get("error") if isinstance(reply, dict) else None
+        result = reply.get("result") if isinstance(reply, dict) else None
+        if isinstance(err, dict):
+            detail["upstream_error"] = {"code": err.get("code"), "message": err.get("message")}
+        elif err is not None:
+            detail["upstream_error"] = {"code": None, "message": str(err)}
+        elif not isinstance(result, dict):
+            detail["result_type"] = type(result).__name__
+
         if isinstance(result, dict):
             _strip_meta(result)
         if method == "tools/list" and isinstance(result, dict):
@@ -461,7 +470,8 @@ class Airlock:
                     _strip_meta(t)  # each tool has its own _meta; the pins leave it out, so this changes no hash
             self._filter_tools(result, who, policy)
             self._vet_tools(result, base, pins)
-        self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0), **base)
+        self._outcome(verdict="allow", rule_id="passthrough", upstream_status=status, latency_ms=_ms(t0),
+                      detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
 
     async def _call(self, rid, body, params, headers, who: Principal, tool, args, base, span, engine: Engine) -> Response:
@@ -559,7 +569,15 @@ class Airlock:
                           latency_ms=_ms(t0), detail=msg, **base)
             return _tool_error(rid, f"airlock: denied ({rule}): {msg}", rule)
         detail: dict[str, Any] = {}
-        upstream_error = isinstance(result, dict) and bool(result.get("isError"))  # the cap sets isError too; gate on this
+        err = reply.get("error") if isinstance(reply, dict) else None
+        if isinstance(err, dict):
+            detail["upstream_error"] = {"code": err.get("code"), "message": err.get("message")}
+        elif err is not None:
+            detail["upstream_error"] = {"code": None, "message": str(err)}
+        elif not isinstance(result, dict):
+            detail["result_type"] = type(result).__name__
+
+        upstream_error = (isinstance(result, dict) and bool(result.get("isError"))) or err is not None
         if isinstance(result, dict):
             result["_meta"] = {**_upstream_meta(result), META + "verdict": d.verdict, META + "rule_id": d.rule_id, META + "dry_run": d.dry_run}
             for block in result.get("content") if isinstance(result.get("content"), list) else ():
@@ -578,8 +596,10 @@ class Airlock:
             if d.verdict == "confirm" and status == 200 and not upstream_error:
                 reply["result"] = self._input_required(who.sub, tool, args, result, policy)
                 await self._notify(reply["result"], who.sub)
-            elif d.verdict == "confirm" and upstream_error:  # preview failed: no gate, just the error
+            elif d.verdict == "confirm":  # preview failed: no gate, just the error
                 detail["no_prompt"] = "the dry run failed"
+        elif d.verdict == "confirm":
+            detail["no_prompt"] = "the dry run failed"
         self._outcome(verdict=d.verdict, rule_id=d.rule_id, tier=d.tier, dry_run=d.dry_run,
                       upstream_status=status, latency_ms=_ms(t0), detail=detail or None, **base)
         return JSONResponse(reply, status_code=status)
