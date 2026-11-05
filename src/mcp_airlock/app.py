@@ -455,6 +455,11 @@ class Airlock:
         result = reply.get("result")
         if isinstance(result, dict):
             _strip_meta(result)
+            if method == "server/discover":
+                # Only tool methods cross the proxy; subscriptions and other upstream capabilities do not.
+                capabilities = result.get("capabilities")
+                tools = capabilities.get("tools") if isinstance(capabilities, dict) else None
+                result["capabilities"] = {"tools": {}} if isinstance(tools, dict) else {}
         if method == "tools/list" and isinstance(result, dict):
             for t in result.get("tools") if isinstance(result.get("tools"), list) else ():
                 if isinstance(t, dict):

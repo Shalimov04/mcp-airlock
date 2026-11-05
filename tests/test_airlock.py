@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from mcp_airlock.app import CONFIRM_KEY, META, PRINCIPAL_REQUIRED
 from mcp_airlock.identity import IdentityConfig
@@ -36,6 +37,7 @@ async def test_discover_and_list_passthrough(client, upstream):
     assert r.status_code == 200
     res = r.json()["result"]
     assert res["supportedVersions"] == ["2026-07-28"] and "ttlMs" in res and "cacheScope" in res
+    assert res["capabilities"] == {"tools": {}}  # no prompts, resources or change subscriptions
 
     r = await rpc(client, "tools/list")
     res = r.json()["result"]
@@ -43,6 +45,19 @@ async def test_discover_and_list_passthrough(client, upstream):
     assert names == {"list_services", "get_service", "set_replicas", "delete_service", "restart_service", "rotate_key"}  # rm_rf hidden
     assert res["_meta"][META + "hidden_tools"] == 1
     assert res["ttlMs"] == 0 and res["cacheScope"] == "private"  # passed through as-is, never cached
+
+
+@pytest.mark.parametrize("capabilities", [{}, {"resources": {}}, {"tools": None}, None])
+async def test_discover_does_not_invent_tools(client, airlock, capabilities):
+    async def post(url, *, content, headers):
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
+            "capabilities": capabilities, "supportedVersions": [V], "ttlMs": 0, "cacheScope": "private",
+        }})
+
+    patch_post(airlock, post)
+    response = await rpc(client, "server/discover")
+    assert response.status_code == 200
+    assert response.json()["result"]["capabilities"] == {}
 
 
 async def test_read_tool_passthrough_and_identity_propagation(client, upstream):
