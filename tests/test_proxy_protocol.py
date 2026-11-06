@@ -743,3 +743,131 @@ async def test_span_attributes_scrub_client_chosen_text(upstream, audit_path):
         assert "0123456789abcdef" not in text and "eyJabc" not in text
         assert span.attributes["enduser.id"].startswith("u ")
     assert spans[0].attributes["gen_ai.tool.name"].startswith("get_") and "[REDACTED]" in spans[0].attributes["gen_ai.tool.name"]
+
+
+# ---------------------------------------------------------------- upstream JSON-RPC errors and non-object results
+async def test_upstream_json_rpc_error_audited_with_detail_at_l0_and_l2(audit_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        rid = body.get("id")
+        method = body.get("method")
+        if method == "tools/list":
+            return json_response({"jsonrpc": "2.0", "id": rid, "result": {
+                "tools": [
+                    {"name": "get_service", "description": "get a service", "inputSchema": {"type": "object"}},
+                    {"name": "delete_service", "description": "delete a service",
+                     "inputSchema": {"type": "object", "properties": {"dry_run": {"type": "boolean"}}}}
+                ]
+            }})
+        return json_response({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "boom"}})
+
+    al = mock_airlock(audit_path, handler)
+    async with serving(al) as c:
+        # L0 call: passes through upstream error, audited as allow with upstream_error detail
+        r0 = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}})
+        assert r0.status_code == 200
+        assert r0.json()["error"] == {"code": -32000, "message": "boom"}
+        rows0 = audit_rows(audit_path)
+        outcome0 = rows0[-1]
+        assert outcome0["verdict"] == "allow"
+        assert outcome0["detail"]["upstream_error"] == {"code": -32000, "message": "boom"}
+        assert "no_prompt" not in outcome0["detail"]
+
+        # L2 call: dry run upstream errors, passes through error, no prompt/requestState, audited with no_prompt
+        r2 = await rpc(c, "tools/call", {"name": "delete_service", "arguments": {"name": "api"}})
+        assert r2.status_code == 200
+        assert r2.json()["error"] == {"code": -32000, "message": "boom"}
+        assert "requestState" not in r2.json()
+        assert "result" not in r2.json()
+        rows2 = audit_rows(audit_path)
+        outcome2 = rows2[-1]
+        assert outcome2["verdict"] == "confirm"
+        assert outcome2["detail"]["upstream_error"] == {"code": -32000, "message": "boom"}
+        assert outcome2["detail"]["no_prompt"] == "the dry run failed"
+
+
+async def test_upstream_confirmed_l2_error_audited_with_detail(upstream, audit_path):
+    al = make_airlock(upstream, audit_path)
+    orig = al.http.post
+
+    async def post(url, *, content, headers):
+        body = json.loads(content)
+        # Fail the confirmed execution with JSON-RPC error
+        if body.get("method") == "tools/call" and not body.get("params", {}).get("arguments", {}).get("dry_run"):
+            return httpx.Response(200, content=json.dumps({
+                "jsonrpc": "2.0", "id": body["id"], "error": {"code": -32000, "message": "upstream refusal"}
+            }).encode(), headers={"content-type": "application/json"})
+        return await orig(url, content=content, headers=headers)
+
+    patch_post(al, post)
+    async with serving(al) as c:
+        res = await call(c, "delete_service", {"name": "api"})
+        token = res["requestState"]
+        r_confirmed = await rpc(c, "tools/call", {"name": "delete_service", "arguments": {"name": "api"}, **accept(token)})
+        assert r_confirmed.json()["error"] == {"code": -32000, "message": "upstream refusal"}
+        outcome = audit_rows(audit_path)[-1]
+        assert outcome["verdict"] == "allow" and outcome["rule_id"] == "tier.L2.confirmed"
+        assert outcome["detail"]["upstream_error"] == {"code": -32000, "message": "upstream refusal"}
+
+
+async def test_upstream_non_object_result_audited_with_result_type(audit_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        rid = body.get("id")
+        method = body.get("method")
+        if method == "tools/list":
+            return json_response({"jsonrpc": "2.0", "id": rid, "result": {
+                "tools": [
+                    {"name": "get_service", "description": "get a service", "inputSchema": {"type": "object"}},
+                    {"name": "delete_service", "description": "delete a service",
+                     "inputSchema": {"type": "object", "properties": {"dry_run": {"type": "boolean"}}}}
+                ]
+            }})
+        return json_response({"jsonrpc": "2.0", "id": rid, "result": "plain text response"})
+
+    al = mock_airlock(audit_path, handler)
+    async with serving(al) as c:
+        # L0 call with non-dict result: passes through, audited as allow with result_type
+        r0 = await rpc(c, "tools/call", {"name": "get_service", "arguments": {"name": "api"}})
+        assert r0.status_code == 200
+        assert r0.json()["result"] == "plain text response"
+        outcome0 = audit_rows(audit_path)[-1]
+        assert outcome0["verdict"] == "allow"
+        assert outcome0["detail"]["result_type"] == "str"
+        assert "no_prompt" not in outcome0["detail"]
+
+        # L2 call with non-dict result: dry run passes through, no requestState, audited with no_prompt
+        r2 = await rpc(c, "tools/call", {"name": "delete_service", "arguments": {"name": "api"}})
+        assert r2.status_code == 200
+        assert r2.json()["result"] == "plain text response"
+        assert "requestState" not in r2.json()
+        outcome2 = audit_rows(audit_path)[-1]
+        assert outcome2["verdict"] == "confirm"
+        assert outcome2["detail"]["result_type"] == "str"
+        assert outcome2["detail"]["no_prompt"] == "the dry run failed"
+
+
+async def test_passthrough_upstream_error_and_non_object_audited_with_detail(audit_path):
+    # upstream answering tools/list with JSON-RPC error
+    al_err = mock_airlock(audit_path, lambda req: json_response({
+        "jsonrpc": "2.0", "id": json.loads(req.content)["id"], "error": {"code": -32603, "message": "catalog failed"}
+    }))
+    async with serving(al_err) as c:
+        r = await rpc(c, "tools/list")
+        assert r.status_code == 200
+        assert r.json()["error"] == {"code": -32603, "message": "catalog failed"}
+        outcome = audit_rows(audit_path)[-1]
+        assert outcome["verdict"] == "allow" and outcome["rule_id"] == "passthrough"
+        assert outcome["detail"]["upstream_error"] == {"code": -32603, "message": "catalog failed"}
+
+    # upstream answering tools/list with non-object result
+    al_nonobj = mock_airlock(audit_path, lambda req: json_response({
+        "jsonrpc": "2.0", "id": json.loads(req.content)["id"], "result": [1, 2, 3]
+    }))
+    async with serving(al_nonobj) as c:
+        r = await rpc(c, "tools/list")
+        assert r.status_code == 200
+        assert r.json()["result"] == [1, 2, 3]
+        outcome = audit_rows(audit_path)[-1]
+        assert outcome["verdict"] == "allow" and outcome["rule_id"] == "passthrough"
+        assert outcome["detail"]["result_type"] == "list"
